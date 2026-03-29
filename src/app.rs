@@ -87,8 +87,8 @@ impl DungeonApp {
         h.finish()
     }
 
-    fn solve_layout(&mut self) {
-        // Preserve user-placed bounds across re-solves
+    /// Full re-solve: recomputes all room positions and corridors from scratch.
+    pub fn solve_layout_full(&mut self) {
         let old_bounds = self.dungeon.layout.as_ref()
             .map(|l| l.bounds.clone())
             .unwrap_or_default();
@@ -101,6 +101,29 @@ impl DungeonApp {
                 self.dungeon.layout = Some(layout);
             }
             Err(e) => eprintln!("Layout solver error: {}", e),
+        }
+        self.last_graph_snapshot = self.graph_hash();
+    }
+
+    /// Incremental solve: keeps existing room positions, only places new rooms
+    /// and re-routes corridors.
+    fn solve_layout_incremental(&mut self) {
+        if let Some(existing) = &self.dungeon.layout {
+            let old_bounds = existing.bounds.clone();
+            match crate::solver::layout::solve_incremental(
+                &self.dungeon.graph,
+                existing,
+                self.spatial_state.density_gap,
+            ) {
+                Ok(mut layout) => {
+                    layout.bounds = old_bounds;
+                    self.dungeon.layout = Some(layout);
+                }
+                Err(e) => eprintln!("Incremental layout error: {}", e),
+            }
+        } else {
+            // No existing layout — do a full solve
+            self.solve_layout_full();
         }
         self.last_graph_snapshot = self.graph_hash();
     }
@@ -255,7 +278,7 @@ impl eframe::App for DungeonApp {
                         }
                         // Ensure layout exists
                         if self.dungeon.layout.is_none() && !self.dungeon.graph.rooms.is_empty() {
-                            self.solve_layout();
+                            self.solve_layout_full();
                         }
                     }
                 }
@@ -270,6 +293,13 @@ impl eframe::App for DungeonApp {
             });
         });
 
+        // Handle "Recompute All" request from sidebar
+        if self.spatial_state.recompute_requested {
+            self.spatial_state.recompute_requested = false;
+            self.solve_layout_full();
+            ctx.request_repaint();
+        }
+
         // Auto-solve layout when graph topology changes or first entering spatial/styled
         if !self.presenting {
             let current_hash = self.graph_hash();
@@ -279,7 +309,7 @@ impl eframe::App for DungeonApp {
                     || self.dungeon.layout.is_none()
                         && !self.dungeon.graph.rooms.is_empty())
             {
-                self.solve_layout();
+                self.solve_layout_incremental();
                 ctx.request_repaint();
             }
         }

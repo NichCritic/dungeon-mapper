@@ -449,6 +449,209 @@ pub fn solve_layout(
     Ok(state.layout)
 }
 
+/// Incremental layout update: only places new rooms and routes new corridors.
+/// Rooms already present in the layout keep their positions.
+/// Removed rooms/connections are cleaned up.
+pub fn solve_incremental(
+    graph: &DungeonGraph,
+    existing: &SpatialLayout,
+    gap: u32,
+) -> Result<SpatialLayout, String> {
+    if graph.rooms.is_empty() {
+        return Ok(SpatialLayout {
+            rooms: Vec::new(),
+            corridors: Vec::new(),
+            bounds: existing.bounds.clone(),
+        });
+    }
+
+    let existing_room_ids: HashSet<String> = existing.rooms.iter()
+        .map(|rl| rl.room_id.clone())
+        .collect();
+    let graph_room_ids: HashSet<String> = graph.rooms.iter()
+        .map(|r| r.id.clone())
+        .collect();
+
+    // Keep rooms that still exist in the graph
+    let mut layout = SpatialLayout {
+        rooms: existing.rooms.iter()
+            .filter(|rl| graph_room_ids.contains(&rl.room_id))
+            .cloned()
+            .collect(),
+        corridors: Vec::new(), // corridors will be re-routed
+        bounds: existing.bounds.clone(),
+    };
+
+    // Find new rooms that need placement
+    let new_room_ids: Vec<String> = graph.rooms.iter()
+        .filter(|r| !existing_room_ids.contains(&r.id))
+        .map(|r| r.id.clone())
+        .collect();
+
+    if !new_room_ids.is_empty() {
+        // Build placement state from existing rooms
+        let mut placed: HashSet<String> = layout.rooms.iter()
+            .map(|rl| rl.room_id.clone())
+            .collect();
+        let mut placed_rects: Vec<GridRect> = layout.rooms.iter()
+            .map(|rl| GridRect { x: rl.x, y: rl.y, w: rl.width, h: rl.height })
+            .collect();
+        let placed_rooms: Vec<(String, GridRect)> = layout.rooms.iter()
+            .map(|rl| (rl.room_id.clone(), GridRect { x: rl.x, y: rl.y, w: rl.width, h: rl.height }))
+            .collect();
+
+        let ctx = PlacementContext {
+            gap,
+            groups: &graph.groups,
+            connections: &graph.connections,
+            graph,
+        };
+
+        // Graph positions for hints
+        let graph_pos = &graph.graph_positions;
+        let scale = 0.05_f32;
+        let entrance = graph.rooms.iter()
+            .find(|r| r.tags.contains(&RoomTag::Entrance))
+            .unwrap_or(&graph.rooms[0]);
+        let entrance_graph_pos = graph_pos.get(&entrance.id).copied().unwrap_or((0.0, 0.0));
+
+        for room_id in &new_room_ids {
+            let room = graph.room_by_id(room_id).unwrap();
+            let (nw, nh) = room.grid_size();
+
+            // Find a placed neighbor to anchor placement
+            let anchor = graph.connections.iter()
+                .filter_map(|e| {
+                    let neighbor = if e.source_room_id == *room_id {
+                        &e.target_room_id
+                    } else if e.target_room_id == *room_id {
+                        &e.source_room_id
+                    } else {
+                        return None;
+                    };
+                    layout.room_by_id(neighbor).map(|rl| (rl, e.connection.corridor_width as i32))
+                })
+                .next();
+
+            let (cx, cy, cw, ch, cw_i) = if let Some((anchor_rl, corridor_w)) = anchor {
+                (anchor_rl.x, anchor_rl.y, anchor_rl.width, anchor_rl.height, corridor_w)
+            } else {
+                // No placed neighbor — place near origin
+                (0, 0, 4, 4, 2)
+            };
+
+            let g = gap as i32;
+
+            // Compute preferred position from graph hint
+            let (pref_x, pref_y) = if let Some(&(nx, ny)) = graph_pos.get(room_id.as_str()) {
+                let dx = (nx - entrance_graph_pos.0) * scale;
+                let dy = (ny - entrance_graph_pos.1) * scale;
+                (dx.round() as i32, dy.round() as i32)
+            } else {
+                (cx + cw as i32, cy)
+            };
+
+            // Build a temporary PlacementState for constraint checking
+            let mut all_placed_rooms = placed_rooms.clone();
+            for rl in &layout.rooms {
+                if !all_placed_rooms.iter().any(|pr| pr.0 == rl.room_id) {
+                    all_placed_rooms.push((rl.room_id.clone(), GridRect { x: rl.x, y: rl.y, w: rl.width, h: rl.height }));
+                }
+            }
+            let temp_state = PlacementState {
+                layout: SpatialLayout::new(),
+                placed: placed.clone(),
+                placed_rects: placed_rects.clone(),
+                placed_rooms: all_placed_rooms,
+            };
+
+            let mut did_place = false;
+            let orientations = if room.allow_rotation && nw != nh {
+                vec![(nw, nh), (nh, nw)]
+            } else {
+                vec![(nw, nh)]
+            };
+
+            'orient: for &(tw, th) in &orientations {
+                let mut candidates = Vec::new();
+                if g == 0 {
+                    candidates.extend_from_slice(&[
+                        (cx + cw as i32, cy),
+                        (cx, cy + ch as i32),
+                        (cx - tw as i32, cy),
+                        (cx, cy - th as i32),
+                    ]);
+                }
+                candidates.extend_from_slice(&[
+                    (cx + cw as i32 + g + cw_i, cy),
+                    (cx, cy + ch as i32 + g + cw_i),
+                    (cx - tw as i32 - g - cw_i, cy),
+                    (cx, cy - th as i32 - g - cw_i),
+                ]);
+                sort_by_preference(&mut candidates, pref_x, pref_y);
+
+                for &(px, py) in &candidates {
+                    let rect = GridRect { x: px, y: py, w: tw, h: th };
+                    if try_place(rect, room_id, &temp_state, &ctx) {
+                        layout.rooms.push(RoomLayout {
+                            room_id: room_id.clone(),
+                            x: px,
+                            y: py,
+                            width: tw,
+                            height: th,
+                            violations: Vec::new(),
+                        });
+                        placed.insert(room_id.clone());
+                        placed_rects.push(rect);
+                        did_place = true;
+                        break 'orient;
+                    }
+                }
+            }
+
+            // Fallback: try further out
+            if !did_place {
+                let (tw, th) = orientations[0];
+                'far: for om in 2..=10 {
+                    let mut extra = vec![
+                        (cx + (cw as i32 + g + cw_i) * om, cy),
+                        (cx, cy + (ch as i32 + g + cw_i) * om),
+                        (cx - (tw as i32 + g + cw_i) * om, cy),
+                        (cx, cy - (th as i32 + g + cw_i) * om),
+                    ];
+                    sort_by_preference(&mut extra, pref_x, pref_y);
+                    for &(px, py) in &extra {
+                        let rect = GridRect { x: px, y: py, w: tw, h: th };
+                        if !overlaps_any(rect, &placed_rects, gap) {
+                            layout.rooms.push(RoomLayout {
+                                room_id: room_id.clone(),
+                                x: px,
+                                y: py,
+                                width: tw,
+                                height: th,
+                                violations: Vec::new(),
+                            });
+                            placed.insert(room_id.clone());
+                            placed_rects.push(rect);
+                            did_place = true;
+                            break 'far;
+                        }
+                    }
+                }
+            }
+
+            if !did_place {
+                eprintln!("Warning: Could not incrementally place room '{}'", room.label);
+            }
+        }
+    }
+
+    // Route all corridors (re-route is cheap compared to placement)
+    layout.corridors = crate::solver::corridor::route_corridors(graph, &layout);
+
+    Ok(layout)
+}
+
 fn overlaps_any(rect: GridRect, rects: &[GridRect], gap: u32) -> bool {
     let g = gap as i32;
     for r in rects {

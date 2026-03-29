@@ -26,6 +26,8 @@ pub struct SpatialViewState {
     drag_target: DragTarget,
     drag_accum: egui::Vec2,
     pub density_gap: u32,
+    /// Set by sidebar "Recompute All" button, consumed by app.
+    pub recompute_requested: bool,
 }
 
 impl Default for SpatialViewState {
@@ -39,12 +41,58 @@ impl Default for SpatialViewState {
             drag_target: DragTarget::None,
             drag_accum: egui::Vec2::ZERO,
             density_gap: 0,
+            recompute_requested: false,
         }
     }
 }
 
+/// Fix diagonal segments by inserting corner waypoints.
+/// Does NOT remove collinear points — user-placed waypoints are preserved.
+fn resolve_diagonal_segments(waypoints: &mut Vec<GridPos>) {
+    let mut i = 0;
+    while i + 1 < waypoints.len() {
+        let a = waypoints[i];
+        let b = waypoints[i + 1];
+        if a.x != b.x && a.y != b.y {
+            let corner = GridPos { x: b.x, y: a.y };
+            waypoints.insert(i + 1, corner);
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+}
+
+/// Clean up auto-inserted corners (collinear/duplicate points) then
+/// re-insert corners for diagonals. Used during live drag to prevent
+/// phantom waypoint accumulation.
+fn resolve_diagonal_segments_clean(waypoints: &mut Vec<GridPos>) {
+    // Remove collinear points and duplicates (auto-inserted corners from
+    // previous frames that are no longer needed after the drag moved).
+    let mut i = 1;
+    while i + 1 < waypoints.len() {
+        let prev = waypoints[i - 1];
+        let curr = waypoints[i];
+        let next = waypoints[i + 1];
+
+        let collinear_x = prev.x == curr.x && curr.x == next.x;
+        let collinear_y = prev.y == curr.y && curr.y == next.y;
+        let duplicate = (curr.x == prev.x && curr.y == prev.y)
+            || (curr.x == next.x && curr.y == next.y);
+
+        if collinear_x || collinear_y || duplicate {
+            waypoints.remove(i);
+        } else {
+            i += 1;
+        }
+    }
+
+    resolve_diagonal_segments(waypoints);
+}
+
 const HANDLE_RADIUS: f32 = 5.0;
-const HANDLE_HIT_RADIUS: f32 = 8.0;
+/// Hit radius in screen pixels (fixed, does not scale with zoom).
+const HANDLE_HIT_RADIUS: f32 = 12.0;
 
 pub fn spatial_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut SpatialViewState) {
     let (response, painter) = ui.allocate_painter(
@@ -110,7 +158,7 @@ fn handle_spatial_interactions(
                             let wp_screen = transform.world_to_screen(
                                 egui::pos2(grid_to_world(wp.x), grid_to_world(wp.y)),
                             );
-                            if pos.distance(wp_screen) < HANDLE_HIT_RADIUS * state.view.zoom {
+                            if pos.distance(wp_screen) < HANDLE_HIT_RADIUS {
                                 state.selected_waypoint = Some(wi);
                                 state.drag_target = DragTarget::Waypoint(ci, wi);
                                 state.drag_accum = egui::Vec2::ZERO;
@@ -138,7 +186,7 @@ fn handle_spatial_interactions(
                             let screen_c = transform.world_to_screen(
                                 egui::pos2(grid_to_world(cx), grid_to_world(cy)),
                             );
-                            if pos.distance(screen_c) < HANDLE_HIT_RADIUS * state.view.zoom {
+                            if pos.distance(screen_c) < HANDLE_HIT_RADIUS {
                                 state.selected_group = Some(gi);
                                 state.drag_target = DragTarget::GroupCorner(gi, ci as u8);
                                 state.drag_accum = egui::Vec2::ZERO;
@@ -171,38 +219,42 @@ fn handle_spatial_interactions(
         }
     }
 
-    // === DOUBLE-CLICK — insert waypoint on selected corridor segment ===
+    // === DOUBLE-CLICK — insert waypoint on any corridor segment ===
     if response.double_clicked() {
         if let Some(pos) = response.hover_pos() {
             let world = transform.screen_to_world(pos);
-            if let Some(ci) = state.selected_corridor {
-                if let Some(layout) = &mut dungeon.layout {
-                    if ci < layout.corridors.len() {
-                        let corridor = &layout.corridors[ci];
-                        // Find which segment was double-clicked
-                        let mut best_seg: Option<(usize, f32)> = None;
-                        for (si, pair) in corridor.waypoints.windows(2).enumerate() {
-                            let a = egui::pos2(grid_to_world(pair[0].x), grid_to_world(pair[0].y));
-                            let b = egui::pos2(grid_to_world(pair[1].x), grid_to_world(pair[1].y));
-                            let dist = point_to_segment_dist(world, a, b);
-                            let threshold = (corridor.width as f32 * GRID_PX / 2.0 + 6.0) / state.view.zoom;
-                            if dist < threshold
-                                && best_seg.is_none_or(|(_, bd)| dist < bd)
-                            {
-                                best_seg = Some((si, dist));
-                            }
-                        }
-                        if let Some((si, _)) = best_seg {
-                            let new_wp = GridPos {
-                                x: world_to_grid(world.x),
-                                y: world_to_grid(world.y),
-                            };
-                            layout.corridors[ci].waypoints.insert(si + 1, new_wp);
-                            layout.corridors[ci].pinned_waypoints =
-                                layout.corridors[ci].waypoints.clone();
-                            state.selected_waypoint = Some(si + 1);
+            if let Some(layout) = &mut dungeon.layout {
+                // Search all corridors for the best hit
+                let mut best_hit: Option<(usize, usize, f32)> = None; // (corridor_idx, segment_idx, dist)
+                for (ci, corridor) in layout.corridors.iter().enumerate() {
+                    for (si, pair) in corridor.waypoints.windows(2).enumerate() {
+                        let a = egui::pos2(grid_to_world(pair[0].x), grid_to_world(pair[0].y));
+                        let b = egui::pos2(grid_to_world(pair[1].x), grid_to_world(pair[1].y));
+                        let dist = point_to_segment_dist(world, a, b);
+                        let threshold = corridor.width as f32 * GRID_PX / 2.0 + HANDLE_HIT_RADIUS / state.view.zoom;
+                        if dist < threshold
+                            && best_hit.is_none_or(|(_, _, bd)| dist < bd)
+                        {
+                            best_hit = Some((ci, si, dist));
                         }
                     }
+                }
+                if let Some((ci, si, _)) = best_hit {
+                    let new_wp = GridPos {
+                        x: world_to_grid(world.x),
+                        y: world_to_grid(world.y),
+                    };
+                    layout.corridors[ci].waypoints.insert(si + 1, new_wp);
+                    resolve_diagonal_segments(&mut layout.corridors[ci].waypoints);
+                    layout.corridors[ci].pinned_waypoints =
+                        layout.corridors[ci].waypoints.clone();
+                    state.selected_corridor = Some(ci);
+                    // Find the inserted waypoint (may have shifted due to diagonal resolution)
+                    state.selected_waypoint = layout.corridors[ci].waypoints.iter()
+                        .position(|wp| wp.x == new_wp.x && wp.y == new_wp.y)
+                        .or(Some(si + 1));
+                    state.selected_room = None;
+                    state.selected_group = None;
                 }
             }
         }
@@ -222,7 +274,7 @@ fn handle_spatial_interactions(
                             let wp_screen = transform.world_to_screen(
                                 egui::pos2(grid_to_world(wp.x), grid_to_world(wp.y)),
                             );
-                            if pos.distance(wp_screen) < HANDLE_HIT_RADIUS * state.view.zoom {
+                            if pos.distance(wp_screen) < HANDLE_HIT_RADIUS {
                                 state.selected_waypoint = Some(wi);
                                 return;
                             }
@@ -239,7 +291,7 @@ fn handle_spatial_interactions(
                         let a = egui::pos2(grid_to_world(pair[0].x), grid_to_world(pair[0].y));
                         let b = egui::pos2(grid_to_world(pair[1].x), grid_to_world(pair[1].y));
                         let dist = point_to_segment_dist(world, a, b);
-                        let threshold = (corridor.width as f32 * GRID_PX / 2.0 + 4.0) / state.view.zoom;
+                        let threshold = corridor.width as f32 * GRID_PX / 2.0 + HANDLE_HIT_RADIUS / state.view.zoom;
                         if dist < threshold {
                             hit_corridor = Some(ci);
                             break;
@@ -388,10 +440,52 @@ fn handle_spatial_interactions(
                     let ci = *ci;
                     let wi = *wi;
                     if let Some(layout) = &mut dungeon.layout {
-                        if ci < layout.corridors.len() && wi < layout.corridors[ci].waypoints.len()
-                        {
-                            layout.corridors[ci].waypoints[wi].x += grid_steps_x;
-                            layout.corridors[ci].waypoints[wi].y += grid_steps_y;
+                        let wps = &mut layout.corridors[ci].waypoints;
+                        if wi < wps.len() {
+                            // Check segment orientations BEFORE moving
+                            let prev_horizontal = wi > 0 && wps[wi - 1].y == wps[wi].y;
+                            let prev_vertical = wi > 0 && wps[wi - 1].x == wps[wi].x;
+                            let next_horizontal = wi + 1 < wps.len() && wps[wi + 1].y == wps[wi].y;
+                            let next_vertical = wi + 1 < wps.len() && wps[wi + 1].x == wps[wi].x;
+
+                            // Remember the dragged point's identity
+
+                            // Move the dragged waypoint
+                            wps[wi].x += grid_steps_x;
+                            wps[wi].y += grid_steps_y;
+
+                            let dragged_pos_after = wps[wi];
+                            let last = wps.len() - 1;
+
+                            // Pull the previous neighbor along the shared axis,
+                            // but never move the first endpoint (index 0)
+                            if wi > 0 && wi - 1 != 0 {
+                                if prev_horizontal {
+                                    wps[wi - 1].y += grid_steps_y;
+                                }
+                                if prev_vertical {
+                                    wps[wi - 1].x += grid_steps_x;
+                                }
+                            }
+
+                            // Pull the next neighbor along the shared axis,
+                            // but never move the last endpoint
+                            if wi + 1 < wps.len() && wi + 1 != last {
+                                if next_horizontal {
+                                    wps[wi + 1].y += grid_steps_y;
+                                }
+                                if next_vertical {
+                                    wps[wi + 1].x += grid_steps_x;
+                                }
+                            }
+
+                            // Clean up stale auto-corners and resolve new diagonals
+                            resolve_diagonal_segments_clean(wps);
+
+                            // Update the drag target index to track the moved waypoint
+                            if let Some(new_wi) = wps.iter().position(|wp| wp.x == dragged_pos_after.x && wp.y == dragged_pos_after.y) {
+                                state.drag_target = DragTarget::Waypoint(ci, new_wi);
+                            }
                         }
                     }
                 }
@@ -461,8 +555,8 @@ fn handle_spatial_interactions(
             DragTarget::Waypoint(ci, _) => {
                 let ci = *ci;
                 if let Some(layout) = &mut dungeon.layout {
-                    // Pin all current waypoints so the solver routes through them
                     if ci < layout.corridors.len() {
+                        resolve_diagonal_segments(&mut layout.corridors[ci].waypoints);
                         layout.corridors[ci].pinned_waypoints =
                             layout.corridors[ci].waypoints.clone();
                     }
@@ -946,6 +1040,11 @@ pub fn spatial_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Spa
 
     ui.label("Density gap:");
     ui.add(egui::Slider::new(&mut state.density_gap, 0..=6));
+
+    ui.add_space(8.0);
+    if ui.button("Recompute All").on_hover_text("Re-solve all room positions and corridors from scratch").clicked() {
+        state.recompute_requested = true;
+    }
 
     // Bounds management
     ui.add_space(16.0);
