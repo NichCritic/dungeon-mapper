@@ -8,4 +8,3 @@ pub mod doors;
 
 pub use egui_renderer::EguiRenderer;
 pub use image_renderer::ImageRenderer;
-

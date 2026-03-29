@@ -9,7 +9,6 @@ use crate::model::*;
 pub fn route_corridors(
     graph: &DungeonGraph,
     layout: &SpatialLayout,
-    _default_corridor_width: u32,
 ) -> Vec<CorridorSegment> {
     // Collect pinned waypoints
     let mut pinned_map: HashMap<String, Vec<GridPos>> = HashMap::new();

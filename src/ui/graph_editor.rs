@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::model::*;
 use crate::ui::canvas_common::{handle_pan_zoom, ViewState};
-use crate::util::ViewTransform;
+use crate::util::{point_to_segment_dist, ViewTransform};
 
 /// Selection state for graph editor
 #[derive(Clone, Debug, Default)]
@@ -317,13 +317,6 @@ fn hit_test_connection(
     None
 }
 
-fn point_to_segment_dist(p: egui::Pos2, a: egui::Pos2, b: egui::Pos2) -> f32 {
-    let ab = b - a;
-    let ap = p - a;
-    let t = (ap.dot(ab) / ab.dot(ab)).clamp(0.0, 1.0);
-    let closest = a + ab * t;
-    p.distance(closest)
-}
 
 /// Find where a ray from `from` toward `to` exits `rect`.
 /// Returns the intersection point on the rectangle edge.
@@ -393,14 +386,19 @@ fn draw_connections(
     state: &GraphEditorState,
 ) {
     // Count connections between each room pair to offset duplicates
+    // Count connections per room pair to offset duplicate lines
+    let room_pair_key = |e: &StoredEdge| -> (String, String) {
+        if e.source_room_id < e.target_room_id {
+            (e.source_room_id.clone(), e.target_room_id.clone())
+        } else {
+            (e.target_room_id.clone(), e.source_room_id.clone())
+        }
+    };
+
     let mut pair_counts: HashMap<(String, String), usize> = HashMap::new();
     let mut pair_indices: HashMap<String, usize> = HashMap::new();
     for edge in &dungeon.graph.connections {
-        let key = if edge.source_room_id < edge.target_room_id {
-            (edge.source_room_id.clone(), edge.target_room_id.clone())
-        } else {
-            (edge.target_room_id.clone(), edge.source_room_id.clone())
-        };
+        let key = room_pair_key(edge);
         let idx = *pair_counts.get(&key).unwrap_or(&0);
         pair_indices.insert(edge.connection.id.clone(), idx);
         *pair_counts.entry(key).or_insert(0) += 1;
@@ -411,12 +409,7 @@ fn draw_connections(
         let tgt_pos = state.room_positions.get(&edge.target_room_id);
 
         if let (Some(&src), Some(&tgt)) = (src_pos, tgt_pos) {
-            let key = if edge.source_room_id < edge.target_room_id {
-                (edge.source_room_id.clone(), edge.target_room_id.clone())
-            } else {
-                (edge.target_room_id.clone(), edge.source_room_id.clone())
-            };
-            let count = pair_counts[&key];
+            let count = pair_counts[&room_pair_key(edge)];
             let idx = pair_indices[&edge.connection.id];
 
             // Compute perpendicular offset for duplicate connections.

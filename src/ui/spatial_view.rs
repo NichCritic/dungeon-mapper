@@ -1,6 +1,6 @@
 use crate::model::*;
 use crate::ui::canvas_common::{handle_pan_zoom, ViewState};
-use crate::util::{grid_to_world, world_to_grid, ViewTransform, GRID_PX};
+use crate::util::{grid_to_world, point_to_segment_dist, world_to_grid, ViewTransform, GRID_PX};
 
 /// What's currently being dragged in the spatial view
 #[derive(Clone, Debug, Default)]
@@ -22,7 +22,6 @@ pub struct SpatialViewState {
     drag_target: DragTarget,
     drag_accum: egui::Vec2,
     pub density_gap: u32,
-    pub corridor_width: u32,
 }
 
 impl Default for SpatialViewState {
@@ -35,7 +34,6 @@ impl Default for SpatialViewState {
             drag_target: DragTarget::None,
             drag_accum: egui::Vec2::ZERO,
             density_gap: 2,
-            corridor_width: 2,
         }
     }
 }
@@ -351,7 +349,7 @@ fn handle_spatial_interactions(
             DragTarget::Room(_) => {
                 if let Some(layout) = &mut dungeon.layout {
                     layout.corridors =
-                        crate::solver::corridor::route_corridors(&dungeon.graph, layout, state.corridor_width);
+                        crate::solver::corridor::route_corridors(&dungeon.graph, layout);
                     layout.recheck_corridor_overlaps();
                 }
             }
@@ -370,18 +368,6 @@ fn handle_spatial_interactions(
         }
         state.drag_target = DragTarget::None;
     }
-}
-
-fn point_to_segment_dist(p: egui::Pos2, a: egui::Pos2, b: egui::Pos2) -> f32 {
-    let ab = b - a;
-    let ap = p - a;
-    let len_sq = ab.dot(ab);
-    if len_sq < 0.001 {
-        return p.distance(a);
-    }
-    let t = (ap.dot(ab) / len_sq).clamp(0.0, 1.0);
-    let closest = a + ab * t;
-    p.distance(closest)
 }
 
 /// Draw an infinite grid based on the visible viewport.
@@ -626,10 +612,6 @@ pub fn spatial_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Spa
 
     ui.label("Density gap:");
     ui.add(egui::Slider::new(&mut state.density_gap, 1..=6));
-
-    ui.add_space(8.0);
-    ui.label("Default corridor width:");
-    ui.add(egui::Slider::new(&mut state.corridor_width, 1..=4).suffix(" sq"));
 
     // Bounds management
     ui.add_space(16.0);

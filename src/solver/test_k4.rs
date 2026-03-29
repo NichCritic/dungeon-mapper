@@ -25,7 +25,8 @@ mod tests {
         }
 
         // Solve layout
-        let layout = solve_layout(&graph, 2, 2).expect("layout should solve");
+        // Use gap=4 to ensure rooms have corridor space between them
+        let layout = solve_layout(&graph, 4).expect("layout should solve");
         
         println!("Room positions:");
         for rl in &layout.rooms {
@@ -34,7 +35,7 @@ mod tests {
         }
 
         // Route corridors
-        let corridors = route_corridors(&graph, &layout, 2);
+        let corridors = route_corridors(&graph, &layout);
 
         println!("\nCorridors: {} / 6 expected", corridors.len());
         for c in &corridors {

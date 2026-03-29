@@ -28,7 +28,6 @@ impl ViewTransform {
         }
     }
 
-    /// World position -> screen position
     pub fn world_to_screen(&self, world: egui::Pos2) -> egui::Pos2 {
         egui::pos2(
             world.x * self.zoom + self.offset.x + self.canvas_rect.min.x,
@@ -36,17 +35,23 @@ impl ViewTransform {
         )
     }
 
-    /// Screen position -> world position
     pub fn screen_to_world(&self, screen: egui::Pos2) -> egui::Pos2 {
         egui::pos2(
             (screen.x - self.canvas_rect.min.x - self.offset.x) / self.zoom,
             (screen.y - self.canvas_rect.min.y - self.offset.y) / self.zoom,
         )
     }
+}
 
-    /// Scale a world distance to screen distance
-    #[allow(dead_code)]
-    pub fn scale(&self, world_dist: f32) -> f32 {
-        world_dist * self.zoom
+/// Distance from point `p` to the closest point on line segment `a`-`b`.
+pub fn point_to_segment_dist(p: egui::Pos2, a: egui::Pos2, b: egui::Pos2) -> f32 {
+    let ab = b - a;
+    let ap = p - a;
+    let len_sq = ab.dot(ab);
+    if len_sq < 0.001 {
+        return p.distance(a);
     }
+    let t = (ap.dot(ab) / len_sq).clamp(0.0, 1.0);
+    let closest = a + ab * t;
+    p.distance(closest)
 }

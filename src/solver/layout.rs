@@ -6,7 +6,6 @@ use crate::model::*;
 pub fn solve_layout(
     graph: &DungeonGraph,
     gap: u32,
-    corridor_width: u32,
 ) -> Result<SpatialLayout, String> {
     if graph.rooms.is_empty() {
         return Err("No rooms to layout".to_string());
@@ -70,12 +69,19 @@ pub fn solve_layout(
                     orientations.push((nh, nw));
                 }
 
-                let cw_i = corridor_width as i32;
+                // Max corridor width among connections to this neighbor
+                let cw_i = graph.connections.iter()
+                    .filter(|e| {
+                        (e.source_room_id == *current_id && e.target_room_id == *neighbor_id)
+                        || (e.target_room_id == *current_id && e.source_room_id == *neighbor_id)
+                    })
+                    .map(|e| e.connection.corridor_width as i32)
+                    .max()
+                    .unwrap_or(2);
                 let g = gap as i32;
 
                 let mut did_place = false;
                 'orient: for &(tw, th) in &orientations {
-                    // Try adjacent first (no gap), then with corridor spacing
                     let adjacent_candidates = [
                         (cx + cw as i32, cy),
                         (cx, cy + ch as i32),
@@ -89,21 +95,23 @@ pub fn solve_layout(
                         (cx, cy - th as i32 - g - cw_i),
                     ];
 
-                    // Adjacent: no gap enforced
-                    for &(px, py) in &adjacent_candidates {
-                        if !overlaps_any(px, py, tw, th, &placed_rects, 0) {
-                            layout.rooms.push(RoomLayout {
-                                room_id: neighbor_id.clone(),
-                                x: px,
-                                y: py,
-                                width: tw,
-                                height: th,
-                            });
-                            placed.insert(neighbor_id.clone());
-                            placed_rects.push((px, py, tw, th));
-                            queue.push_back(neighbor_idx);
-                            did_place = true;
-                            break 'orient;
+                    // Try adjacent first (only when gap is 0)
+                    if g == 0 {
+                        for &(px, py) in &adjacent_candidates {
+                            if !overlaps_any(px, py, tw, th, &placed_rects, 0) {
+                                layout.rooms.push(RoomLayout {
+                                    room_id: neighbor_id.clone(),
+                                    x: px,
+                                    y: py,
+                                    width: tw,
+                                    height: th,
+                                });
+                                placed.insert(neighbor_id.clone());
+                                placed_rects.push((px, py, tw, th));
+                                queue.push_back(neighbor_idx);
+                                did_place = true;
+                                break 'orient;
+                            }
                         }
                     }
 
@@ -201,7 +209,7 @@ pub fn solve_layout(
     }
 
     // Route corridors
-    layout.corridors = crate::solver::corridor::route_corridors(graph, &layout, corridor_width);
+    layout.corridors = crate::solver::corridor::route_corridors(graph, &layout);
 
     Ok(layout)
 }

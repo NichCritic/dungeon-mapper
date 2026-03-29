@@ -13,7 +13,6 @@ pub enum Tab {
 pub struct DungeonApp {
     pub dungeon: Dungeon,
     pub active_tab: Tab,
-    prev_tab: Tab,
     pub graph_state: GraphEditorState,
     pub spatial_state: SpatialViewState,
     pub styled_state: StyledViewState,
@@ -26,7 +25,6 @@ impl Default for DungeonApp {
         Self {
             dungeon: Dungeon::default(),
             active_tab: Tab::Graph,
-            prev_tab: Tab::Graph,
             graph_state: GraphEditorState::default(),
             spatial_state: SpatialViewState::default(),
             styled_state: StyledViewState::default(),
@@ -63,7 +61,6 @@ impl DungeonApp {
         match crate::solver::layout::solve_layout(
             &self.dungeon.graph,
             self.spatial_state.density_gap,
-            self.spatial_state.corridor_width,
         ) {
             Ok(mut layout) => {
                 layout.bounds = old_bounds;
@@ -129,8 +126,6 @@ impl eframe::App for DungeonApp {
         if needs_layout && self.dungeon.layout.is_none() && !self.dungeon.graph.rooms.is_empty() {
             self.solve_layout();
         }
-        self.prev_tab = self.active_tab;
-
         // Status bar
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
             let zoom = match self.active_tab {
