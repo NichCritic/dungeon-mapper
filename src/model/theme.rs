@@ -8,14 +8,58 @@ pub struct Theme {
     pub bg_color: [u8; 4],
     pub wall_style: WallStyle,
     pub grid_visible: bool,
-    pub hatching: bool,
+    /// Exterior shading enabled
+    #[serde(default = "default_true")]
+    pub exterior_shading: bool,
+    /// Radius of exterior shading in grid squares
+    #[serde(default = "default_shading_radius")]
+    pub shading_radius: f32,
+    /// Style of exterior shading
+    #[serde(default)]
+    pub shading_style: ShadingStyle,
+    /// Density of hatching lines (when style is Hatched)
+    #[serde(default = "default_hatching_density")]
+    pub hatching_density: f32,
 }
+
+fn default_true() -> bool { true }
+fn default_shading_radius() -> f32 { 1.0 }
+fn default_hatching_density() -> f32 { 1.0 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
 pub enum WallStyle {
     Sharp,
     Rough,
     Rounded,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
+pub enum ShadingStyle {
+    Hatched,
+    Solid,
+    Stippled,
+}
+
+impl Default for ShadingStyle {
+    fn default() -> Self {
+        ShadingStyle::Hatched
+    }
+}
+
+impl ShadingStyle {
+    pub fn label(self) -> &'static str {
+        match self {
+            ShadingStyle::Hatched => "Hatched",
+            ShadingStyle::Solid => "Solid",
+            ShadingStyle::Stippled => "Stippled",
+        }
+    }
+
+    pub const ALL: [ShadingStyle; 3] = [
+        ShadingStyle::Hatched,
+        ShadingStyle::Solid,
+        ShadingStyle::Stippled,
+    ];
 }
 
 impl Theme {
@@ -27,7 +71,10 @@ impl Theme {
             bg_color: [245, 240, 232, 255],
             wall_style: WallStyle::Sharp,
             grid_visible: true,
-            hatching: true,
+            exterior_shading: true,
+            shading_radius: 1.0,
+            shading_style: ShadingStyle::Hatched,
+            hatching_density: 1.0,
         }
     }
 }

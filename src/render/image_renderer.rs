@@ -44,6 +44,42 @@ impl MapRenderer for ImageRenderer {
         self.fill_rect(x + w - lw / self.scale, y, lw / self.scale, h, color);
     }
 
+    fn fill_circle(&mut self, cx: f32, cy: f32, r: f32, color: [u8; 4]) {
+        let scx = (cx * self.scale) as i32;
+        let scy = (cy * self.scale) as i32;
+        let sr = (r * self.scale) as i32;
+        let pixel = image::Rgba(color);
+        for py in (scy - sr).max(0)..(scy + sr).min(self.image.height() as i32) {
+            for px in (scx - sr).max(0)..(scx + sr).min(self.image.width() as i32) {
+                let dx = px - scx;
+                let dy = py - scy;
+                if dx * dx + dy * dy <= sr * sr {
+                    self.image.put_pixel(px as u32, py as u32, pixel);
+                }
+            }
+        }
+    }
+
+    fn stroke_circle(&mut self, cx: f32, cy: f32, r: f32, width: f32, color: [u8; 4]) {
+        let scx = (cx * self.scale) as i32;
+        let scy = (cy * self.scale) as i32;
+        let sr = (r * self.scale) as i32;
+        let sw = ((width * self.scale) / 2.0).max(1.0) as i32;
+        let pixel = image::Rgba(color);
+        let r_inner = (sr - sw).max(0);
+        let r_outer = sr + sw;
+        for py in (scy - r_outer).max(0)..(scy + r_outer).min(self.image.height() as i32) {
+            for px in (scx - r_outer).max(0)..(scx + r_outer).min(self.image.width() as i32) {
+                let dx = px - scx;
+                let dy = py - scy;
+                let d2 = dx * dx + dy * dy;
+                if d2 >= r_inner * r_inner && d2 <= r_outer * r_outer {
+                    self.image.put_pixel(px as u32, py as u32, pixel);
+                }
+            }
+        }
+    }
+
     fn draw_line(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, width: f32, color: [u8; 4]) {
         // Bresenham with thickness
         let sx1 = (x1 * self.scale) as i32;

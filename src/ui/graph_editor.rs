@@ -1,16 +1,60 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::model::*;
 use crate::ui::canvas_common::{handle_pan_zoom, ViewState};
 use crate::util::{point_to_segment_dist, ViewTransform};
 
-/// Selection state for graph editor
+/// Multi-selection state for graph editor
 #[derive(Clone, Debug, Default)]
-pub enum Selection {
-    #[default]
-    None,
-    Room(String),
-    Connection(String),
+pub struct Selection {
+    pub rooms: HashSet<String>,
+    pub connections: HashSet<String>,
+    pub groups: HashSet<String>,
+}
+
+impl Selection {
+    pub fn is_empty(&self) -> bool {
+        self.rooms.is_empty() && self.connections.is_empty() && self.groups.is_empty()
+    }
+
+    pub fn clear(&mut self) {
+        self.rooms.clear();
+        self.connections.clear();
+        self.groups.clear();
+    }
+
+    pub fn select_room(&mut self, id: String) {
+        self.clear();
+        self.rooms.insert(id);
+    }
+
+    pub fn select_connection(&mut self, id: String) {
+        self.clear();
+        self.connections.insert(id);
+    }
+
+    pub fn select_group(&mut self, id: String) {
+        self.clear();
+        self.groups.insert(id);
+    }
+
+    pub fn toggle_room(&mut self, id: &str) {
+        if !self.rooms.remove(id) {
+            self.rooms.insert(id.to_string());
+        }
+        // Clear non-room selections when toggling rooms
+        self.connections.clear();
+        self.groups.clear();
+    }
+
+    /// Returns the single selected group ID, if exactly one is selected.
+    pub fn single_group(&self) -> Option<&str> {
+        if self.groups.len() == 1 && self.rooms.is_empty() && self.connections.is_empty() {
+            self.groups.iter().next().map(|s| s.as_str())
+        } else {
+            None
+        }
+    }
 }
 
 /// Drag state for graph editor interactions
@@ -18,8 +62,10 @@ pub enum Selection {
 pub enum DragState {
     #[default]
     None,
-    DraggingRoom(String),
+    DraggingRooms,
     ConnectingFrom(String),
+    /// Marquee selection: start position in world coords
+    Marquee(egui::Pos2),
 }
 
 /// State specific to the graph editor view
@@ -36,7 +82,7 @@ impl Default for GraphEditorState {
         Self {
             view: ViewState::default(),
             room_positions: HashMap::new(),
-            selection: Selection::None,
+            selection: Selection::default(),
             drag_state: DragState::None,
             next_room_number: 1,
         }
@@ -60,17 +106,29 @@ pub fn graph_editor(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut GraphE
     handle_pan_zoom(&response, &mut state.view);
     let transform = ViewTransform::new(state.view.offset, state.view.zoom, rect);
 
-    // Ensure all rooms have a graph view position
+    // Load positions from saved data, or assign defaults for new rooms
     for room in &dungeon.graph.rooms {
         if !state.room_positions.contains_key(&room.id) {
-            state
-                .room_positions
-                .insert(room.id.clone(), egui::pos2(200.0, 200.0));
+            if let Some(&(x, y)) = dungeon.graph.graph_positions.get(&room.id) {
+                state.room_positions.insert(room.id.clone(), egui::pos2(x, y));
+            } else {
+                state.room_positions.insert(room.id.clone(), egui::pos2(200.0, 200.0));
+            }
         }
     }
 
+    // Sync positions back to the model for serialization
+    dungeon.graph.graph_positions = state
+        .room_positions
+        .iter()
+        .map(|(id, pos)| (id.clone(), (pos.x, pos.y)))
+        .collect();
+
     // Handle interactions
     handle_interactions(ui, &response, &transform, dungeon, state);
+
+    // Draw groups (behind everything)
+    draw_groups(&painter, &transform, dungeon, state);
 
     // Draw connections
     draw_connections(&painter, &transform, dungeon, state);
@@ -96,6 +154,25 @@ pub fn graph_editor(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut GraphE
             }
         }
     }
+
+    // Draw marquee selection rectangle
+    if let DragState::Marquee(start) = state.drag_state {
+        if let Some(pointer) = response.hover_pos() {
+            let screen_start = transform.world_to_screen(start);
+            let marquee = egui::Rect::from_two_pos(screen_start, pointer);
+            painter.rect_filled(
+                marquee,
+                0.0,
+                egui::Color32::from_rgba_unmultiplied(100, 150, 255, 30),
+            );
+            painter.rect_stroke(
+                marquee,
+                0.0,
+                egui::Stroke::new(1.0, egui::Color32::from_rgb(100, 150, 255)),
+                egui::StrokeKind::Middle,
+            );
+        }
+    }
 }
 
 fn handle_interactions(
@@ -107,16 +184,16 @@ fn handle_interactions(
 ) {
     let pointer = response.hover_pos();
 
+    let modifiers = ui.input(|i| i.modifiers);
+    let shift = modifiers.shift;
+    let ctrl = modifiers.ctrl;
+
     // Double-click to create room
-    // Ctrl+double-click: create connected room, select new room
-    // Alt+double-click: create connected room, keep current selection
     if response.double_clicked() {
         if let Some(pos) = pointer {
             let world_pos = transform.screen_to_world(pos);
-            // Check we're not on an existing room
             if hit_test_room(world_pos, &state.room_positions).is_none() {
-                let modifiers = ui.input(|i| i.modifiers);
-                let connect_and_select = modifiers.ctrl;
+                let connect_and_select = ctrl;
                 let connect_no_select = modifiers.alt;
 
                 let label = format!("Room {}", state.next_room_number);
@@ -127,8 +204,9 @@ fn handle_interactions(
                 dungeon.graph.add_room(room);
 
                 if connect_and_select || connect_no_select {
-                    // Connect to currently selected room if there is one
-                    if let Selection::Room(ref selected_id) = state.selection {
+                    // Connect all selected rooms to the new room
+                    let selected: Vec<String> = state.selection.rooms.iter().cloned().collect();
+                    for selected_id in &selected {
                         let conn = Connection::new(ConnectionType::Door);
                         dungeon.graph.add_connection(
                             selected_id.clone(),
@@ -139,53 +217,75 @@ fn handle_interactions(
                 }
 
                 if !connect_no_select {
-                    state.selection = Selection::Room(new_id);
+                    state.selection.select_room(new_id);
                 }
             }
         }
     }
 
-    // Left-click to select (only when hitting a room or connection).
-    // Ctrl+click on a room connects it to the selected room.
-    // Clicking empty space does nothing (double-click creates a room there).
-    if response.clicked() {
+    // Click to select. Shift+click toggles. Ctrl+click connects.
+    // Skip if double-click also fired this frame.
+    if response.clicked() && !response.double_clicked() {
         if let Some(pos) = pointer {
             let world_pos = transform.screen_to_world(pos);
-            let ctrl = ui.input(|i| i.modifiers.ctrl);
 
             if let Some(room_id) = hit_test_room(world_pos, &state.room_positions) {
-                if ctrl {
-                    if let Selection::Room(ref selected_id) = state.selection {
-                        if *selected_id != room_id {
-                            let conn = Connection::new(ConnectionType::Door);
-                            dungeon.graph.add_connection(
-                                selected_id.clone(),
-                                room_id.clone(),
-                                conn,
-                            );
-                        }
+                if ctrl && !state.selection.rooms.is_empty() {
+                    // Connect all selected rooms to the clicked room
+                    let selected: Vec<String> = state.selection.rooms.iter()
+                        .filter(|id| id.as_str() != room_id)
+                        .cloned()
+                        .collect();
+                    for selected_id in &selected {
+                        let conn = Connection::new(ConnectionType::Door);
+                        dungeon.graph.add_connection(
+                            selected_id.clone(),
+                            room_id.clone(),
+                            conn,
+                        );
                     }
                 }
-                state.selection = Selection::Room(room_id);
+                if shift {
+                    state.selection.toggle_room(&room_id);
+                } else {
+                    state.selection.select_room(room_id);
+                }
             } else if let Some(conn_id) = hit_test_connection(world_pos, &dungeon.graph, &state.room_positions, state.view.zoom) {
-                state.selection = Selection::Connection(conn_id);
+                if shift {
+                    if !state.selection.connections.remove(&conn_id) {
+                        state.selection.connections.insert(conn_id);
+                    }
+                } else {
+                    state.selection.select_connection(conn_id);
+                }
+            } else if let Some(group_id) = hit_test_group(world_pos, &dungeon.graph, &state.room_positions) {
+                state.selection.select_group(group_id);
+            } else if !shift && !ctrl && !modifiers.alt {
+                state.selection.clear();
             }
-            // No else — clicking empty space doesn't deselect
         }
     }
 
-    // Left-drag to move rooms / draw connections
+    // Drag start: room drag, connect handle, or marquee
     if response.drag_started_by(egui::PointerButton::Primary) {
         if let Some(pos) = pointer {
             let world_pos = transform.screen_to_world(pos);
 
-            // Check if clicking on a connection handle (edge of room)
             if let Some(room_id) = hit_test_connect_handle(world_pos, &state.room_positions, transform) {
                 state.drag_state = DragState::ConnectingFrom(room_id);
             } else if let Some(room_id) = hit_test_room(world_pos, &state.room_positions) {
-                state.selection = Selection::Room(room_id.clone());
-                state.drag_state = DragState::DraggingRoom(room_id);
+                // If dragging a selected room, move all selected rooms
+                if !state.selection.rooms.contains(&room_id) {
+                    if !shift {
+                        state.selection.select_room(room_id.clone());
+                    } else {
+                        state.selection.toggle_room(&room_id);
+                    }
+                }
+                state.drag_state = DragState::DraggingRooms;
             } else {
+                // Start marquee selection on empty space
+                state.drag_state = DragState::Marquee(world_pos);
             }
         }
     }
@@ -193,58 +293,80 @@ fn handle_interactions(
     // Dragging
     if response.dragged_by(egui::PointerButton::Primary) {
         match &state.drag_state {
-            DragState::DraggingRoom(id) => {
+            DragState::DraggingRooms => {
                 let delta = response.drag_delta() / state.view.zoom;
-                if let Some(pos) = state.room_positions.get_mut(id) {
-                    *pos += delta;
+                // Move all selected rooms
+                let selected: Vec<String> = state.selection.rooms.iter().cloned().collect();
+                for id in &selected {
+                    if let Some(pos) = state.room_positions.get_mut(id) {
+                        *pos += delta;
+                    }
                 }
             }
-            DragState::ConnectingFrom(_) => {
-                // Visual feedback handled in draw
-            }
+            DragState::ConnectingFrom(_) | DragState::Marquee(_) => {}
             DragState::None => {}
         }
     }
 
     // Release drag
     if response.drag_stopped_by(egui::PointerButton::Primary) {
-        if let DragState::ConnectingFrom(ref src_id) = state.drag_state {
-            if let Some(pos) = pointer {
-                let world_pos = transform.screen_to_world(pos);
-                if let Some(target_id) = hit_test_room(world_pos, &state.room_positions) {
-                    if target_id != *src_id {
-                        let conn = Connection::new(ConnectionType::Door);
-                        let conn_id = conn.id.clone();
-                        dungeon
-                            .graph
-                            .add_connection(src_id.clone(), target_id, conn);
-                        state.selection = Selection::Connection(conn_id);
+        match &state.drag_state {
+            DragState::ConnectingFrom(src_id) => {
+                let src_id = src_id.clone();
+                if let Some(pos) = pointer {
+                    let world_pos = transform.screen_to_world(pos);
+                    if let Some(target_id) = hit_test_room(world_pos, &state.room_positions) {
+                        if target_id != src_id {
+                            let conn = Connection::new(ConnectionType::Door);
+                            let conn_id = conn.id.clone();
+                            dungeon.graph.add_connection(src_id, target_id, conn);
+                            state.selection.select_connection(conn_id);
+                        }
                     }
                 }
             }
+            DragState::Marquee(start) => {
+                // Select all rooms within the marquee rectangle
+                if let Some(pos) = pointer {
+                    let end = transform.screen_to_world(pos);
+                    let min_x = start.x.min(end.x);
+                    let min_y = start.y.min(end.y);
+                    let max_x = start.x.max(end.x);
+                    let max_y = start.y.max(end.y);
+
+                    if !shift {
+                        state.selection.clear();
+                    }
+
+                    for (id, &room_pos) in &state.room_positions {
+                        if room_pos.x >= min_x && room_pos.x <= max_x
+                            && room_pos.y >= min_y && room_pos.y <= max_y
+                        {
+                            state.selection.rooms.insert(id.clone());
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
         state.drag_state = DragState::None;
     }
 
-    // Delete key
+    // Delete key — delete all selected items
     if response.has_focus() || response.hovered() {
         let delete_pressed = ui.input(|i| {
             i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)
         });
-        if delete_pressed {
-            match &state.selection {
-                Selection::Room(id) => {
-                    let id = id.clone();
-                    state.room_positions.remove(&id);
-                    dungeon.graph.remove_room(&id);
-                    state.selection = Selection::None;
-                }
-                Selection::Connection(id) => {
-                    let id = id.clone();
-                    dungeon.graph.remove_connection(&id);
-                    state.selection = Selection::None;
-                }
-                Selection::None => {}
+        if delete_pressed && !state.selection.is_empty() {
+            for id in state.selection.rooms.drain() {
+                state.room_positions.remove(&id);
+                dungeon.graph.remove_room(&id);
+            }
+            for id in state.selection.connections.drain() {
+                dungeon.graph.remove_connection(&id);
+            }
+            for id in state.selection.groups.drain() {
+                dungeon.graph.groups.retain(|g| g.id != id);
             }
         }
     }
@@ -276,6 +398,42 @@ fn hit_test_connect_handle(
         let handle_center = pos + egui::vec2(NODE_WIDTH / 2.0, 0.0);
         if world_pos.distance(handle_center) < CONNECT_HANDLE_RADIUS * 2.0 {
             return Some(id.clone());
+        }
+    }
+    None
+}
+
+fn hit_test_group(
+    world_pos: egui::Pos2,
+    graph: &DungeonGraph,
+    room_positions: &HashMap<String, egui::Pos2>,
+) -> Option<String> {
+    let padding = 20.0;
+    for group in &graph.groups {
+        if group.room_ids.is_empty() {
+            continue;
+        }
+        let mut min_x = f32::MAX;
+        let mut min_y = f32::MAX;
+        let mut max_x = f32::MIN;
+        let mut max_y = f32::MIN;
+        for room_id in &group.room_ids {
+            if let Some(&pos) = room_positions.get(room_id) {
+                min_x = min_x.min(pos.x - NODE_WIDTH / 2.0);
+                min_y = min_y.min(pos.y - NODE_HEIGHT / 2.0);
+                max_x = max_x.max(pos.x + NODE_WIDTH / 2.0);
+                max_y = max_y.max(pos.y + NODE_HEIGHT / 2.0);
+            }
+        }
+        if min_x > max_x {
+            continue;
+        }
+        let rect = egui::Rect::from_min_max(
+            egui::pos2(min_x - padding, min_y - padding),
+            egui::pos2(max_x + padding, max_y + padding),
+        );
+        if rect.contains(world_pos) {
+            return Some(group.id.clone());
         }
     }
     None
@@ -379,6 +537,64 @@ fn rect_edge_intersection(from: egui::Pos2, to: egui::Pos2, rect: egui::Rect) ->
     }
 }
 
+fn draw_groups(
+    painter: &egui::Painter,
+    transform: &ViewTransform,
+    dungeon: &Dungeon,
+    state: &GraphEditorState,
+) {
+    for group in &dungeon.graph.groups {
+        if group.room_ids.is_empty() {
+            continue;
+        }
+
+        // Compute bounding rect of all rooms in this group
+        let mut min_x = f32::MAX;
+        let mut min_y = f32::MAX;
+        let mut max_x = f32::MIN;
+        let mut max_y = f32::MIN;
+
+        for room_id in &group.room_ids {
+            if let Some(&pos) = state.room_positions.get(room_id) {
+                min_x = min_x.min(pos.x - NODE_WIDTH / 2.0);
+                min_y = min_y.min(pos.y - NODE_HEIGHT / 2.0);
+                max_x = max_x.max(pos.x + NODE_WIDTH / 2.0);
+                max_y = max_y.max(pos.y + NODE_HEIGHT / 2.0);
+            }
+        }
+
+        if min_x > max_x {
+            continue;
+        }
+
+        let padding = 20.0;
+        let screen_min = transform.world_to_screen(egui::pos2(min_x - padding, min_y - padding));
+        let screen_max = transform.world_to_screen(egui::pos2(max_x + padding, max_y + padding));
+        let rect = egui::Rect::from_min_max(screen_min, screen_max);
+
+        let is_selected = state.selection.groups.contains(&group.id);
+        let c = group.color;
+        let fill = egui::Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]);
+        let border_color = if is_selected {
+            egui::Color32::from_rgb(100, 200, 255)
+        } else {
+            egui::Color32::from_rgba_unmultiplied(c[0], c[1], c[2], (c[3] as u16 * 3).min(255) as u8)
+        };
+
+        painter.rect_filled(rect, 8.0, fill);
+        painter.rect_stroke(rect, 8.0, egui::Stroke::new(1.5, border_color), egui::StrokeKind::Middle);
+
+        // Label at top
+        painter.text(
+            egui::pos2(rect.center().x, screen_min.y + 12.0),
+            egui::Align2::CENTER_CENTER,
+            &group.label,
+            egui::FontId::monospace(11.0 * transform.zoom),
+            border_color,
+        );
+    }
+}
+
 fn draw_connections(
     painter: &egui::Painter,
     transform: &ViewTransform,
@@ -453,10 +669,20 @@ fn draw_connections(
             let screen_src = transform.world_to_screen(src_edge);
             let screen_tgt = transform.world_to_screen(tgt_edge);
 
-            let is_selected = matches!(&state.selection, Selection::Connection(id) if *id == edge.connection.id);
+            let is_selected = state.selection.connections.contains(&edge.connection.id);
+            let has_constraints = edge.connection.min_length.is_some() || edge.connection.max_length.is_some();
 
             let (color, width) = if is_selected {
                 (egui::Color32::from_rgb(100, 200, 255), 3.0)
+            } else if has_constraints {
+                // Subtle amber tint for constrained connections
+                match edge.connection.connection_type {
+                    ConnectionType::Open => (egui::Color32::from_rgb(210, 180, 100), 2.0),
+                    ConnectionType::Door => (egui::Color32::from_rgb(220, 190, 110), 2.0),
+                    ConnectionType::Locked => (egui::Color32::from_rgb(220, 190, 110), 3.0),
+                    ConnectionType::Secret => (egui::Color32::from_rgb(180, 120, 180), 2.0),
+                    ConnectionType::OneWay => (egui::Color32::from_rgb(220, 190, 110), 2.0),
+                }
             } else {
                 match edge.connection.connection_type {
                     ConnectionType::Open => (egui::Color32::from_rgb(180, 180, 180), 2.0),
@@ -540,7 +766,7 @@ fn draw_rooms(
 
             let node_rect = egui::Rect::from_center_size(screen_pos, egui::vec2(w, h));
 
-            let is_selected = matches!(&state.selection, Selection::Room(id) if *id == room.id);
+            let is_selected = state.selection.rooms.contains(&room.id);
 
             // Background
             let bg_color = room.primary_color().linear_multiply(0.3);

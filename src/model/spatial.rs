@@ -7,6 +7,9 @@ pub struct RoomLayout {
     pub y: i32,
     pub width: u32,
     pub height: u32,
+    /// Constraint violations for this room's placement.
+    #[serde(default)]
+    pub violations: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -49,6 +49,16 @@ impl DungeonApp {
             e.source_room_id.hash(&mut h);
             e.target_room_id.hash(&mut h);
             e.connection.id.hash(&mut h);
+            e.connection.min_length.hash(&mut h);
+            e.connection.max_length.hash(&mut h);
+        }
+        // Include group constraints so changes trigger re-solve
+        self.dungeon.graph.groups.len().hash(&mut h);
+        for g in &self.dungeon.graph.groups {
+            g.id.hash(&mut h);
+            g.room_ids.len().hash(&mut h);
+            g.max_width.hash(&mut h);
+            g.max_height.hash(&mut h);
         }
         h.finish()
     }
@@ -89,7 +99,7 @@ impl eframe::App for DungeonApp {
                         match crate::io::save_load::load_dungeon() {
                             Ok(d) => {
                                 self.dungeon = d;
-                                self.graph_state = GraphEditorState::default();
+                                self.graph_state = GraphEditorState::default(); // positions will load from dungeon.graph.graph_positions
                             }
                             Err(e) => eprintln!("Load error: {}", e),
                         }
@@ -116,15 +126,17 @@ impl eframe::App for DungeonApp {
             });
         });
 
-        // Auto-solve layout when graph topology changes
+        // Auto-solve layout when graph topology changes or first entering spatial/styled
         let current_hash = self.graph_hash();
         let needs_layout = matches!(self.active_tab, Tab::Spatial | Tab::Styled);
-        if needs_layout && current_hash != self.last_graph_snapshot {
-            self.solve_layout();
-        }
-        // Also solve on first visit if no layout exists yet
-        if needs_layout && self.dungeon.layout.is_none() && !self.dungeon.graph.rooms.is_empty() {
-            self.solve_layout();
+        if needs_layout {
+            if current_hash != self.last_graph_snapshot
+                || self.dungeon.layout.is_none()
+                    && !self.dungeon.graph.rooms.is_empty()
+            {
+                self.solve_layout();
+                ctx.request_repaint();
+            }
         }
         // Status bar
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {

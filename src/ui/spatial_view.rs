@@ -10,15 +10,16 @@ enum DragTarget {
     Room(String),
     /// Dragging a corridor waypoint: (corridor index, waypoint index)
     Waypoint(usize, usize),
+    /// Dragging a group constraint corner: (group index, corner: 0=TL 1=TR 2=BL 3=BR)
+    GroupCorner(usize, u8),
 }
 
 pub struct SpatialViewState {
     pub view: ViewState,
     pub selected_room: Option<String>,
-    /// Index of the selected corridor (if any)
     pub selected_corridor: Option<usize>,
-    /// Index of the selected waypoint within the selected corridor
     pub selected_waypoint: Option<usize>,
+    pub selected_group: Option<usize>,
     drag_target: DragTarget,
     drag_accum: egui::Vec2,
     pub density_gap: u32,
@@ -31,9 +32,10 @@ impl Default for SpatialViewState {
             selected_room: None,
             selected_corridor: None,
             selected_waypoint: None,
+            selected_group: None,
             drag_target: DragTarget::None,
             drag_accum: egui::Vec2::ZERO,
-            density_gap: 2,
+            density_gap: 0,
         }
     }
 }
@@ -55,9 +57,11 @@ pub fn spatial_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Spatia
 
     if let Some(layout) = &dungeon.layout {
         draw_infinite_grid(&painter, &transform, rect);
+        draw_groups_spatial(&painter, &transform, layout, &dungeon.graph, state);
         draw_bounds(&painter, &transform, layout);
         draw_corridors(&painter, &transform, layout, state);
         draw_rooms(&painter, &transform, layout, &dungeon.graph, state);
+        draw_doors(&painter, &transform, layout, &dungeon.graph);
         draw_waypoint_handles(&painter, &transform, layout, state);
     } else if !dungeon.graph.rooms.is_empty() {
         painter.text(
@@ -114,7 +118,35 @@ fn handle_spatial_interactions(
                 }
             }
 
-            // Second check: rooms
+            // Check group corners (when a group with constraints is visible)
+            if let Some(layout) = &dungeon.layout {
+                for (gi, group) in dungeon.graph.groups.iter().enumerate() {
+                    if group.max_width.is_none() && group.max_height.is_none() {
+                        continue;
+                    }
+                    if let Some((gx, gy, gw, gh)) = group.spatial_bounds(layout) {
+                        let corners = [
+                            (gx, gy),                              // TL
+                            (gx + gw as i32, gy),                  // TR
+                            (gx, gy + gh as i32),                  // BL
+                            (gx + gw as i32, gy + gh as i32),     // BR
+                        ];
+                        for (ci, &(cx, cy)) in corners.iter().enumerate() {
+                            let screen_c = transform.world_to_screen(
+                                egui::pos2(grid_to_world(cx), grid_to_world(cy)),
+                            );
+                            if pos.distance(screen_c) < HANDLE_HIT_RADIUS * state.view.zoom {
+                                state.selected_group = Some(gi);
+                                state.drag_target = DragTarget::GroupCorner(gi, ci as u8);
+                                state.drag_accum = egui::Vec2::ZERO;
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Check rooms
             let gx = world_to_grid(world.x);
             let gy = world_to_grid(world.y);
             if let Some(layout) = &dungeon.layout {
@@ -219,6 +251,7 @@ fn handle_spatial_interactions(
                     state.selected_corridor = Some(ci);
                     state.selected_waypoint = None;
                     state.selected_room = None;
+                    state.selected_group = None;
                 } else {
                     // Check room hit
                     let gx = world_to_grid(world.x);
@@ -233,12 +266,35 @@ fn handle_spatial_interactions(
                             state.selected_room = Some(rl.room_id.clone());
                             state.selected_corridor = None;
                             state.selected_waypoint = None;
+                            state.selected_group = None;
                             hit_room = true;
                             break;
                         }
                     }
                     if !hit_room {
-                        state.selected_waypoint = None;
+                        // Check group hit
+                        let mut hit_group = false;
+                        for (gi, group) in dungeon.graph.groups.iter().enumerate() {
+                            if group.max_width.is_none() && group.max_height.is_none() {
+                                continue;
+                            }
+                            if let Some((bx, by, bw, bh)) = group.spatial_bounds(layout) {
+                                if gx >= bx && gx < bx + bw as i32
+                                    && gy >= by && gy < by + bh as i32
+                                {
+                                    state.selected_group = Some(gi);
+                                    state.selected_corridor = None;
+                                    state.selected_waypoint = None;
+                                    state.selected_room = None;
+                                    hit_group = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if !hit_group {
+                            state.selected_waypoint = None;
+                            state.selected_group = None;
+                        }
                     }
                 }
             }
@@ -336,6 +392,52 @@ fn handle_spatial_interactions(
                         }
                     }
                 }
+                DragTarget::GroupCorner(gi, corner) => {
+                    let gi = *gi;
+                    let corner = *corner;
+                    if gi < dungeon.graph.groups.len() {
+                        if let Some(layout) = &dungeon.layout {
+                            if let Some((gx, gy, gw, gh)) = dungeon.graph.groups[gi].spatial_bounds(layout) {
+                                let group = &mut dungeon.graph.groups[gi];
+                                match corner {
+                                    0 => { // TL: move origin, shrink size
+                                        let new_x = gx as i32 + grid_steps_x;
+                                        let new_y = gy as i32 + grid_steps_y;
+                                        let new_w = (gw as i32 - grid_steps_x).max(1) as u32;
+                                        let new_h = (gh as i32 - grid_steps_y).max(1) as u32;
+                                        group.spatial_x = Some(new_x);
+                                        group.spatial_y = Some(new_y);
+                                        group.max_width = Some(new_w);
+                                        group.max_height = Some(new_h);
+                                    }
+                                    1 => { // TR: grow/shrink width
+                                        let new_w = (gw as i32 + grid_steps_x).max(1) as u32;
+                                        let new_h = (gh as i32 - grid_steps_y).max(1) as u32;
+                                        let new_y = gy as i32 + grid_steps_y;
+                                        group.spatial_y = Some(new_y);
+                                        group.max_width = Some(new_w);
+                                        group.max_height = Some(new_h);
+                                    }
+                                    2 => { // BL: grow/shrink height
+                                        let new_x = gx as i32 + grid_steps_x;
+                                        let new_w = (gw as i32 - grid_steps_x).max(1) as u32;
+                                        let new_h = (gh as i32 + grid_steps_y).max(1) as u32;
+                                        group.spatial_x = Some(new_x);
+                                        group.max_width = Some(new_w);
+                                        group.max_height = Some(new_h);
+                                    }
+                                    3 => { // BR: grow both
+                                        let new_w = (gw as i32 + grid_steps_x).max(1) as u32;
+                                        let new_h = (gh as i32 + grid_steps_y).max(1) as u32;
+                                        group.max_width = Some(new_w);
+                                        group.max_height = Some(new_h);
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
                 DragTarget::None => {}
             }
             state.drag_accum.x -= grid_steps_x as f32 * GRID_PX;
@@ -363,6 +465,9 @@ fn handle_spatial_interactions(
                     }
                     layout.recheck_corridor_overlaps();
                 }
+            }
+            DragTarget::GroupCorner(_, _) => {
+                // Group constraint changed — will trigger re-solve via hash check
             }
             DragTarget::None => {}
         }
@@ -394,6 +499,97 @@ fn draw_infinite_grid(painter: &egui::Painter, transform: &ViewTransform, canvas
         let from = transform.world_to_screen(egui::pos2(grid_to_world(min_gx), grid_to_world(y)));
         let to = transform.world_to_screen(egui::pos2(grid_to_world(max_gx), grid_to_world(y)));
         painter.line_segment([from, to], egui::Stroke::new(1.0, color));
+    }
+}
+
+/// Draw group constraint boxes on the spatial view with draggable corners.
+fn draw_groups_spatial(
+    painter: &egui::Painter,
+    transform: &ViewTransform,
+    layout: &SpatialLayout,
+    graph: &DungeonGraph,
+    state: &SpatialViewState,
+) {
+    for (gi, group) in graph.groups.iter().enumerate() {
+        let Some((gx, gy, gw, gh)) = group.spatial_bounds(layout) else {
+            continue;
+        };
+
+        // Only draw if group has constraints
+        if group.max_width.is_none() && group.max_height.is_none() {
+            continue;
+        }
+
+        let screen_min = transform.world_to_screen(egui::pos2(
+            grid_to_world(gx),
+            grid_to_world(gy),
+        ));
+        let screen_max = transform.world_to_screen(egui::pos2(
+            grid_to_world(gx + gw as i32),
+            grid_to_world(gy + gh as i32),
+        ));
+        let rect = egui::Rect::from_min_max(screen_min, screen_max);
+
+        let c = group.color;
+        let is_selected = state.selected_group == Some(gi);
+        let fill = egui::Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3] / 2);
+        let border_color = if is_selected {
+            egui::Color32::from_rgb(100, 200, 255)
+        } else {
+            egui::Color32::from_rgba_unmultiplied(c[0], c[1], c[2], 150)
+        };
+
+        // Dashed border
+        let stroke = egui::Stroke::new(1.5, border_color);
+        draw_dashed_line(painter, egui::pos2(rect.min.x, rect.min.y), egui::pos2(rect.max.x, rect.min.y), stroke, 6.0, 3.0);
+        draw_dashed_line(painter, egui::pos2(rect.max.x, rect.min.y), egui::pos2(rect.max.x, rect.max.y), stroke, 6.0, 3.0);
+        draw_dashed_line(painter, egui::pos2(rect.max.x, rect.max.y), egui::pos2(rect.min.x, rect.max.y), stroke, 6.0, 3.0);
+        draw_dashed_line(painter, egui::pos2(rect.min.x, rect.max.y), egui::pos2(rect.min.x, rect.min.y), stroke, 6.0, 3.0);
+
+        // Fill
+        painter.rect_filled(rect, 0.0, fill);
+
+        // Label
+        if !group.label.is_empty() {
+            painter.text(
+                egui::pos2(screen_min.x + 3.0, screen_min.y - 12.0),
+                egui::Align2::LEFT_BOTTOM,
+                &group.label,
+                egui::FontId::monospace(10.0 * transform.zoom),
+                border_color,
+            );
+        }
+
+        // Dimension label
+        painter.text(
+            egui::pos2(rect.center().x, screen_max.y + 10.0),
+            egui::Align2::CENTER_TOP,
+            format!("{}x{}", gw, gh),
+            egui::FontId::monospace(9.0 * transform.zoom),
+            border_color,
+        );
+
+        // Corner handles
+        let corners = [
+            egui::pos2(rect.min.x, rect.min.y),
+            egui::pos2(rect.max.x, rect.min.y),
+            egui::pos2(rect.min.x, rect.max.y),
+            egui::pos2(rect.max.x, rect.max.y),
+        ];
+        let hr = HANDLE_RADIUS * state.view.zoom;
+        for (ci, &corner) in corners.iter().enumerate() {
+            let is_dragging = matches!(state.drag_target, DragTarget::GroupCorner(g, c) if g == gi && c == ci as u8);
+            let color = if is_dragging {
+                egui::Color32::from_rgb(255, 220, 80)
+            } else {
+                border_color
+            };
+            painter.rect_filled(
+                egui::Rect::from_center_size(corner, egui::vec2(hr * 2.0, hr * 2.0)),
+                2.0,
+                color,
+            );
+        }
     }
 }
 
@@ -575,10 +771,17 @@ fn draw_rooms(
         let is_selected = state.selected_room.as_deref() == Some(&rl.room_id);
         let room = graph.room_by_id(&rl.room_id);
         let is_circle = room.map_or(false, |r| r.shape == RoomShape::Circle);
+        let has_violations = !rl.violations.is_empty();
 
-        let fill = egui::Color32::from_rgb(220, 220, 220);
+        let fill = if has_violations {
+            egui::Color32::from_rgb(240, 200, 200)
+        } else {
+            egui::Color32::from_rgb(220, 220, 220)
+        };
         let border_color = if is_selected {
             egui::Color32::from_rgb(100, 200, 255)
+        } else if has_violations {
+            egui::Color32::from_rgb(220, 60, 60)
         } else {
             egui::Color32::from_rgb(60, 60, 60)
         };
@@ -606,12 +809,163 @@ fn draw_rooms(
     }
 }
 
+/// Draw door symbols at the room wall where corridors connect.
+/// The door is a white rectangle with black border, placed ON the room wall.
+fn draw_doors(
+    painter: &egui::Painter,
+    transform: &ViewTransform,
+    layout: &SpatialLayout,
+    graph: &DungeonGraph,
+) {
+    let white = egui::Color32::WHITE;
+    let dark = egui::Color32::from_rgb(30, 30, 30);
+
+    for edge in &graph.connections {
+        if edge.connection.connection_type == ConnectionType::Open {
+            continue;
+        }
+
+        let corridor = layout.corridors.iter().find(|c| c.connection_id == edge.connection.id);
+        let Some(corridor) = corridor else { continue };
+        if corridor.waypoints.len() < 2 {
+            continue;
+        }
+
+        // Door width: 1 square for single, 2 for double
+        let dw = edge.connection.door_width() as i32;
+        let dw_half = dw as f32 / 2.0;
+
+        // For each end of the corridor, find the room it connects to
+        // and place the door on that room's wall.
+        let room_ids = [&edge.source_room_id, &edge.target_room_id];
+        let wp_ends = [
+            &corridor.waypoints[0],
+            corridor.waypoints.last().unwrap(),
+        ];
+
+        for (room_id, wp) in room_ids.iter().zip(wp_ends.iter()) {
+            let Some(rl) = layout.room_by_id(room_id) else { continue };
+
+            let wp_cx = wp.x as f32;
+            let wp_cy = wp.y as f32;
+
+            let dist_right = (wp_cx - (rl.x + rl.width as i32) as f32).abs();
+            let dist_left = (wp_cx - rl.x as f32).abs();
+            let dist_bottom = (wp_cy - (rl.y + rl.height as i32) as f32).abs();
+            let dist_top = (wp_cy - rl.y as f32).abs();
+
+            let min_dist = dist_right.min(dist_left).min(dist_bottom).min(dist_top);
+
+            // Door rectangle in grid coordinates:
+            // - On the wall (thin in the wall-normal direction)
+            // - Door width (1 or 2 squares) centered on the waypoint
+            let door_depth = 0.3_f32;
+            let (door_x1, door_y1, door_x2, door_y2) = if min_dist == dist_right {
+                // Right wall
+                let wall_x = (rl.x + rl.width as i32) as f32;
+                (
+                    wall_x - door_depth / 2.0,
+                    wp_cy - dw_half,
+                    wall_x + door_depth / 2.0,
+                    wp_cy + dw_half,
+                )
+            } else if min_dist == dist_left {
+                let wall_x = rl.x as f32;
+                (
+                    wall_x - door_depth / 2.0,
+                    wp_cy - dw_half,
+                    wall_x + door_depth / 2.0,
+                    wp_cy + dw_half,
+                )
+            } else if min_dist == dist_bottom {
+                let wall_y = (rl.y + rl.height as i32) as f32;
+                (
+                    wp_cx - dw_half,
+                    wall_y - door_depth / 2.0,
+                    wp_cx + dw_half,
+                    wall_y + door_depth / 2.0,
+                )
+            } else {
+                // Top wall
+                let wall_y = rl.y as f32;
+                (
+                    wp_cx - dw_half,
+                    wall_y - door_depth / 2.0,
+                    wp_cx + dw_half,
+                    wall_y + door_depth / 2.0,
+                )
+            };
+
+            let screen_min = transform.world_to_screen(egui::pos2(
+                door_x1 * GRID_PX,
+                door_y1 * GRID_PX,
+            ));
+            let screen_max = transform.world_to_screen(egui::pos2(
+                door_x2 * GRID_PX,
+                door_y2 * GRID_PX,
+            ));
+            let door_rect = egui::Rect::from_min_max(screen_min, screen_max);
+
+            match edge.connection.connection_type {
+                ConnectionType::Open => {} // already skipped above
+                ConnectionType::Door => {
+                    painter.rect_filled(door_rect, 0.0, white);
+                    painter.rect_stroke(door_rect, 0.0, egui::Stroke::new(1.5, dark), egui::StrokeKind::Middle);
+                }
+                ConnectionType::Locked => {
+                    painter.rect_filled(door_rect, 0.0, white);
+                    painter.rect_stroke(door_rect, 0.0, egui::Stroke::new(1.5, dark), egui::StrokeKind::Middle);
+                    // Small filled circle in center (lock indicator)
+                    let dot_r = door_rect.width().min(door_rect.height()) * 0.2;
+                    painter.circle_filled(door_rect.center(), dot_r, dark);
+                }
+                ConnectionType::Secret => {
+                    // No visible door — just an "S" near the wall
+                    painter.text(
+                        door_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "S",
+                        egui::FontId::monospace((8.0 * transform.zoom).max(6.0)),
+                        dark,
+                    );
+                }
+                ConnectionType::OneWay => {
+                    painter.rect_filled(door_rect, 0.0, white);
+                    painter.rect_stroke(door_rect, 0.0, egui::Stroke::new(1.5, dark), egui::StrokeKind::Middle);
+                    // Small arrow in the center
+                    let horizontal = door_rect.width() < door_rect.height();
+                    let arrow_sz = door_rect.width().min(door_rect.height()) * 0.3;
+                    let dir = if horizontal {
+                        let toward_room = if wp_cx > (rl.x + rl.width as i32 / 2) as f32 { -1.0 } else { 1.0 };
+                        egui::vec2(toward_room, 0.0)
+                    } else {
+                        let toward_room = if wp_cy > (rl.y + rl.height as i32 / 2) as f32 { -1.0 } else { 1.0 };
+                        egui::vec2(0.0, toward_room)
+                    };
+                    let c = door_rect.center();
+                    let tip = c + dir * arrow_sz;
+                    let perp = egui::vec2(-dir.y, dir.x);
+                    painter.add(egui::Shape::convex_polygon(
+                        vec![
+                            tip,
+                            c - dir * arrow_sz * 0.5 + perp * arrow_sz * 0.5,
+                            c - dir * arrow_sz * 0.5 - perp * arrow_sz * 0.5,
+                        ],
+                        dark,
+                        egui::Stroke::NONE,
+                    ));
+                }
+            }
+        }
+    }
+}
+
 pub fn spatial_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut SpatialViewState) {
     ui.heading("Spatial Layout");
     ui.separator();
 
     ui.label("Density gap:");
-    ui.add(egui::Slider::new(&mut state.density_gap, 1..=6));
+    ui.add(egui::Slider::new(&mut state.density_gap, 0..=6));
 
     // Bounds management
     ui.add_space(16.0);
@@ -670,6 +1024,13 @@ pub fn spatial_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Spa
                     rl.width * 5,
                     rl.height * 5
                 ));
+                if !rl.violations.is_empty() {
+                    ui.add_space(4.0);
+                    ui.colored_label(egui::Color32::from_rgb(220, 60, 60), "Constraint violations:");
+                    for v in &rl.violations {
+                        ui.colored_label(egui::Color32::from_rgb(220, 60, 60), format!("  {}", v));
+                    }
+                }
             }
         }
     }
@@ -685,6 +1046,32 @@ pub fn spatial_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Spa
                     ui.colored_label(egui::Color32::from_rgb(220, 50, 50), "Invalid (overlapping)");
                 }
             }
+        }
+    }
+
+    // Selected group constraints
+    if let Some(gi) = state.selected_group {
+        if gi < dungeon.graph.groups.len() {
+            ui.add_space(16.0);
+            ui.separator();
+            let group = &mut dungeon.graph.groups[gi];
+            ui.label(format!("Group: {}", group.label));
+
+            let mut has_w = group.max_width.is_some();
+            let mut w = group.max_width.unwrap_or(20);
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut has_w, "Max width:");
+                ui.add_enabled(has_w, egui::DragValue::new(&mut w).range(1..=100).suffix(" sq"));
+            });
+            group.max_width = if has_w { Some(w) } else { None };
+
+            let mut has_h = group.max_height.is_some();
+            let mut h = group.max_height.unwrap_or(20);
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut has_h, "Max height:");
+                ui.add_enabled(has_h, egui::DragValue::new(&mut h).range(1..=100).suffix(" sq"));
+            });
+            group.max_height = if has_h { Some(h) } else { None };
         }
     }
 }

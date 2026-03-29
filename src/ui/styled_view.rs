@@ -72,7 +72,22 @@ pub fn styled_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Styl
     ui.checkbox(&mut state.show_labels, "Room labels");
     ui.checkbox(&mut state.show_notes, "DM notes");
     ui.checkbox(&mut state.show_secrets, "Show secrets");
-    ui.checkbox(&mut dungeon.theme.hatching, "Dyson hatching");
+    ui.checkbox(&mut dungeon.theme.exterior_shading, "Exterior shading");
+    if dungeon.theme.exterior_shading {
+        ui.add(egui::Slider::new(&mut dungeon.theme.shading_radius, 0.2..=3.0).text("Radius"));
+        egui::ComboBox::from_id_salt("shading_style")
+            .selected_text(dungeon.theme.shading_style.label())
+            .show_ui(ui, |ui| {
+                for s in ShadingStyle::ALL {
+                    ui.selectable_value(&mut dungeon.theme.shading_style, s, s.label());
+                }
+            });
+        if dungeon.theme.shading_style == ShadingStyle::Hatched
+            || dungeon.theme.shading_style == ShadingStyle::Stippled
+        {
+            ui.add(egui::Slider::new(&mut dungeon.theme.hatching_density, 0.3..=3.0).text("Density"));
+        }
+    }
 
     ui.add_space(16.0);
     ui.heading("Export");

@@ -64,6 +64,11 @@ pub fn route_corridors(
                 .map(|p| GridPos { x: p.x - half, y: p.y - half })
                 .collect();
             route_through_pinned(&pinned_tl, w, &forbidden)
+        } else if let Some(wall_path) = try_shared_wall(src_rl, tgt_rl, w) {
+            Some(wall_path)
+        } else if let Some(close_path) = try_close_rooms(src_rl, tgt_rl, w) {
+            // Rooms are close enough that normal exits overlap — span the gap directly
+            Some(close_path)
         } else {
             let src_exits = edge_exits(src_rl, tgt_rl, w);
             let tgt_exits = edge_exits(tgt_rl, src_rl, w);
@@ -108,6 +113,138 @@ pub fn route_corridors(
 /// Mark all grid cells occupied by a corridor as forbidden.
 /// For each segment, fills the w-wide rect between waypoints,
 /// plus a 1-cell border around the entire corridor to prevent adjacency.
+/// Check if two rooms share a wall and return a direct corridor through it.
+/// Returns waypoints in top-left coordinates (pre-center-offset).
+fn try_shared_wall(src: &RoomLayout, tgt: &RoomLayout, w: i32) -> Option<Vec<GridPos>> {
+    let sw = src.width as i32;
+    let sh = src.height as i32;
+    let tw = tgt.width as i32;
+    let th = tgt.height as i32;
+
+    // Check each possible shared edge
+    // src's right edge == tgt's left edge
+    if src.x + sw == tgt.x {
+        let overlap_min = src.y.max(tgt.y);
+        let overlap_max = (src.y + sh).min(tgt.y + th);
+        if overlap_max - overlap_min >= w {
+            let mid_y = (overlap_min + overlap_max - w) / 2;
+            let wall_x = src.x + sw;
+            return Some(vec![
+                GridPos { x: wall_x - 1, y: mid_y },
+                GridPos { x: wall_x, y: mid_y },
+            ]);
+        }
+    }
+    // src's left edge == tgt's right edge
+    if tgt.x + tw == src.x {
+        let overlap_min = src.y.max(tgt.y);
+        let overlap_max = (src.y + sh).min(tgt.y + th);
+        if overlap_max - overlap_min >= w {
+            let mid_y = (overlap_min + overlap_max - w) / 2;
+            let wall_x = src.x;
+            return Some(vec![
+                GridPos { x: wall_x, y: mid_y },
+                GridPos { x: wall_x - 1, y: mid_y },
+            ]);
+        }
+    }
+    // src's bottom edge == tgt's top edge
+    if src.y + sh == tgt.y {
+        let overlap_min = src.x.max(tgt.x);
+        let overlap_max = (src.x + sw).min(tgt.x + tw);
+        if overlap_max - overlap_min >= w {
+            let mid_x = (overlap_min + overlap_max - w) / 2;
+            let wall_y = src.y + sh;
+            return Some(vec![
+                GridPos { x: mid_x, y: wall_y - 1 },
+                GridPos { x: mid_x, y: wall_y },
+            ]);
+        }
+    }
+    // src's top edge == tgt's bottom edge
+    if tgt.y + th == src.y {
+        let overlap_min = src.x.max(tgt.x);
+        let overlap_max = (src.x + sw).min(tgt.x + tw);
+        if overlap_max - overlap_min >= w {
+            let mid_x = (overlap_min + overlap_max - w) / 2;
+            let wall_y = src.y;
+            return Some(vec![
+                GridPos { x: mid_x, y: wall_y },
+                GridPos { x: mid_x, y: wall_y - 1 },
+            ]);
+        }
+    }
+
+    None
+}
+
+/// Handle rooms that are close (gap <= corridor width) but not touching.
+/// Creates a corridor spanning directly from one room wall to the other.
+fn try_close_rooms(src: &RoomLayout, tgt: &RoomLayout, w: i32) -> Option<Vec<GridPos>> {
+    let sw = src.width as i32;
+    let sh = src.height as i32;
+    let tw = tgt.width as i32;
+    let th = tgt.height as i32;
+
+    // Right-left gap
+    let gap_rl = tgt.x - (src.x + sw);
+    if gap_rl > 0 && gap_rl <= w {
+        let overlap_min = src.y.max(tgt.y);
+        let overlap_max = (src.y + sh).min(tgt.y + th);
+        if overlap_max - overlap_min >= w {
+            let mid_y = (overlap_min + overlap_max - w) / 2;
+            return Some(vec![
+                GridPos { x: src.x + sw, y: mid_y },
+                GridPos { x: tgt.x - w, y: mid_y },
+            ]);
+        }
+    }
+
+    // Left-right gap
+    let gap_lr = src.x - (tgt.x + tw);
+    if gap_lr > 0 && gap_lr <= w {
+        let overlap_min = src.y.max(tgt.y);
+        let overlap_max = (src.y + sh).min(tgt.y + th);
+        if overlap_max - overlap_min >= w {
+            let mid_y = (overlap_min + overlap_max - w) / 2;
+            return Some(vec![
+                GridPos { x: src.x - w, y: mid_y },
+                GridPos { x: tgt.x + tw, y: mid_y },
+            ]);
+        }
+    }
+
+    // Bottom-top gap
+    let gap_bt = tgt.y - (src.y + sh);
+    if gap_bt > 0 && gap_bt <= w {
+        let overlap_min = src.x.max(tgt.x);
+        let overlap_max = (src.x + sw).min(tgt.x + tw);
+        if overlap_max - overlap_min >= w {
+            let mid_x = (overlap_min + overlap_max - w) / 2;
+            return Some(vec![
+                GridPos { x: mid_x, y: src.y + sh },
+                GridPos { x: mid_x, y: tgt.y - w },
+            ]);
+        }
+    }
+
+    // Top-bottom gap
+    let gap_tb = src.y - (tgt.y + th);
+    if gap_tb > 0 && gap_tb <= w {
+        let overlap_min = src.x.max(tgt.x);
+        let overlap_max = (src.x + sw).min(tgt.x + tw);
+        if overlap_max - overlap_min >= w {
+            let mid_x = (overlap_min + overlap_max - w) / 2;
+            return Some(vec![
+                GridPos { x: mid_x, y: src.y - w },
+                GridPos { x: mid_x, y: tgt.y + th },
+            ]);
+        }
+    }
+
+    None
+}
+
 fn stamp_corridor(waypoints: &[GridPos], w: i32, forbidden: &mut HashSet<(i32, i32)>) {
     for pair in waypoints.windows(2) {
         let min_x = pair[0].x.min(pair[1].x);
@@ -153,7 +290,8 @@ fn astar_path(
     let goal = (tx, ty);
 
     if start == goal {
-        return Some(vec![GridPos { x: sx, y: sy }]);
+        // Two identical points so windows(2) produces a segment for rendering
+        return Some(vec![GridPos { x: sx, y: sy }, GridPos { x: sx, y: sy }]);
     }
 
     let heuristic = |x: i32, y: i32| -> i32 {
@@ -353,13 +491,13 @@ fn edge_exits(room: &RoomLayout, other: &RoomLayout, w: i32) -> Vec<(i32, i32)> 
 fn face_exits(room: &RoomLayout, face: Face, w: i32) -> Vec<(i32, i32)> {
     match face {
         Face::Right => {
-            let x = room.x + room.width as i32; // block starts at room's right edge
+            let x = room.x + room.width as i32;
             let min_y = room.y;
             let max_y = room.y + room.height as i32 - w;
             spread(min_y, max_y, w).into_iter().map(|y| (x, y)).collect()
         }
         Face::Left => {
-            let x = room.x - w; // block ends at room's left edge
+            let x = room.x - w;
             let min_y = room.y;
             let max_y = room.y + room.height as i32 - w;
             spread(min_y, max_y, w).into_iter().map(|y| (x, y)).collect()

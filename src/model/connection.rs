@@ -8,6 +8,15 @@ pub struct Connection {
     /// Corridor width in grid squares (default 2)
     #[serde(default = "default_corridor_width")]
     pub corridor_width: u32,
+    /// Double door (2 squares wide instead of 1)
+    #[serde(default)]
+    pub double_door: bool,
+    /// Minimum corridor length in Manhattan distance (grid squares). None = unconstrained.
+    #[serde(default)]
+    pub min_length: Option<u32>,
+    /// Maximum corridor length in Manhattan distance (grid squares). None = unconstrained.
+    #[serde(default)]
+    pub max_length: Option<u32>,
 }
 
 fn default_corridor_width() -> u32 {
@@ -50,6 +59,14 @@ impl Connection {
             connection_type,
             label: None,
             corridor_width: 2,
+            double_door: false,
+            min_length: None,
+            max_length: None,
         }
+    }
+
+    /// Door width in grid squares (1 for single, 2 for double).
+    pub fn door_width(&self) -> u32 {
+        if self.double_door { 2 } else { 1 }
     }
 }
