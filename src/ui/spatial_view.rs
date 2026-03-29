@@ -15,6 +15,8 @@ enum DragTarget {
     Waypoint(usize, usize),
     /// Dragging a group constraint corner: (group index, corner: 0=TL 1=TR 2=BL 3=BR)
     GroupCorner(usize, u8),
+    /// Dragging a whole group (group index)
+    Group(usize),
 }
 
 pub struct SpatialViewState {
@@ -215,6 +217,23 @@ fn handle_spatial_interactions(
                         return;
                     }
                 }
+
+                // Check group body (after rooms, so rooms take priority)
+                for (gi, group) in dungeon.graph.groups.iter().enumerate() {
+                    if let Some((bx, by, bw, bh)) = group.spatial_bounds(layout) {
+                        if gx >= bx && gx < bx + bw as i32
+                            && gy >= by && gy < by + bh as i32
+                        {
+                            state.selected_group = Some(gi);
+                            state.selected_room = None;
+                            state.selected_corridor = None;
+                            state.selected_waypoint = None;
+                            state.drag_target = DragTarget::Group(gi);
+                            state.drag_accum = egui::Vec2::ZERO;
+                            return;
+                        }
+                    }
+                }
             }
         }
     }
@@ -357,7 +376,7 @@ fn handle_spatial_interactions(
     }
 
     // === DELETE KEY — remove selected waypoint ===
-    if response.has_focus() || response.hovered() {
+    if response.has_focus() {
         let delete_pressed = ui.input(|i| {
             i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)
         });
@@ -535,6 +554,42 @@ fn handle_spatial_interactions(
                         }
                     }
                 }
+                DragTarget::Group(gi) => {
+                    let gi = *gi;
+                    if gi < dungeon.graph.groups.len() {
+                        let group_room_ids = dungeon.graph.groups[gi].room_ids.clone();
+                        let room_id_set: std::collections::HashSet<&String> = group_room_ids.iter().collect();
+
+                        // Find connections internal to the group
+                        let internal_conn_ids: Vec<String> = dungeon.graph.connections.iter()
+                            .filter(|e| room_id_set.contains(&e.source_room_id) && room_id_set.contains(&e.target_room_id))
+                            .map(|e| e.connection.id.clone())
+                            .collect();
+
+                        if let Some(layout) = &mut dungeon.layout {
+                            // Move all rooms in the group
+                            for rid in &group_room_ids {
+                                if let Some(rl) = layout.room_by_id_mut(rid) {
+                                    rl.x += grid_steps_x;
+                                    rl.y += grid_steps_y;
+                                }
+                            }
+                            // Move internal corridor waypoints
+                            for corridor in &mut layout.corridors {
+                                if internal_conn_ids.contains(&corridor.connection_id) {
+                                    for wp in &mut corridor.waypoints {
+                                        wp.x += grid_steps_x;
+                                        wp.y += grid_steps_y;
+                                    }
+                                    for wp in &mut corridor.pinned_waypoints {
+                                        wp.x += grid_steps_x;
+                                        wp.y += grid_steps_y;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 DragTarget::None => {}
             }
             state.drag_accum.x -= grid_steps_x as f32 * GRID_PX;
@@ -565,6 +620,14 @@ fn handle_spatial_interactions(
             }
             DragTarget::GroupCorner(_, _) => {
                 // Group constraint changed — will trigger re-solve via hash check
+            }
+            DragTarget::Group(_) => {
+                // Re-route corridors that cross the group boundary
+                if let Some(layout) = &mut dungeon.layout {
+                    layout.corridors =
+                        crate::solver::corridor::route_corridors(&dungeon.graph, layout);
+                    layout.recheck_corridor_overlaps();
+                }
             }
             DragTarget::None => {}
         }
@@ -1112,6 +1175,13 @@ pub fn spatial_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Spa
                 }
             }
         }
+        if ui.button("Rotate 90\u{00b0}").clicked() {
+            if let Some(layout) = &mut dungeon.layout {
+                if let Some(rl) = layout.room_by_id_mut(room_id) {
+                    std::mem::swap(&mut rl.width, &mut rl.height);
+                }
+            }
+        }
     }
 
     // Selected corridor info
@@ -1151,6 +1221,240 @@ pub fn spatial_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Spa
                 ui.add_enabled(has_h, egui::DragValue::new(&mut h).range(1..=100).suffix(" sq"));
             });
             group.max_height = if has_h { Some(h) } else { None };
+
+            ui.add_space(8.0);
+
+            // Duplicate group
+            let group_room_ids = dungeon.graph.groups[gi].room_ids.clone();
+            if ui.button("Duplicate Group").clicked() {
+                duplicate_group(dungeon, &group_room_ids, gi);
+            }
+
+            // Rotate group 90 degrees
+            if ui.button("Rotate Group 90\u{00b0}").clicked() {
+                rotate_group(dungeon, &group_room_ids);
+            }
+
+            ui.horizontal(|ui| {
+                if ui.button("Flip Horizontal").clicked() {
+                    flip_group(dungeon, &group_room_ids, true);
+                }
+                if ui.button("Flip Vertical").clicked() {
+                    flip_group(dungeon, &group_room_ids, false);
+                }
+            });
+        }
+    }
+}
+
+fn duplicate_group(dungeon: &mut Dungeon, room_ids: &[String], group_idx: usize) {
+    use std::collections::HashMap;
+
+    let room_id_set: std::collections::HashSet<&String> = room_ids.iter().collect();
+
+    // Compute group bounding box in spatial layout
+    let mut group_max_x = i32::MIN;
+    let mut group_min_x = i32::MAX;
+    if let Some(layout) = &dungeon.layout {
+        for rid in room_ids {
+            if let Some(rl) = layout.room_by_id(rid) {
+                group_min_x = group_min_x.min(rl.x);
+                group_max_x = group_max_x.max(rl.x + rl.width as i32);
+            }
+        }
+    }
+    let offset_x = if group_max_x > group_min_x { group_max_x - group_min_x + 2 } else { 10 };
+
+    // Clone rooms with new IDs
+    let mut id_map: HashMap<String, String> = HashMap::new();
+    for old_id in room_ids {
+        if let Some(old_room) = dungeon.graph.room_by_id(old_id).cloned() {
+            let mut new_room = Room::new(old_room.label.clone());
+            new_room.tags = old_room.tags;
+            new_room.notes = old_room.notes;
+            new_room.size_hint = old_room.size_hint;
+            new_room.grid_width = old_room.grid_width;
+            new_room.grid_height = old_room.grid_height;
+            new_room.shape = old_room.shape;
+            new_room.allow_rotation = old_room.allow_rotation;
+            id_map.insert(old_id.clone(), new_room.id.clone());
+
+            // Copy graph position with offset
+            if let Some(&(gx, gy)) = dungeon.graph.graph_positions.get(old_id) {
+                dungeon.graph.graph_positions.insert(new_room.id.clone(), (gx + 150.0, gy));
+            }
+
+            dungeon.graph.add_room(new_room);
+        }
+    }
+
+    // Clone connections between group rooms
+    let edges_to_clone: Vec<StoredEdge> = dungeon.graph.connections.iter()
+        .filter(|e| room_id_set.contains(&e.source_room_id) && room_id_set.contains(&e.target_room_id))
+        .cloned()
+        .collect();
+    for old_edge in &edges_to_clone {
+        if let (Some(new_src), Some(new_tgt)) = (
+            id_map.get(&old_edge.source_room_id),
+            id_map.get(&old_edge.target_room_id),
+        ) {
+            let mut new_conn = Connection::new(old_edge.connection.connection_type);
+            new_conn.corridor_width = old_edge.connection.corridor_width;
+            new_conn.double_door = old_edge.connection.double_door;
+            new_conn.label = old_edge.connection.label.clone();
+            new_conn.min_length = old_edge.connection.min_length;
+            new_conn.max_length = old_edge.connection.max_length;
+            dungeon.graph.add_connection(new_src.clone(), new_tgt.clone(), new_conn);
+        }
+    }
+
+    // Clone spatial layout entries
+    if let Some(layout) = &mut dungeon.layout {
+        let new_rooms: Vec<RoomLayout> = room_ids.iter().filter_map(|old_id| {
+            let rl = layout.room_by_id(old_id)?;
+            let new_id = id_map.get(old_id)?;
+            Some(RoomLayout {
+                room_id: new_id.clone(),
+                x: rl.x + offset_x,
+                y: rl.y,
+                width: rl.width,
+                height: rl.height,
+                violations: Vec::new(),
+            })
+        }).collect();
+        layout.rooms.extend(new_rooms);
+
+        // Clone corridors
+        let new_corridors: Vec<CorridorSegment> = edges_to_clone.iter().filter_map(|old_edge| {
+            let new_conn_id = dungeon.graph.connections.iter()
+                .find(|e| {
+                    id_map.get(&old_edge.source_room_id).is_some_and(|s| s == &e.source_room_id)
+                    && id_map.get(&old_edge.target_room_id).is_some_and(|t| t == &e.target_room_id)
+                })
+                .map(|e| e.connection.id.clone())?;
+            let old_corridor = layout.corridors.iter().find(|c| c.connection_id == old_edge.connection.id)?;
+            Some(CorridorSegment {
+                connection_id: new_conn_id,
+                waypoints: old_corridor.waypoints.iter().map(|wp| GridPos { x: wp.x + offset_x, y: wp.y }).collect(),
+                width: old_corridor.width,
+                invalid: false,
+                pinned_waypoints: Vec::new(),
+            })
+        }).collect();
+        layout.corridors.extend(new_corridors);
+    }
+
+    // Create new group
+    let new_room_ids: Vec<String> = id_map.values().cloned().collect();
+    let old_group = &dungeon.graph.groups[group_idx];
+    let mut new_group = RoomGroup::new(format!("{} (copy)", old_group.label));
+    new_group.room_ids = new_room_ids;
+    new_group.max_width = old_group.max_width;
+    new_group.max_height = old_group.max_height;
+    dungeon.graph.groups.push(new_group);
+}
+
+fn rotate_group(dungeon: &mut Dungeon, room_ids: &[String]) {
+    let Some(layout) = &mut dungeon.layout else { return };
+
+    // Find group center
+    let mut sum_cx = 0.0_f32;
+    let mut sum_cy = 0.0_f32;
+    let mut count = 0;
+    for rid in room_ids {
+        if let Some(rl) = layout.room_by_id(rid) {
+            sum_cx += rl.x as f32 + rl.width as f32 / 2.0;
+            sum_cy += rl.y as f32 + rl.height as f32 / 2.0;
+            count += 1;
+        }
+    }
+    if count == 0 { return; }
+    let center_x = sum_cx / count as f32;
+    let center_y = sum_cy / count as f32;
+
+    // Rotate each room 90° CW around center: (x,y) -> (center_x + (y - center_y), center_y - (x - center_x))
+    for rid in room_ids {
+        if let Some(rl) = layout.room_by_id_mut(rid) {
+            let old_cx = rl.x as f32 + rl.width as f32 / 2.0;
+            let old_cy = rl.y as f32 + rl.height as f32 / 2.0;
+            let new_cx = center_x + (old_cy - center_y);
+            let new_cy = center_y - (old_cx - center_x);
+            std::mem::swap(&mut rl.width, &mut rl.height);
+            rl.x = (new_cx - rl.width as f32 / 2.0).round() as i32;
+            rl.y = (new_cy - rl.height as f32 / 2.0).round() as i32;
+        }
+    }
+
+    // Rotate corridor waypoints
+    let room_id_set: std::collections::HashSet<&String> = room_ids.iter().collect();
+    let conn_ids: Vec<String> = dungeon.graph.connections.iter()
+        .filter(|e| room_id_set.contains(&e.source_room_id) && room_id_set.contains(&e.target_room_id))
+        .map(|e| e.connection.id.clone())
+        .collect();
+
+    for corridor in &mut layout.corridors {
+        if conn_ids.contains(&corridor.connection_id) {
+            for wp in &mut corridor.waypoints {
+                let old_x = wp.x as f32;
+                let old_y = wp.y as f32;
+                wp.x = (center_x + (old_y - center_y)).round() as i32;
+                wp.y = (center_y - (old_x - center_x)).round() as i32;
+            }
+            resolve_diagonal_segments_clean(&mut corridor.waypoints);
+        }
+    }
+}
+
+fn flip_group(dungeon: &mut Dungeon, room_ids: &[String], horizontal: bool) {
+    let Some(layout) = &mut dungeon.layout else { return };
+
+    // Find group center
+    let mut sum_cx = 0.0_f32;
+    let mut sum_cy = 0.0_f32;
+    let mut count = 0;
+    for rid in room_ids {
+        if let Some(rl) = layout.room_by_id(rid) {
+            sum_cx += rl.x as f32 + rl.width as f32 / 2.0;
+            sum_cy += rl.y as f32 + rl.height as f32 / 2.0;
+            count += 1;
+        }
+    }
+    if count == 0 { return; }
+    let center_x = sum_cx / count as f32;
+    let center_y = sum_cy / count as f32;
+
+    // Flip each room around center
+    for rid in room_ids {
+        if let Some(rl) = layout.room_by_id_mut(rid) {
+            let old_cx = rl.x as f32 + rl.width as f32 / 2.0;
+            let old_cy = rl.y as f32 + rl.height as f32 / 2.0;
+            if horizontal {
+                let new_cx = center_x - (old_cx - center_x);
+                rl.x = (new_cx - rl.width as f32 / 2.0).round() as i32;
+            } else {
+                let new_cy = center_y - (old_cy - center_y);
+                rl.y = (new_cy - rl.height as f32 / 2.0).round() as i32;
+            }
+        }
+    }
+
+    // Flip corridor waypoints
+    let room_id_set: std::collections::HashSet<&String> = room_ids.iter().collect();
+    let conn_ids: Vec<String> = dungeon.graph.connections.iter()
+        .filter(|e| room_id_set.contains(&e.source_room_id) && room_id_set.contains(&e.target_room_id))
+        .map(|e| e.connection.id.clone())
+        .collect();
+
+    for corridor in &mut layout.corridors {
+        if conn_ids.contains(&corridor.connection_id) {
+            for wp in &mut corridor.waypoints {
+                if horizontal {
+                    wp.x = (2.0 * center_x - wp.x as f32).round() as i32;
+                } else {
+                    wp.y = (2.0 * center_y - wp.y as f32).round() as i32;
+                }
+            }
+            resolve_diagonal_segments_clean(&mut corridor.waypoints);
         }
     }
 }

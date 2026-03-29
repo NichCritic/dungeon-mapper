@@ -7,6 +7,7 @@ pub fn sidebar(
     ui: &mut egui::Ui,
     dungeon: &mut Dungeon,
     selection: &Selection,
+    focus_label: &mut bool,
 ) {
     ui.heading("Properties");
     ui.separator();
@@ -15,7 +16,7 @@ pub fn sidebar(
         let ids: Vec<String> = selection.rooms.iter().cloned().collect();
         if ids.len() == 1 {
             if let Some(room) = dungeon.graph.room_by_id_mut(&ids[0]) {
-                room_properties(ui, room);
+                room_properties(ui, room, focus_label);
             }
         } else {
             ui.label(format!("{} rooms selected", ids.len()));
@@ -405,9 +406,13 @@ fn group_properties(ui: &mut egui::Ui, dungeon: &mut Dungeon, group_id: &str) {
     }
 }
 
-fn room_properties(ui: &mut egui::Ui, room: &mut Room) {
+fn room_properties(ui: &mut egui::Ui, room: &mut Room, focus_label: &mut bool) {
     ui.label("Label:");
-    ui.text_edit_singleline(&mut room.label);
+    let label_response = ui.text_edit_singleline(&mut room.label);
+    if *focus_label {
+        label_response.request_focus();
+        *focus_label = false;
+    }
 
     ui.add_space(8.0);
     ui.label("Size Preset:");

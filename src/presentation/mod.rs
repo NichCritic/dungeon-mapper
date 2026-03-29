@@ -30,6 +30,8 @@ pub struct PresentationState {
     pub doors_open: HashSet<String>,
     pub light_sources: Vec<LightSource>,
     pub ambient_light: f32,
+    /// Whether room labels are shown in the player view.
+    pub show_labels_player: bool,
 }
 
 impl PresentationState {
@@ -43,6 +45,7 @@ impl PresentationState {
             doors_open: HashSet::new(),
             light_sources: Vec::new(),
             ambient_light: 0.0,
+            show_labels_player: false,
         }
     }
 

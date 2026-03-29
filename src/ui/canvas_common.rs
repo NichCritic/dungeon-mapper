@@ -87,6 +87,28 @@ pub fn draw_dashed_line(
     }
 }
 
+/// Truncate text with "..." if it exceeds `max_width` pixels.
+pub fn truncate_to_fit(
+    painter: &egui::Painter,
+    text: &str,
+    font: &egui::FontId,
+    max_width: f32,
+) -> String {
+    let galley = painter.layout_no_wrap(text.to_string(), font.clone(), egui::Color32::WHITE);
+    if galley.size().x <= max_width {
+        return text.to_string();
+    }
+    let char_indices: Vec<usize> = text.char_indices().map(|(i, _)| i).collect();
+    for &end in char_indices.iter().rev() {
+        let candidate = format!("{}...", &text[..end]);
+        let g = painter.layout_no_wrap(candidate.clone(), font.clone(), egui::Color32::WHITE);
+        if g.size().x <= max_width {
+            return candidate;
+        }
+    }
+    "...".to_string()
+}
+
 /// Draw a filled arrow head pointing from `from` toward `to`.
 pub fn draw_arrow_head(painter: &egui::Painter, from: egui::Pos2, to: egui::Pos2, color: egui::Color32) {
     let dir = (to - from).normalized();

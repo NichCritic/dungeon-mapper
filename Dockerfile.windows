@@ -1,0 +1,16 @@
+FROM rust:latest
+
+RUN apt-get update && apt-get install -y \
+    gcc-mingw-w64-x86-64 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN rustup target add x86_64-pc-windows-gnu
+
+WORKDIR /app
+COPY . .
+
+ENV CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc
+
+RUN cargo build --target x86_64-pc-windows-gnu --release
+
+CMD ["echo", "Build complete. Copy from /app/target/x86_64-pc-windows-gnu/release/"]

@@ -20,7 +20,7 @@ pub fn render_themed(
     theme: &Theme,
     options: &RenderOptions,
 ) {
-    let floor = build_floor_set(layout);
+    let floor = build_floor_set(layout, graph);
 
     render_background(renderer, layout, theme);
     render_exterior_shading(renderer, layout, &floor, theme);
@@ -37,6 +37,9 @@ pub fn render_themed(
     for rl in &layout.rooms {
         render_room_walls(renderer, rl, graph, theme);
     }
+    // Redraw corridor floors at circular room junctions to punch through
+    // the circle wall stroke that covers the corridor opening.
+    repair_circle_junctions(renderer, graph, layout, theme);
     for corridor in &layout.corridors {
         render_corridor_walls(renderer, corridor, &floor, theme);
     }
@@ -152,7 +155,7 @@ pub fn render_grid(
     renderer: &mut dyn MapRenderer,
     floor: &HashSet<(i32, i32)>,
 ) {
-    let grid_color = [140, 140, 140, 100];
+    let grid_color = [80, 80, 80, 180];
 
     for &(fx, fy) in floor {
         let px = fx as f32 * GRID_PX;
@@ -243,6 +246,54 @@ pub fn render_corridor_walls(
             if !floor.contains(&(max_gx, y)) {
                 let ly = y as f32 * GRID_PX;
                 renderer.draw_line(px2, ly, px2, ly + GRID_PX, wall_w, theme.wall_color);
+            }
+        }
+    }
+}
+
+/// Redraw corridor floor segments that overlap with circular room bounding boxes.
+/// This repairs the circle wall stroke that would otherwise cover the corridor opening.
+pub fn repair_circle_junctions(
+    renderer: &mut dyn MapRenderer,
+    graph: &DungeonGraph,
+    layout: &SpatialLayout,
+    theme: &Theme,
+) {
+    // Collect circular room bounding rects
+    let circle_rooms: Vec<&RoomLayout> = layout.rooms.iter().filter(|rl| {
+        graph.room_by_id(&rl.room_id)
+            .is_some_and(|r| r.shape == RoomShape::Circle)
+    }).collect();
+
+    if circle_rooms.is_empty() {
+        return;
+    }
+
+    for corridor in &layout.corridors {
+        let cw = corridor.width as i32;
+        let half = cw / 2;
+        for pair in corridor.waypoints.windows(2) {
+            let min_gx = pair[0].x.min(pair[1].x) - half;
+            let min_gy = pair[0].y.min(pair[1].y) - half;
+            let max_gx = pair[0].x.max(pair[1].x) - half + cw;
+            let max_gy = pair[0].y.max(pair[1].y) - half + cw;
+
+            for rl in &circle_rooms {
+                let room_max_x = rl.x + rl.width as i32;
+                let room_max_y = rl.y + rl.height as i32;
+                // Check if this corridor segment overlaps with the room bounds
+                let overlap_min_x = min_gx.max(rl.x);
+                let overlap_min_y = min_gy.max(rl.y);
+                let overlap_max_x = max_gx.min(room_max_x);
+                let overlap_max_y = max_gy.min(room_max_y);
+                if overlap_min_x < overlap_max_x && overlap_min_y < overlap_max_y {
+                    // Redraw the corridor floor in this overlap region
+                    let px = overlap_min_x as f32 * GRID_PX;
+                    let py = overlap_min_y as f32 * GRID_PX;
+                    let pw = (overlap_max_x - overlap_min_x) as f32 * GRID_PX;
+                    let ph = (overlap_max_y - overlap_min_y) as f32 * GRID_PX;
+                    renderer.fill_rect(px, py, pw, ph, theme.floor_color);
+                }
             }
         }
     }
@@ -350,12 +401,31 @@ pub fn render_labels(
 }
 
 /// Build the set of all floor cells from room and corridor geometry.
-pub fn build_floor_set(layout: &SpatialLayout) -> HashSet<(i32, i32)> {
+pub fn build_floor_set(layout: &SpatialLayout, graph: &DungeonGraph) -> HashSet<(i32, i32)> {
     let mut floor: HashSet<(i32, i32)> = HashSet::new();
     for rl in &layout.rooms {
-        for y in rl.y..(rl.y + rl.height as i32) {
-            for x in rl.x..(rl.x + rl.width as i32) {
-                floor.insert((x, y));
+        let is_circle = graph.room_by_id(&rl.room_id)
+            .is_some_and(|r| r.shape == RoomShape::Circle);
+        if is_circle {
+            let cx = rl.x as f32 + rl.width as f32 / 2.0;
+            let cy = rl.y as f32 + rl.height as f32 / 2.0;
+            let r = (rl.width.min(rl.height) as f32) / 2.0;
+            for y in rl.y..(rl.y + rl.height as i32) {
+                for x in rl.x..(rl.x + rl.width as i32) {
+                    let cell_cx = x as f32 + 0.5;
+                    let cell_cy = y as f32 + 0.5;
+                    let dx = cell_cx - cx;
+                    let dy = cell_cy - cy;
+                    if dx * dx + dy * dy <= r * r {
+                        floor.insert((x, y));
+                    }
+                }
+            }
+        } else {
+            for y in rl.y..(rl.y + rl.height as i32) {
+                for x in rl.x..(rl.x + rl.width as i32) {
+                    floor.insert((x, y));
+                }
             }
         }
     }

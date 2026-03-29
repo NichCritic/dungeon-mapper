@@ -29,9 +29,28 @@ fn build_visible_floor_set(
     for rl in &layout.rooms {
         let vis = presentation.room_visibility(&rl.room_id);
         if *vis == Visibility::Hidden { continue; }
-        for y in rl.y..(rl.y + rl.height as i32) {
-            for x in rl.x..(rl.x + rl.width as i32) {
-                floor.insert((x, y));
+        let is_circle = graph.room_by_id(&rl.room_id)
+            .is_some_and(|r| r.shape == RoomShape::Circle);
+        if is_circle {
+            let cx = rl.x as f32 + rl.width as f32 / 2.0;
+            let cy = rl.y as f32 + rl.height as f32 / 2.0;
+            let r = (rl.width.min(rl.height) as f32) / 2.0;
+            for y in rl.y..(rl.y + rl.height as i32) {
+                for x in rl.x..(rl.x + rl.width as i32) {
+                    let cell_cx = x as f32 + 0.5;
+                    let cell_cy = y as f32 + 0.5;
+                    let dx = cell_cx - cx;
+                    let dy = cell_cy - cy;
+                    if dx * dx + dy * dy <= r * r {
+                        floor.insert((x, y));
+                    }
+                }
+            }
+        } else {
+            for y in rl.y..(rl.y + rl.height as i32) {
+                for x in rl.x..(rl.x + rl.width as i32) {
+                    floor.insert((x, y));
+                }
             }
         }
     }
@@ -133,6 +152,7 @@ pub fn render_player_view(
             render_room_walls(renderer, rl, graph, theme);
         }
     }
+    repair_circle_junctions(renderer, graph, layout, theme);
 
     // Corridor walls
     for corridor in &layout.corridors {

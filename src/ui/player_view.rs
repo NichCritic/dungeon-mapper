@@ -3,7 +3,7 @@ use crate::presentation::PresentationState;
 use crate::render::presentation::render_player_view;
 use crate::render::recording::{RecordingRenderer, RenderCommand, replay_commands};
 use crate::render::themed::RenderOptions;
-use crate::ui::canvas_common::{handle_pan_zoom, ViewState};
+use crate::ui::canvas_common::{handle_pan_zoom, truncate_to_fit, ViewState};
 use crate::util::{ViewTransform, GRID_PX};
 
 struct PlayerRenderCache {
@@ -71,6 +71,7 @@ fn player_input_hash(
         light.intensity.to_bits().hash(&mut h);
     }
     presentation.ambient_light.to_bits().hash(&mut h);
+    presentation.show_labels_player.hash(&mut h);
     h.finish()
 }
 
@@ -115,7 +116,7 @@ pub fn player_viewport(
             let mut recorder = RecordingRenderer::new();
             let options = RenderOptions {
                 show_grid: true,
-                show_labels: true,
+                show_labels: presentation.show_labels_player,
                 show_notes: false,
                 show_secrets: false,
             };
@@ -138,6 +139,7 @@ pub fn player_viewport(
         }
 
         // Live text overlay for visible room labels
+        if !presentation.show_labels_player { return; }
         for rl in &layout.rooms {
             if *presentation.room_visibility(&rl.room_id) != crate::presentation::Visibility::Visible {
                 continue;
@@ -146,11 +148,14 @@ pub fn player_viewport(
                 let cx = (rl.x as f32 + rl.width as f32 / 2.0) * GRID_PX;
                 let cy = (rl.y as f32 + rl.height as f32 / 2.0) * GRID_PX;
                 let screen = transform.world_to_screen(egui::pos2(cx, cy));
+                let max_width = rl.width as f32 * GRID_PX * transform.zoom;
+                let font = egui::FontId::monospace(10.0 * transform.zoom);
+                let label = truncate_to_fit(&painter, &room.label, &font, max_width);
                 painter.text(
                     screen,
                     egui::Align2::CENTER_CENTER,
-                    &room.label,
-                    egui::FontId::monospace(10.0 * transform.zoom),
+                    &label,
+                    font,
                     egui::Color32::from_rgb(60, 60, 60),
                 );
             }

@@ -3,7 +3,7 @@ use std::hash::{Hash, Hasher};
 use crate::model::*;
 use crate::render::recording::{RecordingRenderer, RenderCommand, replay_commands};
 use crate::render::themed::RenderOptions;
-use crate::ui::canvas_common::{handle_pan_zoom, ViewState, COLOR_PLACEHOLDER_TEXT};
+use crate::ui::canvas_common::{handle_pan_zoom, truncate_to_fit, ViewState, COLOR_PLACEHOLDER_TEXT};
 use crate::util::{ViewTransform, GRID_PX};
 
 /// Cached world-space drawing commands from render_themed.
@@ -190,22 +190,27 @@ fn draw_text_overlay(
                 let cx = (rl.x as f32 + rl.width as f32 / 2.0) * GRID_PX;
                 let cy = (rl.y as f32 + rl.height as f32 / 2.0) * GRID_PX;
                 let screen = transform.world_to_screen(egui::pos2(cx, cy));
+                let max_width = rl.width as f32 * GRID_PX * transform.zoom;
+                let font = egui::FontId::monospace(10.0 * transform.zoom);
+                let label = truncate_to_fit(painter, &room.label, &font, max_width);
 
                 painter.text(
                     screen,
                     egui::Align2::CENTER_CENTER,
-                    &room.label,
-                    egui::FontId::monospace(10.0 * transform.zoom),
+                    &label,
+                    font.clone(),
                     egui::Color32::from_rgb(60, 60, 60),
                 );
 
                 if state.show_notes && !room.notes.is_empty() {
                     let notes_screen = transform.world_to_screen(egui::pos2(cx, cy + 14.0));
+                    let notes_font = egui::FontId::monospace(7.0 * transform.zoom);
+                    let notes = truncate_to_fit(painter, &room.notes, &notes_font, max_width);
                     painter.text(
                         notes_screen,
                         egui::Align2::CENTER_CENTER,
-                        &room.notes,
-                        egui::FontId::monospace(7.0 * transform.zoom),
+                        &notes,
+                        notes_font,
                         egui::Color32::from_rgb(120, 120, 120),
                     );
                 }
@@ -213,6 +218,7 @@ fn draw_text_overlay(
         }
     }
 }
+
 
 pub fn styled_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut StyledViewState) {
     ui.heading("Styled View");

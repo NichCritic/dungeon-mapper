@@ -498,6 +498,7 @@ pub fn presentation_sidebar(
     if ui.button(if *player_viewport_open { "Close Player Window" } else { "Open Player Window" }).clicked() {
         *player_viewport_open = !*player_viewport_open;
     }
+    ui.checkbox(&mut presentation.show_labels_player, "Show labels to players");
 
     // Player view zoom: 1 inch per square on 40" screen
     if ui.button("Player: 1\"/square (40\" screen)").clicked() {

@@ -396,6 +396,7 @@ impl eframe::App for DungeonApp {
                                     ui,
                                     &mut self.dungeon,
                                     &self.graph_state.selection,
+                                    &mut self.graph_state.focus_label,
                                 );
                             }
                             Tab::Spatial => {

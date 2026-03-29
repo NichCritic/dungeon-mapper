@@ -71,6 +71,14 @@ pub enum DragState {
     Marquee(egui::Pos2),
 }
 
+/// Clipboard for copy/paste in the graph editor.
+#[derive(Clone, Debug, Default)]
+pub struct GraphClipboard {
+    pub rooms: Vec<Room>,
+    pub connections: Vec<StoredEdge>,
+    pub positions: HashMap<String, egui::Pos2>,
+}
+
 /// State specific to the graph editor view
 pub struct GraphEditorState {
     pub view: ViewState,
@@ -78,6 +86,9 @@ pub struct GraphEditorState {
     pub selection: Selection,
     pub drag_state: DragState,
     next_room_number: u32,
+    /// One-shot flag: sidebar should focus the label text field.
+    pub focus_label: bool,
+    pub clipboard: Option<GraphClipboard>,
 }
 
 impl Default for GraphEditorState {
@@ -88,13 +99,26 @@ impl Default for GraphEditorState {
             selection: Selection::default(),
             drag_state: DragState::None,
             next_room_number: 1,
+            focus_label: false,
+            clipboard: None,
         }
     }
 }
 
-const NODE_WIDTH: f32 = 120.0;
-const NODE_HEIGHT: f32 = 50.0;
+const NODE_MIN_WIDTH: f32 = 120.0;
+const NODE_MIN_HEIGHT: f32 = 50.0;
 const CONNECT_HANDLE_RADIUS: f32 = 8.0;
+
+/// Per-room dimensions in world space.
+type NodeSizes = HashMap<String, (f32, f32)>;
+
+fn default_node_size() -> (f32, f32) {
+    (NODE_MIN_WIDTH, NODE_MIN_HEIGHT)
+}
+
+fn node_size(sizes: &NodeSizes, id: &str) -> (f32, f32) {
+    sizes.get(id).copied().unwrap_or_else(default_node_size)
+}
 
 pub fn graph_editor(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut GraphEditorState) {
     let (response, painter) = ui.allocate_painter(
@@ -127,26 +151,41 @@ pub fn graph_editor(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut GraphE
         .map(|(id, pos)| (id.clone(), (pos.x, pos.y)))
         .collect();
 
+    // Build per-room sizes by measuring label text
+    let node_sizes: NodeSizes = dungeon.graph.rooms.iter().map(|room| {
+        let galley = ui.fonts(|f| {
+            f.layout_no_wrap(
+                room.label.clone(),
+                egui::FontId::monospace(12.0),
+                egui::Color32::WHITE,
+            )
+        });
+        let w = (galley.size().x + 24.0).max(NODE_MIN_WIDTH);
+        let h = (galley.size().y + 16.0).max(NODE_MIN_HEIGHT);
+        (room.id.clone(), (w, h))
+    }).collect();
+
     // Handle interactions
-    handle_interactions(ui, &response, &transform, dungeon, state);
+    handle_interactions(ui, &response, &transform, dungeon, state, &node_sizes);
 
     // Draw groups (behind everything)
-    draw_groups(&painter, &transform, dungeon, state);
+    draw_groups(&painter, &transform, dungeon, state, &node_sizes);
 
     // Draw connections
-    draw_connections(&painter, &transform, dungeon, state);
+    draw_connections(&painter, &transform, dungeon, state, &node_sizes);
 
     // Draw rooms
-    draw_rooms(&painter, &transform, dungeon, state);
+    draw_rooms(&painter, &transform, dungeon, state, &node_sizes);
 
     // Draw in-progress connection line
     if let DragState::ConnectingFrom(ref src_id) = state.drag_state {
         if let Some(&src_pos) = state.room_positions.get(src_id) {
             if let Some(pointer) = response.hover_pos() {
                 let world_target = transform.screen_to_world(pointer);
+                let (nw, nh) = node_size(&node_sizes, src_id);
                 let src_rect = egui::Rect::from_center_size(
                     src_pos,
-                    egui::vec2(NODE_WIDTH, NODE_HEIGHT),
+                    egui::vec2(nw, nh),
                 );
                 let src_edge = rect_edge_intersection(src_pos, world_target, src_rect);
                 let screen_src = transform.world_to_screen(src_edge);
@@ -184,6 +223,7 @@ fn handle_interactions(
     transform: &ViewTransform,
     dungeon: &mut Dungeon,
     state: &mut GraphEditorState,
+    node_sizes: &NodeSizes,
 ) {
     let pointer = response.hover_pos();
 
@@ -191,11 +231,15 @@ fn handle_interactions(
     let shift = modifiers.shift;
     let ctrl = modifiers.ctrl;
 
-    // Double-click to create room
+    // Double-click: edit existing room label, or create new room on empty space
     if response.double_clicked() {
         if let Some(pos) = pointer {
             let world_pos = transform.screen_to_world(pos);
-            if hit_test_room(world_pos, &state.room_positions).is_none() {
+            if let Some(room_id) = hit_test_room(world_pos, &state.room_positions, node_sizes) {
+                // Double-clicked an existing room: select it and focus label
+                state.selection.select_room(room_id);
+                state.focus_label = true;
+            } else {
                 let connect_and_select = ctrl;
                 let connect_no_select = modifiers.alt;
 
@@ -232,7 +276,7 @@ fn handle_interactions(
         if let Some(pos) = pointer {
             let world_pos = transform.screen_to_world(pos);
 
-            if let Some(room_id) = hit_test_room(world_pos, &state.room_positions) {
+            if let Some(room_id) = hit_test_room(world_pos, &state.room_positions, node_sizes) {
                 if ctrl && !state.selection.rooms.is_empty() {
                     // Connect all selected rooms to the clicked room
                     let selected: Vec<String> = state.selection.rooms.iter()
@@ -253,7 +297,7 @@ fn handle_interactions(
                 } else {
                     state.selection.select_room(room_id);
                 }
-            } else if let Some(conn_id) = hit_test_connection(world_pos, &dungeon.graph, &state.room_positions, state.view.zoom) {
+            } else if let Some(conn_id) = hit_test_connection(world_pos, &dungeon.graph, &state.room_positions, state.view.zoom, node_sizes) {
                 if shift {
                     if !state.selection.connections.remove(&conn_id) {
                         state.selection.connections.insert(conn_id);
@@ -261,7 +305,7 @@ fn handle_interactions(
                 } else {
                     state.selection.select_connection(conn_id);
                 }
-            } else if let Some(group_id) = hit_test_group(world_pos, &dungeon.graph, &state.room_positions) {
+            } else if let Some(group_id) = hit_test_group(world_pos, &dungeon.graph, &state.room_positions, node_sizes) {
                 state.selection.select_group(group_id);
             } else if !shift && !ctrl && !modifiers.alt {
                 state.selection.clear();
@@ -274,9 +318,9 @@ fn handle_interactions(
         if let Some(pos) = pointer {
             let world_pos = transform.screen_to_world(pos);
 
-            if let Some(room_id) = hit_test_connect_handle(world_pos, &state.room_positions, transform) {
+            if let Some(room_id) = hit_test_connect_handle(world_pos, &state.room_positions, transform, node_sizes) {
                 state.drag_state = DragState::ConnectingFrom(room_id);
-            } else if let Some(room_id) = hit_test_room(world_pos, &state.room_positions) {
+            } else if let Some(room_id) = hit_test_room(world_pos, &state.room_positions, node_sizes) {
                 // If dragging a selected room, move all selected rooms
                 if !state.selection.rooms.contains(&room_id) {
                     if !shift {
@@ -318,7 +362,7 @@ fn handle_interactions(
                 let src_id = src_id.clone();
                 if let Some(pos) = pointer {
                     let world_pos = transform.screen_to_world(pos);
-                    if let Some(target_id) = hit_test_room(world_pos, &state.room_positions) {
+                    if let Some(target_id) = hit_test_room(world_pos, &state.room_positions, node_sizes) {
                         if target_id != src_id {
                             let conn = Connection::new(ConnectionType::Door);
                             let conn_id = conn.id.clone();
@@ -356,7 +400,7 @@ fn handle_interactions(
     }
 
     // Delete key — delete all selected items
-    if response.has_focus() || response.hovered() {
+    if response.has_focus() {
         let delete_pressed = ui.input(|i| {
             i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)
         });
@@ -373,16 +417,82 @@ fn handle_interactions(
             }
         }
     }
+
+    // Copy (Ctrl+C) — only when canvas is focused or hovered
+    let copy = (response.has_focus() || response.hovered())
+        && ui.input(|i| i.key_pressed(egui::Key::C) && i.modifiers.command);
+    if copy && !state.selection.rooms.is_empty() {
+        let selected_rooms: Vec<Room> = state.selection.rooms.iter()
+            .filter_map(|id| dungeon.graph.room_by_id(id).cloned())
+            .collect();
+        let selected_ids: HashSet<&String> = state.selection.rooms.iter().collect();
+        let selected_connections: Vec<StoredEdge> = dungeon.graph.connections.iter()
+            .filter(|e| selected_ids.contains(&e.source_room_id) && selected_ids.contains(&e.target_room_id))
+            .cloned()
+            .collect();
+        let positions: HashMap<String, egui::Pos2> = state.selection.rooms.iter()
+            .filter_map(|id| state.room_positions.get(id).map(|&pos| (id.clone(), pos)))
+            .collect();
+        state.clipboard = Some(GraphClipboard { rooms: selected_rooms, connections: selected_connections, positions });
+    }
+
+    // Paste (Ctrl+V) — only when canvas is focused or hovered
+    let paste = (response.has_focus() || response.hovered())
+        && ui.input(|i| i.key_pressed(egui::Key::V) && i.modifiers.command);
+    if paste {
+        if let Some(clip) = state.clipboard.clone() {
+            let offset = egui::vec2(30.0, 30.0);
+            let mut id_map: HashMap<String, String> = HashMap::new();
+            state.selection.clear();
+
+            for old_room in &clip.rooms {
+                let mut new_room = Room::new(old_room.label.clone());
+                new_room.tags = old_room.tags.clone();
+                new_room.notes = old_room.notes.clone();
+                new_room.size_hint = old_room.size_hint;
+                new_room.grid_width = old_room.grid_width;
+                new_room.grid_height = old_room.grid_height;
+                new_room.shape = old_room.shape;
+                new_room.allow_rotation = old_room.allow_rotation;
+                let new_id = new_room.id.clone();
+                id_map.insert(old_room.id.clone(), new_id.clone());
+
+                if let Some(&old_pos) = clip.positions.get(&old_room.id) {
+                    state.room_positions.insert(new_id.clone(), old_pos + offset);
+                }
+
+                dungeon.graph.add_room(new_room);
+                state.selection.rooms.insert(new_id);
+            }
+
+            for old_edge in &clip.connections {
+                if let (Some(new_src), Some(new_tgt)) = (
+                    id_map.get(&old_edge.source_room_id),
+                    id_map.get(&old_edge.target_room_id),
+                ) {
+                    let mut new_conn = Connection::new(old_edge.connection.connection_type);
+                    new_conn.corridor_width = old_edge.connection.corridor_width;
+                    new_conn.double_door = old_edge.connection.double_door;
+                    new_conn.label = old_edge.connection.label.clone();
+                    new_conn.min_length = old_edge.connection.min_length;
+                    new_conn.max_length = old_edge.connection.max_length;
+                    dungeon.graph.add_connection(new_src.clone(), new_tgt.clone(), new_conn);
+                }
+            }
+        }
+    }
 }
 
 fn hit_test_room(
     world_pos: egui::Pos2,
     room_positions: &HashMap<String, egui::Pos2>,
+    node_sizes: &NodeSizes,
 ) -> Option<String> {
     for (id, &pos) in room_positions {
+        let (nw, nh) = node_size(node_sizes, id);
         let room_rect = egui::Rect::from_min_size(
-            pos - egui::vec2(NODE_WIDTH / 2.0, NODE_HEIGHT / 2.0),
-            egui::vec2(NODE_WIDTH, NODE_HEIGHT),
+            pos - egui::vec2(nw / 2.0, nh / 2.0),
+            egui::vec2(nw, nh),
         );
         if room_rect.contains(world_pos) {
             return Some(id.clone());
@@ -395,10 +505,12 @@ fn hit_test_connect_handle(
     world_pos: egui::Pos2,
     room_positions: &HashMap<String, egui::Pos2>,
     _transform: &ViewTransform,
+    node_sizes: &NodeSizes,
 ) -> Option<String> {
     for (id, &pos) in room_positions {
+        let (nw, _) = node_size(node_sizes, id);
         // Handle on the right edge of the room
-        let handle_center = pos + egui::vec2(NODE_WIDTH / 2.0, 0.0);
+        let handle_center = pos + egui::vec2(nw / 2.0, 0.0);
         if world_pos.distance(handle_center) < CONNECT_HANDLE_RADIUS * 2.0 {
             return Some(id.clone());
         }
@@ -410,6 +522,7 @@ fn hit_test_group(
     world_pos: egui::Pos2,
     graph: &DungeonGraph,
     room_positions: &HashMap<String, egui::Pos2>,
+    node_sizes: &NodeSizes,
 ) -> Option<String> {
     let padding = 20.0;
     for group in &graph.groups {
@@ -422,10 +535,11 @@ fn hit_test_group(
         let mut max_y = f32::MIN;
         for room_id in &group.room_ids {
             if let Some(&pos) = room_positions.get(room_id) {
-                min_x = min_x.min(pos.x - NODE_WIDTH / 2.0);
-                min_y = min_y.min(pos.y - NODE_HEIGHT / 2.0);
-                max_x = max_x.max(pos.x + NODE_WIDTH / 2.0);
-                max_y = max_y.max(pos.y + NODE_HEIGHT / 2.0);
+                let (nw, nh) = node_size(node_sizes, room_id);
+                min_x = min_x.min(pos.x - nw / 2.0);
+                min_y = min_y.min(pos.y - nh / 2.0);
+                max_x = max_x.max(pos.x + nw / 2.0);
+                max_y = max_y.max(pos.y + nh / 2.0);
             }
         }
         if min_x > max_x {
@@ -447,6 +561,7 @@ fn hit_test_connection(
     graph: &DungeonGraph,
     room_positions: &HashMap<String, egui::Pos2>,
     zoom: f32,
+    node_sizes: &NodeSizes,
 ) -> Option<String> {
     // Threshold in screen pixels, divided by zoom to get world units.
     // This keeps the click area consistent regardless of zoom level.
@@ -457,14 +572,16 @@ fn hit_test_connection(
             room_positions.get(&edge.source_room_id),
             room_positions.get(&edge.target_room_id),
         ) {
+            let (sw, sh) = node_size(node_sizes, &edge.source_room_id);
+            let (tw, th) = node_size(node_sizes, &edge.target_room_id);
             // Test against the visible edge-to-edge line, not center-to-center
             let src_rect = egui::Rect::from_center_size(
                 src,
-                egui::vec2(NODE_WIDTH, NODE_HEIGHT),
+                egui::vec2(sw, sh),
             );
             let tgt_rect = egui::Rect::from_center_size(
                 tgt,
-                egui::vec2(NODE_WIDTH, NODE_HEIGHT),
+                egui::vec2(tw, th),
             );
             let src_edge = rect_edge_intersection(src, tgt, src_rect);
             let tgt_edge = rect_edge_intersection(tgt, src, tgt_rect);
@@ -545,6 +662,7 @@ fn draw_groups(
     transform: &ViewTransform,
     dungeon: &Dungeon,
     state: &GraphEditorState,
+    node_sizes: &NodeSizes,
 ) {
     for group in &dungeon.graph.groups {
         if group.room_ids.is_empty() {
@@ -559,10 +677,11 @@ fn draw_groups(
 
         for room_id in &group.room_ids {
             if let Some(&pos) = state.room_positions.get(room_id) {
-                min_x = min_x.min(pos.x - NODE_WIDTH / 2.0);
-                min_y = min_y.min(pos.y - NODE_HEIGHT / 2.0);
-                max_x = max_x.max(pos.x + NODE_WIDTH / 2.0);
-                max_y = max_y.max(pos.y + NODE_HEIGHT / 2.0);
+                let (nw, nh) = node_size(node_sizes, room_id);
+                min_x = min_x.min(pos.x - nw / 2.0);
+                min_y = min_y.min(pos.y - nh / 2.0);
+                max_x = max_x.max(pos.x + nw / 2.0);
+                max_y = max_y.max(pos.y + nh / 2.0);
             }
         }
 
@@ -603,6 +722,7 @@ fn draw_connections(
     transform: &ViewTransform,
     dungeon: &Dungeon,
     state: &GraphEditorState,
+    node_sizes: &NodeSizes,
 ) {
     // Count connections between each room pair to offset duplicates
     // Count connections per room pair to offset duplicate lines
@@ -658,13 +778,15 @@ fn draw_connections(
             // Clip line endpoints to room rectangle edges
             let src_offset = src + offset;
             let tgt_offset = tgt + offset;
+            let (sw, sh) = node_size(node_sizes, &edge.source_room_id);
+            let (tw, th) = node_size(node_sizes, &edge.target_room_id);
             let src_rect = egui::Rect::from_center_size(
                 src,
-                egui::vec2(NODE_WIDTH, NODE_HEIGHT),
+                egui::vec2(sw, sh),
             );
             let tgt_rect = egui::Rect::from_center_size(
                 tgt,
-                egui::vec2(NODE_WIDTH, NODE_HEIGHT),
+                egui::vec2(tw, th),
             );
             let src_edge = rect_edge_intersection(src_offset, tgt_offset, src_rect);
             let tgt_edge = rect_edge_intersection(tgt_offset, src_offset, tgt_rect);
@@ -722,12 +844,14 @@ fn draw_rooms(
     transform: &ViewTransform,
     dungeon: &Dungeon,
     state: &GraphEditorState,
+    node_sizes: &NodeSizes,
 ) {
     for room in &dungeon.graph.rooms {
         if let Some(&world_pos) = state.room_positions.get(&room.id) {
             let screen_pos = transform.world_to_screen(world_pos);
-            let w = NODE_WIDTH * transform.zoom;
-            let h = NODE_HEIGHT * transform.zoom;
+            let (nw, nh) = node_size(node_sizes, &room.id);
+            let w = nw * transform.zoom;
+            let h = nh * transform.zoom;
 
             let node_rect = egui::Rect::from_center_size(screen_pos, egui::vec2(w, h));
 
