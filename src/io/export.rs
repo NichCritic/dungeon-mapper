@@ -2,6 +2,7 @@ use std::path::Path;
 
 use crate::model::Dungeon;
 use crate::render::ImageRenderer;
+use crate::render::themed::RenderOptions;
 use crate::util::GRID_PX;
 
 pub fn export_png(
@@ -22,16 +23,21 @@ pub fn export_png(
     let height = (grid_h as f32 * scale) as u32;
 
     let mut renderer = ImageRenderer::new(width, height, scale / GRID_PX);
+    renderer.offset_x = (min_x - margin) as f32 * GRID_PX;
+    renderer.offset_y = (min_y - margin) as f32 * GRID_PX;
 
+    let options = RenderOptions {
+        show_grid: dungeon.theme.grid_visible,
+        show_labels: true,
+        show_notes: dm_mode,
+        show_secrets: dm_mode,
+    };
     crate::render::themed::render_themed(
         &mut renderer,
         &dungeon.graph,
         layout,
         &dungeon.theme,
-        dungeon.theme.grid_visible,
-        true,
-        dm_mode,
-        dm_mode,
+        &options,
     );
 
     renderer

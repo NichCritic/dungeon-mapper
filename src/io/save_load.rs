@@ -6,7 +6,7 @@ pub fn save_dungeon(dungeon: &Dungeon) -> Result<PathBuf, String> {
     let path = rfd::FileDialog::new()
         .set_title("Save Dungeon")
         .add_filter("Dungeon File", &["dungeon"])
-        .set_file_name(&format!("{}.dungeon", dungeon.name))
+        .set_file_name(format!("{}.dungeon", dungeon.name))
         .save_file()
         .ok_or("Save cancelled")?;
 

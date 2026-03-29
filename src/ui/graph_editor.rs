@@ -1,7 +1,10 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::model::*;
-use crate::ui::canvas_common::{handle_pan_zoom, ViewState};
+use crate::ui::canvas_common::{
+    handle_pan_zoom, draw_arrow_head, draw_dashed_line,
+    ViewState, COLOR_GRAPH_BG, COLOR_SELECTION,
+};
 use crate::util::{point_to_segment_dist, ViewTransform};
 
 /// Multi-selection state for graph editor
@@ -101,7 +104,7 @@ pub fn graph_editor(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut GraphE
     let rect = response.rect;
 
     // Fill canvas background
-    painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(35, 35, 40));
+    painter.rect_filled(rect, 0.0, COLOR_GRAPH_BG);
 
     handle_pan_zoom(&response, &mut state.view);
     let transform = ViewTransform::new(state.view.offset, state.view.zoom, rect);
@@ -149,7 +152,7 @@ pub fn graph_editor(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut GraphE
                 let screen_src = transform.world_to_screen(src_edge);
                 painter.line_segment(
                     [screen_src, pointer],
-                    egui::Stroke::new(2.0, egui::Color32::from_rgb(100, 200, 255)),
+                    egui::Stroke::new(2.0, COLOR_SELECTION),
                 );
             }
         }
@@ -576,7 +579,7 @@ fn draw_groups(
         let c = group.color;
         let fill = egui::Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]);
         let border_color = if is_selected {
-            egui::Color32::from_rgb(100, 200, 255)
+            COLOR_SELECTION
         } else {
             egui::Color32::from_rgba_unmultiplied(c[0], c[1], c[2], (c[3] as u16 * 3).min(255) as u8)
         };
@@ -673,7 +676,7 @@ fn draw_connections(
             let has_constraints = edge.connection.min_length.is_some() || edge.connection.max_length.is_some();
 
             let (color, width) = if is_selected {
-                (egui::Color32::from_rgb(100, 200, 255), 3.0)
+                (COLOR_SELECTION, 3.0)
             } else if has_constraints {
                 // Subtle amber tint for constrained connections
                 match edge.connection.connection_type {
@@ -713,44 +716,6 @@ fn draw_connections(
     }
 }
 
-fn draw_dashed_line(
-    painter: &egui::Painter,
-    from: egui::Pos2,
-    to: egui::Pos2,
-    stroke: egui::Stroke,
-    dash_len: f32,
-    gap_len: f32,
-) {
-    let dir = to - from;
-    let total_len = dir.length();
-    if total_len < 1.0 {
-        return;
-    }
-    let dir_norm = dir / total_len;
-    let mut d = 0.0;
-    while d < total_len {
-        let seg_start = from + dir_norm * d;
-        let seg_end = from + dir_norm * (d + dash_len).min(total_len);
-        painter.line_segment([seg_start, seg_end], stroke);
-        d += dash_len + gap_len;
-    }
-}
-
-fn draw_arrow_head(painter: &egui::Painter, from: egui::Pos2, to: egui::Pos2, color: egui::Color32) {
-    let dir = (to - from).normalized();
-    let perp = egui::vec2(-dir.y, dir.x);
-    let arrow_size = 10.0;
-
-    let tip = to;
-    let left = tip - dir * arrow_size + perp * arrow_size * 0.5;
-    let right = tip - dir * arrow_size - perp * arrow_size * 0.5;
-
-    painter.add(egui::Shape::convex_polygon(
-        vec![tip, left, right],
-        color,
-        egui::Stroke::NONE,
-    ));
-}
 
 fn draw_rooms(
     painter: &egui::Painter,
@@ -774,7 +739,7 @@ fn draw_rooms(
 
             // Border
             let border_color = if is_selected {
-                egui::Color32::from_rgb(100, 200, 255)
+                COLOR_SELECTION
             } else {
                 room.primary_color()
             };
@@ -796,7 +761,7 @@ fn draw_rooms(
             painter.circle_filled(
                 handle_pos,
                 CONNECT_HANDLE_RADIUS * transform.zoom * 0.5,
-                egui::Color32::from_rgb(100, 200, 255).linear_multiply(0.5),
+                COLOR_SELECTION.linear_multiply(0.5),
             );
         }
     }

@@ -1,7 +1,9 @@
 mod app;
 mod io;
 mod model;
+mod presentation;
 mod render;
+mod server;
 mod solver;
 mod ui;
 mod util;

@@ -1,5 +1,8 @@
 use crate::model::*;
-use crate::ui::canvas_common::{handle_pan_zoom, ViewState};
+use crate::ui::canvas_common::{
+    handle_pan_zoom, draw_dashed_line,
+    ViewState, COLOR_SPATIAL_BG, COLOR_SELECTION, COLOR_PLACEHOLDER_TEXT,
+};
 use crate::util::{grid_to_world, point_to_segment_dist, world_to_grid, ViewTransform, GRID_PX};
 
 /// What's currently being dragged in the spatial view
@@ -50,7 +53,7 @@ pub fn spatial_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Spatia
     );
     let rect = response.rect;
 
-    painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(40, 40, 45));
+    painter.rect_filled(rect, 0.0, COLOR_SPATIAL_BG);
 
     handle_pan_zoom(&response, &mut state.view);
     let transform = ViewTransform::new(state.view.offset, state.view.zoom, rect);
@@ -69,7 +72,7 @@ pub fn spatial_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Spatia
             egui::Align2::CENTER_CENTER,
             "Layout will be generated automatically.",
             egui::FontId::proportional(16.0),
-            egui::Color32::from_rgb(150, 150, 150),
+            COLOR_PLACEHOLDER_TEXT,
         );
     } else {
         painter.text(
@@ -77,7 +80,7 @@ pub fn spatial_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Spatia
             egui::Align2::CENTER_CENTER,
             "Add rooms in the Graph tab first.",
             egui::FontId::proportional(16.0),
-            egui::Color32::from_rgb(150, 150, 150),
+            COLOR_PLACEHOLDER_TEXT,
         );
     }
 
@@ -183,10 +186,10 @@ fn handle_spatial_interactions(
                             let b = egui::pos2(grid_to_world(pair[1].x), grid_to_world(pair[1].y));
                             let dist = point_to_segment_dist(world, a, b);
                             let threshold = (corridor.width as f32 * GRID_PX / 2.0 + 6.0) / state.view.zoom;
-                            if dist < threshold {
-                                if best_seg.map_or(true, |(_, bd)| dist < bd) {
-                                    best_seg = Some((si, dist));
-                                }
+                            if dist < threshold
+                                && best_seg.is_none_or(|(_, bd)| dist < bd)
+                            {
+                                best_seg = Some((si, dist));
                             }
                         }
                         if let Some((si, _)) = best_seg {
@@ -401,8 +404,8 @@ fn handle_spatial_interactions(
                                 let group = &mut dungeon.graph.groups[gi];
                                 match corner {
                                     0 => { // TL: move origin, shrink size
-                                        let new_x = gx as i32 + grid_steps_x;
-                                        let new_y = gy as i32 + grid_steps_y;
+                                        let new_x = gx + grid_steps_x;
+                                        let new_y = gy + grid_steps_y;
                                         let new_w = (gw as i32 - grid_steps_x).max(1) as u32;
                                         let new_h = (gh as i32 - grid_steps_y).max(1) as u32;
                                         group.spatial_x = Some(new_x);
@@ -413,13 +416,13 @@ fn handle_spatial_interactions(
                                     1 => { // TR: grow/shrink width
                                         let new_w = (gw as i32 + grid_steps_x).max(1) as u32;
                                         let new_h = (gh as i32 - grid_steps_y).max(1) as u32;
-                                        let new_y = gy as i32 + grid_steps_y;
+                                        let new_y = gy + grid_steps_y;
                                         group.spatial_y = Some(new_y);
                                         group.max_width = Some(new_w);
                                         group.max_height = Some(new_h);
                                     }
                                     2 => { // BL: grow/shrink height
-                                        let new_x = gx as i32 + grid_steps_x;
+                                        let new_x = gx + grid_steps_x;
                                         let new_w = (gw as i32 - grid_steps_x).max(1) as u32;
                                         let new_h = (gh as i32 + grid_steps_y).max(1) as u32;
                                         group.spatial_x = Some(new_x);
@@ -534,7 +537,7 @@ fn draw_groups_spatial(
         let is_selected = state.selected_group == Some(gi);
         let fill = egui::Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3] / 2);
         let border_color = if is_selected {
-            egui::Color32::from_rgb(100, 200, 255)
+            COLOR_SELECTION
         } else {
             egui::Color32::from_rgba_unmultiplied(c[0], c[1], c[2], 150)
         };
@@ -621,29 +624,6 @@ fn draw_bounds(painter: &egui::Painter, transform: &ViewTransform, layout: &Spat
                 color,
             );
         }
-    }
-}
-
-fn draw_dashed_line(
-    painter: &egui::Painter,
-    from: egui::Pos2,
-    to: egui::Pos2,
-    stroke: egui::Stroke,
-    dash_len: f32,
-    gap_len: f32,
-) {
-    let dir = to - from;
-    let total_len = dir.length();
-    if total_len < 1.0 {
-        return;
-    }
-    let dir_norm = dir / total_len;
-    let mut d = 0.0;
-    while d < total_len {
-        let seg_start = from + dir_norm * d;
-        let seg_end = from + dir_norm * (d + dash_len).min(total_len);
-        painter.line_segment([seg_start, seg_end], stroke);
-        d += dash_len + gap_len;
     }
 }
 
@@ -770,7 +750,7 @@ fn draw_rooms(
 
         let is_selected = state.selected_room.as_deref() == Some(&rl.room_id);
         let room = graph.room_by_id(&rl.room_id);
-        let is_circle = room.map_or(false, |r| r.shape == RoomShape::Circle);
+        let is_circle = room.is_some_and(|r| r.shape == RoomShape::Circle);
         let has_violations = !rl.violations.is_empty();
 
         let fill = if has_violations {
@@ -779,7 +759,7 @@ fn draw_rooms(
             egui::Color32::from_rgb(220, 220, 220)
         };
         let border_color = if is_selected {
-            egui::Color32::from_rgb(100, 200, 255)
+            COLOR_SELECTION
         } else if has_violations {
             egui::Color32::from_rgb(220, 60, 60)
         } else {

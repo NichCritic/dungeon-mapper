@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dungeon Drafter - Player View</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #1a1a1a;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+    overflow: hidden;
+    touch-action: manipulation;
+  }
+  #map {
+    max-width: 100vw;
+    max-height: 100vh;
+    object-fit: contain;
+    image-rendering: pixelated;
+  }
+  #status {
+    position: fixed;
+    top: 8px;
+    right: 8px;
+    color: #666;
+    font: 12px monospace;
+  }
+</style>
+</head>
+<body>
+<img id="map" alt="Waiting for map...">
+<div id="status">Connecting...</div>
+<script>
+(function() {
+  const img = document.getElementById('map');
+  const status = document.getElementById('status');
+  let ws;
+
+  function connect() {
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    ws = new WebSocket(proto + '//' + location.host + '/ws');
+    ws.binaryType = 'arraybuffer';
+
+    ws.onopen = function() {
+      status.textContent = 'Connected';
+      setTimeout(function() { status.style.opacity = '0.3'; }, 2000);
+    };
+
+    ws.onmessage = function(e) {
+      if (e.data instanceof ArrayBuffer) {
+        const blob = new Blob([e.data], { type: 'image/png' });
+        const url = URL.createObjectURL(blob);
+        const old = img.src;
+        img.src = url;
+        if (old && old.startsWith('blob:')) URL.revokeObjectURL(old);
+      }
+    };
+
+    ws.onclose = function() {
+      status.textContent = 'Disconnected - reconnecting...';
+      status.style.opacity = '1';
+      setTimeout(connect, 1000);
+    };
+
+    ws.onerror = function() {
+      ws.close();
+    };
+  }
+
+  connect();
+})();
+</script>
+</body>
+</html>

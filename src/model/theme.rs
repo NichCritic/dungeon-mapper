@@ -33,17 +33,12 @@ pub enum WallStyle {
     Rounded,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub enum ShadingStyle {
+    #[default]
     Hatched,
     Solid,
     Stippled,
-}
-
-impl Default for ShadingStyle {
-    fn default() -> Self {
-        ShadingStyle::Hatched
-    }
 }
 
 impl ShadingStyle {

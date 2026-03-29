@@ -1,19 +1,56 @@
 use std::collections::HashSet;
 
 use crate::model::*;
-use crate::render::hatching::draw_exterior_shading;
+use crate::render::hatching::{draw_exterior_shading, ShadingParams};
 use crate::render::traits::MapRenderer;
 use crate::util::GRID_PX;
+
+/// Options controlling which elements to render.
+pub struct RenderOptions {
+    pub show_grid: bool,
+    pub show_labels: bool,
+    pub show_notes: bool,
+    pub show_secrets: bool,
+}
 
 pub fn render_themed(
     renderer: &mut dyn MapRenderer,
     graph: &DungeonGraph,
     layout: &SpatialLayout,
     theme: &Theme,
-    show_grid: bool,
-    show_labels: bool,
-    show_notes: bool,
-    show_secrets: bool,
+    options: &RenderOptions,
+) {
+    let floor = build_floor_set(layout);
+
+    render_background(renderer, layout, theme);
+    render_exterior_shading(renderer, layout, &floor, theme);
+
+    for rl in &layout.rooms {
+        render_room_floor(renderer, rl, graph, theme);
+    }
+    for corridor in &layout.corridors {
+        render_corridor_floor(renderer, corridor, theme);
+    }
+    if options.show_grid {
+        render_grid(renderer, &floor);
+    }
+    for rl in &layout.rooms {
+        render_room_walls(renderer, rl, graph, theme);
+    }
+    for corridor in &layout.corridors {
+        render_corridor_walls(renderer, corridor, &floor, theme);
+    }
+    render_doors(renderer, graph, layout, theme, options);
+    if options.show_labels {
+        render_labels(renderer, graph, layout, options);
+    }
+}
+
+/// Step 1+2: Background fill and exterior shading.
+pub fn render_background(
+    renderer: &mut dyn MapRenderer,
+    layout: &SpatialLayout,
+    theme: &Theme,
 ) {
     let (ext_min_x, ext_min_y, ext_max_x, ext_max_y) = layout.extents();
     let margin = 2;
@@ -22,187 +59,205 @@ pub fn render_themed(
     let w = (ext_max_x - ext_min_x + margin * 2) as f32 * GRID_PX;
     let h = (ext_max_y - ext_min_y + margin * 2) as f32 * GRID_PX;
 
-    // Build floor cell set for grid clipping and hatching exterior detection
-    let mut floor: HashSet<(i32, i32)> = HashSet::new();
-    for rl in &layout.rooms {
-        for y in rl.y..(rl.y + rl.height as i32) {
-            for x in rl.x..(rl.x + rl.width as i32) {
-                floor.insert((x, y));
-            }
-        }
-    }
-    for corridor in &layout.corridors {
-        let cw = corridor.width as i32;
-        let half = cw / 2;
-        for pair in corridor.waypoints.windows(2) {
-            let min_x = pair[0].x.min(pair[1].x) - half;
-            let min_y = pair[0].y.min(pair[1].y) - half;
-            let max_x = pair[0].x.max(pair[1].x) - half + cw;
-            let max_y = pair[0].y.max(pair[1].y) - half + cw;
-            for y in min_y..max_y {
-                for x in min_x..max_x {
-                    floor.insert((x, y));
-                }
-            }
-        }
-    }
-
-    // 1. Background
     renderer.fill_rect(x0, y0, w, h, theme.bg_color);
+}
 
-    // 2. Exterior shading (drawn on background, BEFORE floors)
+pub fn render_exterior_shading(
+    renderer: &mut dyn MapRenderer,
+    layout: &SpatialLayout,
+    floor: &HashSet<(i32, i32)>,
+    theme: &Theme,
+) {
     if theme.exterior_shading {
-        draw_exterior_shading(
-            renderer, graph, layout, &floor,
-            theme.shading_radius,
-            theme.shading_style,
-            theme.hatching_density,
-            theme.wall_color,
-        );
+        let params = ShadingParams {
+            radius: theme.shading_radius,
+            style: theme.shading_style,
+            density: theme.hatching_density,
+            color: theme.wall_color,
+        };
+        draw_exterior_shading(renderer, layout, floor, &params);
     }
+}
 
-    // 3. Room floors (covers hatching that went inside)
-    for rl in &layout.rooms {
-        let rx = rl.x as f32 * GRID_PX;
-        let ry = rl.y as f32 * GRID_PX;
-        let rw = rl.width as f32 * GRID_PX;
-        let rh = rl.height as f32 * GRID_PX;
-        let is_circle = graph.room_by_id(&rl.room_id)
-            .map_or(false, |r| r.shape == RoomShape::Circle);
+/// Render one room's floor.
+pub fn render_room_floor(
+    renderer: &mut dyn MapRenderer,
+    rl: &RoomLayout,
+    graph: &DungeonGraph,
+    theme: &Theme,
+) {
+    render_room_floor_with_color(renderer, rl, graph, theme.floor_color);
+}
 
-        if is_circle {
-            let cx = rx + rw / 2.0;
-            let cy = ry + rh / 2.0;
-            let r = rw.min(rh) / 2.0;
-            renderer.fill_circle(cx, cy, r, theme.floor_color);
-        } else {
-            renderer.fill_rect(rx, ry, rw, rh, theme.floor_color);
+/// Render one room's floor with a specific color.
+pub fn render_room_floor_with_color(
+    renderer: &mut dyn MapRenderer,
+    rl: &RoomLayout,
+    graph: &DungeonGraph,
+    color: [u8; 4],
+) {
+    let rx = rl.x as f32 * GRID_PX;
+    let ry = rl.y as f32 * GRID_PX;
+    let rw = rl.width as f32 * GRID_PX;
+    let rh = rl.height as f32 * GRID_PX;
+    let is_circle = graph.room_by_id(&rl.room_id)
+        .is_some_and(|r| r.shape == RoomShape::Circle);
+
+    if is_circle {
+        let cx = rx + rw / 2.0;
+        let cy = ry + rh / 2.0;
+        let r = rw.min(rh) / 2.0;
+        renderer.fill_circle(cx, cy, r, color);
+    } else {
+        renderer.fill_rect(rx, ry, rw, rh, color);
+    }
+}
+
+/// Render one corridor's floor.
+pub fn render_corridor_floor(
+    renderer: &mut dyn MapRenderer,
+    corridor: &CorridorSegment,
+    theme: &Theme,
+) {
+    render_corridor_floor_with_color(renderer, corridor, theme.floor_color);
+}
+
+/// Render one corridor's floor with a specific color.
+pub fn render_corridor_floor_with_color(
+    renderer: &mut dyn MapRenderer,
+    corridor: &CorridorSegment,
+    color: [u8; 4],
+) {
+    let cw = corridor.width as i32;
+    let half = cw / 2;
+    for pair in corridor.waypoints.windows(2) {
+        let min_gx = pair[0].x.min(pair[1].x) - half;
+        let min_gy = pair[0].y.min(pair[1].y) - half;
+        let max_gx = pair[0].x.max(pair[1].x) - half + cw;
+        let max_gy = pair[0].y.max(pair[1].y) - half + cw;
+
+        let px = min_gx as f32 * GRID_PX;
+        let py = min_gy as f32 * GRID_PX;
+        let pw = (max_gx - min_gx) as f32 * GRID_PX;
+        let ph = (max_gy - min_gy) as f32 * GRID_PX;
+        renderer.fill_rect(px, py, pw, ph, color);
+    }
+}
+
+/// Render grid lines only inside floor cells.
+///
+/// Each interior grid edge shared by two adjacent floor cells is drawn once.
+/// Edges on the boundary of the floor set are skipped (walls handle those).
+pub fn render_grid(
+    renderer: &mut dyn MapRenderer,
+    floor: &HashSet<(i32, i32)>,
+) {
+    let grid_color = [140, 140, 140, 100];
+
+    for &(fx, fy) in floor {
+        let px = fx as f32 * GRID_PX;
+        let py = fy as f32 * GRID_PX;
+
+        // Draw the right edge if the neighbor to the right is also floor
+        if floor.contains(&(fx + 1, fy)) {
+            let rx = (fx + 1) as f32 * GRID_PX;
+            renderer.draw_line(rx, py, rx, py + GRID_PX, 0.5, grid_color);
+        }
+        // Draw the bottom edge if the neighbor below is also floor
+        if floor.contains(&(fx, fy + 1)) {
+            let by = (fy + 1) as f32 * GRID_PX;
+            renderer.draw_line(px, by, px + GRID_PX, by, 0.5, grid_color);
         }
     }
+}
 
-    // 4. Corridor floors
-    for corridor in &layout.corridors {
-        let cw = corridor.width as i32;
-        let half = cw / 2;
-        for pair in corridor.waypoints.windows(2) {
-            let min_gx = pair[0].x.min(pair[1].x) - half;
-            let min_gy = pair[0].y.min(pair[1].y) - half;
-            let max_gx = pair[0].x.max(pair[1].x) - half + cw;
-            let max_gy = pair[0].y.max(pair[1].y) - half + cw;
-
-            let px = min_gx as f32 * GRID_PX;
-            let py = min_gy as f32 * GRID_PX;
-            let pw = (max_gx - min_gx) as f32 * GRID_PX;
-            let ph = (max_gy - min_gy) as f32 * GRID_PX;
-            renderer.fill_rect(px, py, pw, ph, theme.floor_color);
-        }
-    }
-
-    // 5. Grid lines (only inside floor cells)
-    if show_grid {
-        let grid_color = [140, 140, 140, 100];
-        // Draw grid lines that pass through floor cells
-        let mut drawn_x: HashSet<i32> = HashSet::new();
-        let mut drawn_y: HashSet<i32> = HashSet::new();
-        for &(fx, fy) in &floor {
-            drawn_x.insert(fx);
-            drawn_x.insert(fx + 1);
-            drawn_y.insert(fy);
-            drawn_y.insert(fy + 1);
-        }
-        // Find floor extents for line endpoints per grid line
-        for &gx in &drawn_x {
-            let min_fy = floor.iter().filter(|(x, _)| *x == gx || *x == gx - 1).map(|(_, y)| *y).min();
-            let max_fy = floor.iter().filter(|(x, _)| *x == gx || *x == gx - 1).map(|(_, y)| *y + 1).max();
-            if let (Some(min_y), Some(max_y)) = (min_fy, max_fy) {
-                let wx = gx as f32 * GRID_PX;
-                renderer.draw_line(wx, min_y as f32 * GRID_PX, wx, max_y as f32 * GRID_PX, 0.5, grid_color);
-            }
-        }
-        for &gy in &drawn_y {
-            let min_fx = floor.iter().filter(|(_, y)| *y == gy || *y == gy - 1).map(|(x, _)| *x).min();
-            let max_fx = floor.iter().filter(|(_, y)| *y == gy || *y == gy - 1).map(|(x, _)| *x + 1).max();
-            if let (Some(min_x), Some(max_x)) = (min_fx, max_fx) {
-                let wy = gy as f32 * GRID_PX;
-                renderer.draw_line(min_x as f32 * GRID_PX, wy, max_x as f32 * GRID_PX, wy, 0.5, grid_color);
-            }
-        }
-    }
-
-    // 6. Room walls
+/// Render one room's walls.
+pub fn render_room_walls(
+    renderer: &mut dyn MapRenderer,
+    rl: &RoomLayout,
+    graph: &DungeonGraph,
+    theme: &Theme,
+) {
     let wall_w = 2.0;
-    for rl in &layout.rooms {
-        let rx = rl.x as f32 * GRID_PX;
-        let ry = rl.y as f32 * GRID_PX;
-        let rw = rl.width as f32 * GRID_PX;
-        let rh = rl.height as f32 * GRID_PX;
-        let is_circle = graph.room_by_id(&rl.room_id)
-            .map_or(false, |r| r.shape == RoomShape::Circle);
+    let rx = rl.x as f32 * GRID_PX;
+    let ry = rl.y as f32 * GRID_PX;
+    let rw = rl.width as f32 * GRID_PX;
+    let rh = rl.height as f32 * GRID_PX;
+    let is_circle = graph.room_by_id(&rl.room_id)
+        .is_some_and(|r| r.shape == RoomShape::Circle);
 
-        if is_circle {
-            let cx = rx + rw / 2.0;
-            let cy = ry + rh / 2.0;
-            let r = rw.min(rh) / 2.0;
-            renderer.stroke_circle(cx, cy, r, wall_w, theme.wall_color);
-        } else {
-            renderer.stroke_rect(rx, ry, rw, rh, wall_w, theme.wall_color);
-        }
+    if is_circle {
+        let cx = rx + rw / 2.0;
+        let cy = ry + rh / 2.0;
+        let r = rw.min(rh) / 2.0;
+        renderer.stroke_circle(cx, cy, r, wall_w, theme.wall_color);
+    } else {
+        renderer.stroke_rect(rx, ry, rw, rh, wall_w, theme.wall_color);
     }
+}
 
-    // 7. Corridor walls — draw individual wall segments, skipping edges
-    //    where ALL adjacent cells on the exterior side are floor.
-    //    This prevents walls at elbow interiors where corridor segments meet.
-    for corridor in &layout.corridors {
-        let cw = corridor.width as i32;
-        let half = cw / 2;
-        for pair in corridor.waypoints.windows(2) {
-            let min_gx = pair[0].x.min(pair[1].x) - half;
-            let min_gy = pair[0].y.min(pair[1].y) - half;
-            let max_gx = pair[0].x.max(pair[1].x) - half + cw;
-            let max_gy = pair[0].y.max(pair[1].y) - half + cw;
+/// Render one corridor's walls, skipping edges where adjacent cells are floor.
+pub fn render_corridor_walls(
+    renderer: &mut dyn MapRenderer,
+    corridor: &CorridorSegment,
+    floor: &HashSet<(i32, i32)>,
+    theme: &Theme,
+) {
+    let wall_w = 2.0;
+    let cw = corridor.width as i32;
+    let half = cw / 2;
+    for pair in corridor.waypoints.windows(2) {
+        let min_gx = pair[0].x.min(pair[1].x) - half;
+        let min_gy = pair[0].y.min(pair[1].y) - half;
+        let max_gx = pair[0].x.max(pair[1].x) - half + cw;
+        let max_gy = pair[0].y.max(pair[1].y) - half + cw;
 
-            let px1 = min_gx as f32 * GRID_PX;
-            let py1 = min_gy as f32 * GRID_PX;
-            let px2 = max_gx as f32 * GRID_PX;
-            let py2 = max_gy as f32 * GRID_PX;
+        let px1 = min_gx as f32 * GRID_PX;
+        let py1 = min_gy as f32 * GRID_PX;
+        let px2 = max_gx as f32 * GRID_PX;
+        let py2 = max_gy as f32 * GRID_PX;
 
-            // For each wall, draw only the portions where the exterior is non-floor.
-            // Split the wall into per-cell segments and skip cells backed by floor.
-
-            // Top wall
-            for x in min_gx..max_gx {
-                if !floor.contains(&(x, min_gy - 1)) {
-                    let lx = x as f32 * GRID_PX;
-                    renderer.draw_line(lx, py1, lx + GRID_PX, py1, wall_w, theme.wall_color);
-                }
-            }
-            // Bottom wall
-            for x in min_gx..max_gx {
-                if !floor.contains(&(x, max_gy)) {
-                    let lx = x as f32 * GRID_PX;
-                    renderer.draw_line(lx, py2, lx + GRID_PX, py2, wall_w, theme.wall_color);
-                }
-            }
-            // Left wall
-            for y in min_gy..max_gy {
-                if !floor.contains(&(min_gx - 1, y)) {
-                    let ly = y as f32 * GRID_PX;
-                    renderer.draw_line(px1, ly, px1, ly + GRID_PX, wall_w, theme.wall_color);
-                }
-            }
-            // Right wall
-            for y in min_gy..max_gy {
-                if !floor.contains(&(max_gx, y)) {
-                    let ly = y as f32 * GRID_PX;
-                    renderer.draw_line(px2, ly, px2, ly + GRID_PX, wall_w, theme.wall_color);
-                }
+        // Top wall
+        for x in min_gx..max_gx {
+            if !floor.contains(&(x, min_gy - 1)) {
+                let lx = x as f32 * GRID_PX;
+                renderer.draw_line(lx, py1, lx + GRID_PX, py1, wall_w, theme.wall_color);
             }
         }
+        // Bottom wall
+        for x in min_gx..max_gx {
+            if !floor.contains(&(x, max_gy)) {
+                let lx = x as f32 * GRID_PX;
+                renderer.draw_line(lx, py2, lx + GRID_PX, py2, wall_w, theme.wall_color);
+            }
+        }
+        // Left wall
+        for y in min_gy..max_gy {
+            if !floor.contains(&(min_gx - 1, y)) {
+                let ly = y as f32 * GRID_PX;
+                renderer.draw_line(px1, ly, px1, ly + GRID_PX, wall_w, theme.wall_color);
+            }
+        }
+        // Right wall
+        for y in min_gy..max_gy {
+            if !floor.contains(&(max_gx, y)) {
+                let ly = y as f32 * GRID_PX;
+                renderer.draw_line(px2, ly, px2, ly + GRID_PX, wall_w, theme.wall_color);
+            }
+        }
     }
+}
 
-    // 8. Door symbols
+/// Render door symbols on corridors.
+pub fn render_doors(
+    renderer: &mut dyn MapRenderer,
+    graph: &DungeonGraph,
+    layout: &SpatialLayout,
+    theme: &Theme,
+    options: &RenderOptions,
+) {
     for edge in &graph.connections {
-        if !show_secrets && edge.connection.connection_type == ConnectionType::Secret {
+        if !options.show_secrets && edge.connection.connection_type == ConnectionType::Secret {
             continue;
         }
         if edge.connection.connection_type == ConnectionType::Open {
@@ -272,19 +327,52 @@ pub fn render_themed(
             }
         }
     }
+}
 
-    // 9. Room labels
-    if show_labels {
-        for rl in &layout.rooms {
-            if let Some(room) = graph.room_by_id(&rl.room_id) {
-                let cx = (rl.x as f32 + rl.width as f32 / 2.0) * GRID_PX;
-                let cy = (rl.y as f32 + rl.height as f32 / 2.0) * GRID_PX;
-                renderer.draw_text(&room.label, cx, cy, 10.0, [60, 60, 60, 255]);
+/// Render room labels and notes.
+pub fn render_labels(
+    renderer: &mut dyn MapRenderer,
+    graph: &DungeonGraph,
+    layout: &SpatialLayout,
+    options: &RenderOptions,
+) {
+    for rl in &layout.rooms {
+        if let Some(room) = graph.room_by_id(&rl.room_id) {
+            let cx = (rl.x as f32 + rl.width as f32 / 2.0) * GRID_PX;
+            let cy = (rl.y as f32 + rl.height as f32 / 2.0) * GRID_PX;
+            renderer.draw_text(&room.label, cx, cy, 10.0, [60, 60, 60, 255]);
 
-                if show_notes && !room.notes.is_empty() {
-                    renderer.draw_text(&room.notes, cx, cy + 14.0, 7.0, [120, 120, 120, 255]);
+            if options.show_notes && !room.notes.is_empty() {
+                renderer.draw_text(&room.notes, cx, cy + 14.0, 7.0, [120, 120, 120, 255]);
+            }
+        }
+    }
+}
+
+/// Build the set of all floor cells from room and corridor geometry.
+pub fn build_floor_set(layout: &SpatialLayout) -> HashSet<(i32, i32)> {
+    let mut floor: HashSet<(i32, i32)> = HashSet::new();
+    for rl in &layout.rooms {
+        for y in rl.y..(rl.y + rl.height as i32) {
+            for x in rl.x..(rl.x + rl.width as i32) {
+                floor.insert((x, y));
+            }
+        }
+    }
+    for corridor in &layout.corridors {
+        let cw = corridor.width as i32;
+        let half = cw / 2;
+        for pair in corridor.waypoints.windows(2) {
+            let min_x = pair[0].x.min(pair[1].x) - half;
+            let min_y = pair[0].y.min(pair[1].y) - half;
+            let max_x = pair[0].x.max(pair[1].x) - half + cw;
+            let max_y = pair[0].y.max(pair[1].y) - half + cw;
+            for y in min_y..max_y {
+                for x in min_x..max_x {
+                    floor.insert((x, y));
                 }
             }
         }
     }
+    floor
 }

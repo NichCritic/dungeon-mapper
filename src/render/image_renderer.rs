@@ -6,6 +6,10 @@ use crate::render::traits::MapRenderer;
 pub struct ImageRenderer {
     pub image: RgbaImage,
     pub scale: f32,
+    /// World-space offset: subtracted from coordinates before scaling to pixels.
+    /// Set this so that the top-left of the rendered area maps to pixel (0, 0).
+    pub offset_x: f32,
+    pub offset_y: f32,
 }
 
 impl ImageRenderer {
@@ -13,14 +17,26 @@ impl ImageRenderer {
         Self {
             image: ImageBuffer::from_pixel(width, height, Rgba([0, 0, 0, 0])),
             scale,
+            offset_x: 0.0,
+            offset_y: 0.0,
         }
+    }
+
+    /// Convert world x to pixel x.
+    fn px(&self, x: f32) -> i32 {
+        ((x - self.offset_x) * self.scale) as i32
+    }
+
+    /// Convert world y to pixel y.
+    fn py(&self, y: f32) -> i32 {
+        ((y - self.offset_y) * self.scale) as i32
     }
 }
 
 impl MapRenderer for ImageRenderer {
     fn fill_rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: [u8; 4]) {
-        let sx = (x * self.scale) as i32;
-        let sy = (y * self.scale) as i32;
+        let sx = self.px(x);
+        let sy = self.py(y);
         let sw = (w * self.scale) as i32;
         let sh = (h * self.scale) as i32;
         let pixel = Rgba(color);
@@ -45,8 +61,8 @@ impl MapRenderer for ImageRenderer {
     }
 
     fn fill_circle(&mut self, cx: f32, cy: f32, r: f32, color: [u8; 4]) {
-        let scx = (cx * self.scale) as i32;
-        let scy = (cy * self.scale) as i32;
+        let scx = self.px(cx);
+        let scy = self.py(cy);
         let sr = (r * self.scale) as i32;
         let pixel = image::Rgba(color);
         for py in (scy - sr).max(0)..(scy + sr).min(self.image.height() as i32) {
@@ -61,8 +77,8 @@ impl MapRenderer for ImageRenderer {
     }
 
     fn stroke_circle(&mut self, cx: f32, cy: f32, r: f32, width: f32, color: [u8; 4]) {
-        let scx = (cx * self.scale) as i32;
-        let scy = (cy * self.scale) as i32;
+        let scx = self.px(cx);
+        let scy = self.py(cy);
         let sr = (r * self.scale) as i32;
         let sw = ((width * self.scale) / 2.0).max(1.0) as i32;
         let pixel = image::Rgba(color);
@@ -82,10 +98,10 @@ impl MapRenderer for ImageRenderer {
 
     fn draw_line(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, width: f32, color: [u8; 4]) {
         // Bresenham with thickness
-        let sx1 = (x1 * self.scale) as i32;
-        let sy1 = (y1 * self.scale) as i32;
-        let sx2 = (x2 * self.scale) as i32;
-        let sy2 = (y2 * self.scale) as i32;
+        let sx1 = self.px(x1);
+        let sy1 = self.py(y1);
+        let sx2 = self.px(x2);
+        let sy2 = self.py(y2);
         let sw = ((width * self.scale) / 2.0).max(1.0) as i32;
         let pixel = Rgba(color);
 
@@ -129,6 +145,6 @@ impl MapRenderer for ImageRenderer {
 
     fn draw_text(&mut self, _text: &str, _x: f32, _y: f32, _size: f32, _color: [u8; 4]) {
         // Text rendering in image is complex - skip for MVP
-        // Could use imageproc or rusttype in the future
+        // Labels are drawn as an egui overlay in the styled view.
     }
 }

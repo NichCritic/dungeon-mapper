@@ -4,4 +4,6 @@ pub mod spatial_view;
 pub mod styled_view;
 pub mod sidebar;
 pub mod status_bar;
+pub mod presentation_view;
+pub mod player_view;
 

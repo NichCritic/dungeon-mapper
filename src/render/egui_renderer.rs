@@ -2,11 +2,15 @@ use crate::render::traits::MapRenderer;
 use crate::util::ViewTransform;
 
 /// Renders through egui::Painter, applying a view transform.
+/// Currently unused — the styled view renders to a cached texture instead —
+/// but kept for potential future use (e.g., live preview overlays).
+#[allow(dead_code)]
 pub struct EguiRenderer<'a> {
     painter: &'a egui::Painter,
     transform: &'a ViewTransform,
 }
 
+#[allow(dead_code)]
 impl<'a> EguiRenderer<'a> {
     pub fn new(painter: &'a egui::Painter, transform: &'a ViewTransform) -> Self {
         Self { painter, transform }

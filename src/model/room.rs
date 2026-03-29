@@ -21,16 +21,11 @@ pub struct Room {
     pub allow_rotation: bool,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub enum RoomShape {
+    #[default]
     Rectangle,
     Circle,
-}
-
-impl Default for RoomShape {
-    fn default() -> Self {
-        RoomShape::Rectangle
-    }
 }
 
 impl RoomShape {

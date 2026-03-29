@@ -1,24 +1,28 @@
 use std::collections::HashSet;
 
-use crate::model::{ShadingStyle, SpatialLayout, DungeonGraph};
+use crate::model::{ShadingStyle, SpatialLayout};
 use crate::render::traits::MapRenderer;
 use crate::util::GRID_PX;
 
+/// Parameters controlling exterior shading appearance.
+pub struct ShadingParams {
+    pub radius: f32,
+    pub style: ShadingStyle,
+    pub density: f32,
+    pub color: [u8; 4],
+}
+
 pub fn draw_exterior_shading(
     renderer: &mut dyn MapRenderer,
-    _graph: &DungeonGraph,
     layout: &SpatialLayout,
     floor: &HashSet<(i32, i32)>,
-    radius: f32,
-    style: ShadingStyle,
-    density: f32,
-    color: [u8; 4],
+    params: &ShadingParams,
 ) {
-    if floor.is_empty() || radius <= 0.0 {
+    if floor.is_empty() || params.radius <= 0.0 {
         return;
     }
 
-    let radius_px = radius * GRID_PX;
+    let radius_px = params.radius * GRID_PX;
 
     // Find boundary cells (floor cells with at least one non-floor neighbor)
     let mut boundary_cells: HashSet<(i32, i32)> = HashSet::new();
@@ -32,25 +36,31 @@ pub fn draw_exterior_shading(
         }
     }
 
-    match style {
+    match params.style {
         ShadingStyle::Hatched => {
-            draw_dyson_hatching(renderer, floor, &boundary_cells, radius_px, density, color);
+            draw_dyson_hatching(renderer, floor, &boundary_cells, radius_px, params.density, params.color);
         }
         ShadingStyle::Solid => {
-            let (min_x, min_y, max_x, max_y) = layout.extents();
-            let search_r = radius.ceil() as i32 + 1;
-            draw_solid_shading(renderer, floor, &boundary_cells,
-                min_x - search_r, min_y - search_r,
-                max_x + search_r, max_y + search_r,
-                radius_px, color);
+            let extents = layout.extents();
+            let search_r = params.radius.ceil() as i32 + 1;
+            let search_extents = (
+                extents.0 - search_r,
+                extents.1 - search_r,
+                extents.2 + search_r,
+                extents.3 + search_r,
+            );
+            draw_solid_shading(renderer, floor, &boundary_cells, search_extents, radius_px, params.color);
         }
         ShadingStyle::Stippled => {
-            let (min_x, min_y, max_x, max_y) = layout.extents();
-            let search_r = radius.ceil() as i32 + 1;
-            draw_stippled_shading(renderer, floor, &boundary_cells,
-                min_x - search_r, min_y - search_r,
-                max_x + search_r, max_y + search_r,
-                radius_px, density, color);
+            let extents = layout.extents();
+            let search_r = params.radius.ceil() as i32 + 1;
+            let search_extents = (
+                extents.0 - search_r,
+                extents.1 - search_r,
+                extents.2 + search_r,
+                extents.3 + search_r,
+            );
+            draw_stippled_shading(renderer, floor, &boundary_cells, search_extents, radius_px, params.density, params.color);
         }
     }
 }
@@ -85,8 +95,6 @@ fn draw_dyson_hatching(
 ) {
     let base_spacing = (6.0 / density).max(2.0);
 
-    // Scatter seeds in exterior cells within radius.
-    // Probability of placing a seed decreases with distance from wall.
     let mut seeds: Vec<(f32, f32, f32)> = Vec::new(); // (x, y, angle)
 
     let search_r = (radius_px / GRID_PX).ceil() as i32 + 1;
@@ -102,7 +110,6 @@ fn draw_dyson_hatching(
             }
         }
     }
-    // Deduplicate
     exterior_cells.sort();
     exterior_cells.dedup();
 
@@ -110,22 +117,18 @@ fn draw_dyson_hatching(
         let wx = gx as f32 * GRID_PX;
         let wy = gy as f32 * GRID_PX;
 
-        // Distance from cell center to nearest floor
         let d = dist_to_floor(wx + GRID_PX / 2.0, wy + GRID_PX / 2.0, boundary_cells);
         if d > radius_px {
             continue;
         }
 
-        // Place multiple candidate seeds per cell, spacing adjusted by distance
-        // Near wall: dense (small spacing). Far: sparse (large spacing).
-        let dist_factor = (d / radius_px).max(0.1); // 0.1 near wall, 1.0 at edge
+        let dist_factor = (d / radius_px).max(0.1);
         let local_spacing = base_spacing * (0.5 + dist_factor * 1.5);
 
         let mut sy = wy + local_spacing * hash_f32(wx, wy, 1) * 0.5;
         while sy < wy + GRID_PX {
             let mut sx = wx + local_spacing * hash_f32(wx, sy, 2) * 0.5;
             while sx < wx + GRID_PX {
-                // Jitter position
                 let jx = sx + (hash_f32(sx, sy, 3) - 0.5) * local_spacing * 0.6;
                 let jy = sy + (hash_f32(sx, sy, 4) - 0.5) * local_spacing * 0.6;
 
@@ -148,7 +151,6 @@ fn draw_dyson_hatching(
         return;
     }
 
-    // Voronoi nearest-seed lookup
     let nearest_seed = |px: f32, py: f32| -> usize {
         let mut best = 0;
         let mut best_d = f32::MAX;
@@ -172,7 +174,6 @@ fn draw_dyson_hatching(
         let perp_dx = -line_dy;
         let perp_dy = line_dx;
 
-        // Cell half-width from nearest neighbor
         let mut min_neighbor_dist = radius_px * 2.0;
         for (j, &(ox, oy, _)) in seeds.iter().enumerate() {
             if j == seed_idx { continue; }
@@ -193,11 +194,9 @@ fn draw_dyson_hatching(
                 continue;
             }
 
-            // March in BOTH directions from the seed to fill the cell
             let mut neg_t = 0.0_f32;
             let mut pos_t = 0.0_f32;
 
-            // Positive direction
             let mut t = step;
             loop {
                 let px = lx + line_dx * t;
@@ -212,7 +211,6 @@ fn draw_dyson_hatching(
                 if t > radius_px * 2.0 { break; }
             }
 
-            // Negative direction
             t = -step;
             loop {
                 let px = lx + line_dx * t;
@@ -265,13 +263,14 @@ fn draw_solid_shading(
     renderer: &mut dyn MapRenderer,
     floor: &HashSet<(i32, i32)>,
     boundary_cells: &HashSet<(i32, i32)>,
-    min_x: i32, min_y: i32, max_x: i32, max_y: i32,
+    extents: (i32, i32, i32, i32),
     radius_px: f32,
     color: [u8; 4],
 ) {
     let mut shade_color = color;
     shade_color[3] = (color[3] as f32 * 0.3) as u8;
 
+    let (min_x, min_y, max_x, max_y) = extents;
     for gy in min_y..max_y {
         for gx in min_x..max_x {
             if floor.contains(&(gx, gy)) { continue; }
@@ -292,13 +291,14 @@ fn draw_stippled_shading(
     renderer: &mut dyn MapRenderer,
     floor: &HashSet<(i32, i32)>,
     boundary_cells: &HashSet<(i32, i32)>,
-    min_x: i32, min_y: i32, max_x: i32, max_y: i32,
+    extents: (i32, i32, i32, i32),
     radius_px: f32,
     density: f32,
     color: [u8; 4],
 ) {
     let dot_interval = (4.0 / density).max(1.5);
 
+    let (min_x, min_y, max_x, max_y) = extents;
     for gy in min_y..max_y {
         for gx in min_x..max_x {
             if floor.contains(&(gx, gy)) { continue; }
