@@ -133,6 +133,15 @@ pub fn render_player_view(
         }
     }
 
+    // Corridor chamfers
+    if theme.corridor_chamfer != ChamferStyle::Sharp {
+        for corridor in &layout.corridors {
+            let vis = corridor_visibility(&corridor.connection_id, presentation, graph);
+            if vis == Visibility::Hidden { continue; }
+            render_corridor_chamfers(renderer, corridor, theme);
+        }
+    }
+
     // Grid lines (only over visible/explored floor)
     if options.show_grid {
         render_grid(renderer, &visible_floor);

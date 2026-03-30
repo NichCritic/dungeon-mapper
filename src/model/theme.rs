@@ -20,6 +20,9 @@ pub struct Theme {
     /// Density of hatching lines (when style is Hatched)
     #[serde(default = "default_hatching_density")]
     pub hatching_density: f32,
+    /// Corridor corner style
+    #[serde(default)]
+    pub corridor_chamfer: ChamferStyle,
 }
 
 fn default_true() -> bool { true }
@@ -39,6 +42,30 @@ pub enum ShadingStyle {
     Hatched,
     Solid,
     Stippled,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub enum ChamferStyle {
+    #[default]
+    Sharp,
+    Rounded,
+    Angled,
+}
+
+impl ChamferStyle {
+    pub fn label(self) -> &'static str {
+        match self {
+            ChamferStyle::Sharp => "Sharp",
+            ChamferStyle::Rounded => "Rounded",
+            ChamferStyle::Angled => "45° Angled",
+        }
+    }
+
+    pub const ALL: [ChamferStyle; 3] = [
+        ChamferStyle::Sharp,
+        ChamferStyle::Rounded,
+        ChamferStyle::Angled,
+    ];
 }
 
 impl ShadingStyle {
@@ -70,6 +97,7 @@ impl Theme {
             shading_radius: 1.0,
             shading_style: ShadingStyle::Hatched,
             hatching_density: 1.0,
+            corridor_chamfer: ChamferStyle::Sharp,
         }
     }
 }

@@ -66,6 +66,7 @@ fn render_input_hash(layout: &SpatialLayout, theme: &Theme, show_grid: bool) -> 
     theme.shading_radius.to_bits().hash(&mut h);
     (theme.shading_style as u8).hash(&mut h);
     theme.hatching_density.to_bits().hash(&mut h);
+    (theme.corridor_chamfer as u8).hash(&mut h);
     show_grid.hash(&mut h);
     h.finish()
 }
@@ -251,6 +252,16 @@ pub fn styled_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Styl
             ui.add(egui::Slider::new(&mut dungeon.theme.hatching_density, 0.3..=3.0).text("Density"));
         }
     }
+
+    ui.add_space(8.0);
+    ui.label("Corridor corners:");
+    egui::ComboBox::from_id_salt("chamfer_style")
+        .selected_text(dungeon.theme.corridor_chamfer.label())
+        .show_ui(ui, |ui| {
+            for s in ChamferStyle::ALL {
+                ui.selectable_value(&mut dungeon.theme.corridor_chamfer, s, s.label());
+            }
+        });
 
     ui.add_space(16.0);
     ui.heading("Export");

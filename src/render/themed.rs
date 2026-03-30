@@ -31,6 +31,11 @@ pub fn render_themed(
     for corridor in &layout.corridors {
         render_corridor_floor(renderer, corridor, theme);
     }
+    if theme.corridor_chamfer != ChamferStyle::Sharp {
+        for corridor in &layout.corridors {
+            render_corridor_chamfers(renderer, corridor, theme);
+        }
+    }
     if options.show_grid {
         render_grid(renderer, &floor);
     }
@@ -148,6 +153,104 @@ pub fn render_corridor_floor_with_color(
         let pw = (max_gx - min_gx) as f32 * GRID_PX;
         let ph = (max_gy - min_gy) as f32 * GRID_PX;
         renderer.fill_rect(px, py, pw, ph, color);
+    }
+}
+
+/// Render chamfered corners on corridor turns by drawing over the sharp outside corners.
+pub fn render_corridor_chamfers(
+    renderer: &mut dyn MapRenderer,
+    corridor: &CorridorSegment,
+    theme: &Theme,
+) {
+    if corridor.waypoints.len() < 3 {
+        return;
+    }
+    let cw = corridor.width as f32;
+    let half = cw / 2.0;
+    let chamfer_r = half * GRID_PX;
+
+    // Iterate over interior waypoints (each is a potential corner)
+    for triple in corridor.waypoints.windows(3) {
+        let prev = &triple[0];
+        let curr = &triple[1];
+        let next = &triple[2];
+
+        // Determine direction of incoming and outgoing segments
+        let dx_in = (curr.x - prev.x).signum();
+        let dy_in = (curr.y - prev.y).signum();
+        let dx_out = (next.x - curr.x).signum();
+        let dy_out = (next.y - curr.y).signum();
+
+        // Only chamfer when direction changes (a real corner)
+        if (dx_in, dy_in) == (dx_out, dy_out) {
+            continue;
+        }
+
+        // The corridor center at this waypoint
+        let cx = curr.x as f32 * GRID_PX;
+        let cy = curr.y as f32 * GRID_PX;
+
+        // The outside corner is opposite to the turn direction.
+        // For a horizontal-to-vertical turn, the outside corner depends on the signs.
+        // Compute the outside corner position relative to the waypoint center.
+        // The outside corner is at (cx + dx_in * half * GRID_PX, cy + dy_out * half * GRID_PX)
+        // when incoming is horizontal and outgoing is vertical, or vice versa.
+
+        let (ocx, ocy) = if dx_in != 0 && dy_out != 0 {
+            // Incoming horizontal, outgoing vertical
+            (cx + dx_in as f32 * half * GRID_PX, cy + dy_out as f32 * half * GRID_PX)
+        } else if dy_in != 0 && dx_out != 0 {
+            // Incoming vertical, outgoing horizontal
+            (cx + dx_out as f32 * half * GRID_PX, cy + dy_in as f32 * half * GRID_PX)
+        } else {
+            continue;
+        };
+
+        match theme.corridor_chamfer {
+            ChamferStyle::Sharp => {}
+            ChamferStyle::Rounded => {
+                // Draw a filled circle of background color at the outside corner,
+                // then redraw a quarter-circle of floor color for the inner curve.
+                // Simpler: fill bg circle to "bite" the corner, the inner edge creates the round.
+                renderer.fill_circle(ocx, ocy, chamfer_r, theme.bg_color);
+            }
+            ChamferStyle::Angled => {
+                // Draw a triangle of background color to cut the corner at 45°.
+                // The triangle vertices are:
+                //   ocx, ocy (the corner itself)
+                //   ocx - dx * chamfer_r, ocy (along one edge)
+                //   ocx, ocy - dy * chamfer_r (along the other edge)
+                // Since MapRenderer doesn't have a triangle primitive, approximate
+                // with multiple thin lines from the corner inward.
+                let steps = (chamfer_r / 0.5).ceil() as i32;
+                let edge1_x;
+                let edge1_y;
+                let edge2_x;
+                let edge2_y;
+
+                if dx_in != 0 && dy_out != 0 {
+                    edge1_x = ocx - dx_in as f32 * chamfer_r;
+                    edge1_y = ocy;
+                    edge2_x = ocx;
+                    edge2_y = ocy - dy_out as f32 * chamfer_r;
+                } else {
+                    edge1_x = ocx;
+                    edge1_y = ocy - dy_in as f32 * chamfer_r;
+                    edge2_x = ocx - dx_out as f32 * chamfer_r;
+                    edge2_y = ocy;
+                }
+
+                // Fill the triangle by drawing scanlines
+                for i in 0..=steps {
+                    let t = i as f32 / steps as f32;
+                    let x1 = ocx + (edge1_x - ocx) * t;
+                    let y1 = ocy + (edge1_y - ocy) * t;
+                    let x2 = ocx + (edge2_x - ocx) * t;
+                    let y2 = ocy + (edge2_y - ocy) * t;
+                    renderer.draw_line(x1, y1, x2, y2, 1.0, theme.bg_color);
+                }
+            }
+        }
     }
 }
 
