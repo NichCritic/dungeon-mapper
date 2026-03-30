@@ -33,6 +33,9 @@ pub struct DungeonApp {
     pub server_port: u16,
     /// Hash of the last PNG pushed to the server, to avoid redundant updates.
     last_server_push_hash: u64,
+
+    /// Pending async file operation (save/load/export).
+    pending_file_op: Option<std::sync::mpsc::Receiver<crate::io::save_load::FileOpResult>>,
 }
 
 impl Default for DungeonApp {
@@ -53,6 +56,7 @@ impl Default for DungeonApp {
             server: None,
             server_port: 8080,
             last_server_push_hash: 0,
+            pending_file_op: None,
         }
     }
 }
@@ -218,6 +222,28 @@ impl DungeonApp {
 
 impl eframe::App for DungeonApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Poll pending async file operation
+        if let Some(rx) = &self.pending_file_op {
+            if let Ok(result) = rx.try_recv() {
+                use crate::io::save_load::FileOpResult;
+                match result {
+                    FileOpResult::Loaded(Ok(d)) => {
+                        self.dungeon = d;
+                        self.graph_state = GraphEditorState::default();
+                        self.presenting = false;
+                        self.presentation = None;
+                    }
+                    FileOpResult::Loaded(Err(e)) => eprintln!("Load error: {}", e),
+                    FileOpResult::Saved(Ok(_path)) => {}
+                    FileOpResult::Saved(Err(e)) => eprintln!("Save error: {}", e),
+                    FileOpResult::ExportedPng(Ok(())) => {}
+                    FileOpResult::ExportedPng(Err(e)) => eprintln!("Export error: {}", e),
+                    FileOpResult::Cancelled => {}
+                }
+                self.pending_file_op = None;
+            }
+        }
+
         // Top menu bar
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
@@ -232,20 +258,14 @@ impl eframe::App for DungeonApp {
                         ui.close_menu();
                     }
                     if ui.button("Open...").clicked() {
-                        match crate::io::save_load::load_dungeon() {
-                            Ok(d) => {
-                                self.dungeon = d;
-                                self.graph_state = GraphEditorState::default();
-                                self.presenting = false;
-                                self.presentation = None;
-                            }
-                            Err(e) => eprintln!("Load error: {}", e),
+                        if self.pending_file_op.is_none() {
+                            self.pending_file_op = Some(crate::io::save_load::load_dungeon_async());
                         }
                         ui.close_menu();
                     }
                     if ui.button("Save As...").clicked() {
-                        if let Err(e) = crate::io::save_load::save_dungeon(&self.dungeon) {
-                            eprintln!("Save error: {}", e);
+                        if self.pending_file_op.is_none() {
+                            self.pending_file_op = Some(crate::io::save_load::save_dungeon_async(&self.dungeon));
                         }
                         ui.close_menu();
                     }
@@ -412,6 +432,14 @@ impl eframe::App for DungeonApp {
                                     &mut self.dungeon,
                                     &mut self.styled_state,
                                 );
+                                // Dispatch async export if requested
+                                if let Some(dm_mode) = self.styled_state.export_requested.take() {
+                                    if self.dungeon.layout.is_some() && self.pending_file_op.is_none() {
+                                        self.pending_file_op = Some(
+                                            crate::io::save_load::export_png_async(&self.dungeon, dm_mode),
+                                        );
+                                    }
+                                }
                             }
                         }
                     }

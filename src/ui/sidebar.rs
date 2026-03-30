@@ -411,6 +411,15 @@ fn room_properties(ui: &mut egui::Ui, room: &mut Room, focus_label: &mut bool) {
     let label_response = ui.text_edit_singleline(&mut room.label);
     if *focus_label {
         label_response.request_focus();
+        // Select all text so typing replaces it
+        if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), label_response.id) {
+            let range = egui::text::CCursorRange::two(
+                egui::text::CCursor::new(0),
+                egui::text::CCursor::new(room.label.len()),
+            );
+            state.cursor.set_char_range(Some(range));
+            state.store(ui.ctx(), label_response.id);
+        }
         *focus_label = false;
     }
 
@@ -484,6 +493,41 @@ fn room_properties(ui: &mut egui::Ui, room: &mut Room, focus_label: &mut bool) {
     ui.add_space(8.0);
     ui.label("Notes:");
     ui.text_edit_multiline(&mut room.notes);
+
+    // Decor section
+    ui.add_space(8.0);
+    ui.label("Decor:");
+    let mut remove_idx = None;
+    for (i, decor) in room.decor.iter_mut().enumerate() {
+        ui.horizontal(|ui| {
+            ui.label(decor.decor_type.label());
+            ui.add(egui::DragValue::new(&mut decor.x).range(0.0..=20.0).speed(0.1).prefix("x:"));
+            ui.add(egui::DragValue::new(&mut decor.y).range(0.0..=20.0).speed(0.1).prefix("y:"));
+            if ui.small_button("X").clicked() {
+                remove_idx = Some(i);
+            }
+        });
+    }
+    if let Some(idx) = remove_idx {
+        room.decor.remove(idx);
+    }
+    ui.horizontal(|ui| {
+        // Use a static-ish default for the combo box
+        let mut new_type = DecorType::Table;
+        egui::ComboBox::from_id_salt("add_decor_type")
+            .selected_text(new_type.label())
+            .width(90.0)
+            .show_ui(ui, |ui| {
+                for dt in DecorType::ALL {
+                    ui.selectable_value(&mut new_type, dt, dt.label());
+                }
+            });
+        if ui.button("Add").clicked() {
+            let (w, h) = room.grid_size();
+            let decor = RoomDecor::new(new_type, w as f32 / 2.0, h as f32 / 2.0);
+            room.decor.push(decor);
+        }
+    });
 }
 
 fn connection_properties(ui: &mut egui::Ui, edge: &mut StoredEdge) {

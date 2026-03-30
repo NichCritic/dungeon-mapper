@@ -19,6 +19,74 @@ pub struct Room {
     /// Whether the layout solver may swap width and height
     #[serde(default)]
     pub allow_rotation: bool,
+    /// Decorative elements placed inside the room
+    #[serde(default)]
+    pub decor: Vec<RoomDecor>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
+pub enum DecorType {
+    Table,
+    Chest,
+    Pillar,
+    StairsUp,
+    StairsDown,
+    Altar,
+    Fountain,
+    Trap,
+    Rubble,
+}
+
+impl DecorType {
+    pub const ALL: [DecorType; 9] = [
+        DecorType::Table,
+        DecorType::Chest,
+        DecorType::Pillar,
+        DecorType::StairsUp,
+        DecorType::StairsDown,
+        DecorType::Altar,
+        DecorType::Fountain,
+        DecorType::Trap,
+        DecorType::Rubble,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            DecorType::Table => "Table",
+            DecorType::Chest => "Chest",
+            DecorType::Pillar => "Pillar",
+            DecorType::StairsUp => "Stairs Up",
+            DecorType::StairsDown => "Stairs Down",
+            DecorType::Altar => "Altar",
+            DecorType::Fountain => "Fountain",
+            DecorType::Trap => "Trap",
+            DecorType::Rubble => "Rubble",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RoomDecor {
+    pub id: String,
+    pub decor_type: DecorType,
+    /// Position relative to room top-left, in grid units
+    pub x: f32,
+    pub y: f32,
+    /// Rotation in degrees
+    #[serde(default)]
+    pub rotation: f32,
+}
+
+impl RoomDecor {
+    pub fn new(decor_type: DecorType, x: f32, y: f32) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            decor_type,
+            x,
+            y,
+            rotation: 0.0,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -126,6 +194,7 @@ impl Room {
             grid_height: None,
             shape: RoomShape::default(),
             allow_rotation: false,
+            decor: Vec::new(),
         }
     }
 

@@ -66,6 +66,7 @@ pub enum DragState {
     #[default]
     None,
     DraggingRooms,
+    DraggingGroup(String),
     ConnectingFrom(String),
     /// Marquee selection: start position in world coords
     Marquee(egui::Pos2),
@@ -330,6 +331,9 @@ fn handle_interactions(
                     }
                 }
                 state.drag_state = DragState::DraggingRooms;
+            } else if let Some(group_id) = hit_test_group(world_pos, &dungeon.graph, &state.room_positions, node_sizes) {
+                state.selection.select_group(group_id.clone());
+                state.drag_state = DragState::DraggingGroup(group_id);
             } else {
                 // Start marquee selection on empty space
                 state.drag_state = DragState::Marquee(world_pos);
@@ -347,6 +351,17 @@ fn handle_interactions(
                 for id in &selected {
                     if let Some(pos) = state.room_positions.get_mut(id) {
                         *pos += delta;
+                    }
+                }
+            }
+            DragState::DraggingGroup(group_id) => {
+                let delta = response.drag_delta() / state.view.zoom;
+                if let Some(group) = dungeon.graph.groups.iter().find(|g| g.id == *group_id) {
+                    let member_ids: Vec<String> = group.room_ids.clone();
+                    for id in &member_ids {
+                        if let Some(pos) = state.room_positions.get_mut(id) {
+                            *pos += delta;
+                        }
                     }
                 }
             }
@@ -400,7 +415,13 @@ fn handle_interactions(
     }
 
     // Delete key — delete all selected items
-    if response.has_focus() {
+    // Allow when canvas has focus, or when hovered and no other widget (e.g. text field) has focus
+    let canvas_id = response.id;
+    let can_delete = response.has_focus()
+        || (response.hovered() && !ui.ctx().memory(|m| {
+            m.focused().is_some_and(|id| id != canvas_id)
+        }));
+    if can_delete {
         let delete_pressed = ui.input(|i| {
             i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)
         });

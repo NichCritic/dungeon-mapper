@@ -34,6 +34,10 @@ pub fn render_themed(
     if options.show_grid {
         render_grid(renderer, &floor);
     }
+    // Render room decor (after floors/grid, before walls)
+    for rl in &layout.rooms {
+        render_decor(renderer, rl, graph, theme);
+    }
     for rl in &layout.rooms {
         render_room_walls(renderer, rl, graph, theme);
     }
@@ -293,6 +297,91 @@ pub fn repair_circle_junctions(
                     let pw = (overlap_max_x - overlap_min_x) as f32 * GRID_PX;
                     let ph = (overlap_max_y - overlap_min_y) as f32 * GRID_PX;
                     renderer.fill_rect(px, py, pw, ph, theme.floor_color);
+                }
+            }
+        }
+    }
+}
+
+/// Render decorative elements inside rooms.
+pub fn render_decor(
+    renderer: &mut dyn MapRenderer,
+    rl: &RoomLayout,
+    graph: &DungeonGraph,
+    theme: &Theme,
+) {
+    let Some(room) = graph.room_by_id(&rl.room_id) else { return };
+    if room.decor.is_empty() {
+        return;
+    }
+
+    let room_px_x = rl.x as f32 * GRID_PX;
+    let room_px_y = rl.y as f32 * GRID_PX;
+    let color = theme.wall_color;
+
+    for decor in &room.decor {
+        let cx = room_px_x + decor.x * GRID_PX;
+        let cy = room_px_y + decor.y * GRID_PX;
+        let s = GRID_PX * 0.4; // symbol half-size
+
+        match decor.decor_type {
+            DecorType::Table => {
+                // Rounded rectangle
+                renderer.fill_rect(cx - s, cy - s * 0.6, s * 2.0, s * 1.2, color);
+            }
+            DecorType::Chest => {
+                // Small filled square with border
+                let cs = s * 0.7;
+                renderer.fill_rect(cx - cs, cy - cs, cs * 2.0, cs * 2.0, color);
+            }
+            DecorType::Pillar => {
+                // Filled circle
+                renderer.fill_circle(cx, cy, s * 0.5, color);
+            }
+            DecorType::StairsUp => {
+                // Stair lines going up (parallel horizontal lines in a box)
+                renderer.stroke_rect(cx - s, cy - s, s * 2.0, s * 2.0, 1.0, color);
+                let steps = 4;
+                for i in 1..steps {
+                    let y = cy - s + (i as f32 / steps as f32) * s * 2.0;
+                    renderer.draw_line(cx - s, y, cx + s, y, 1.0, color);
+                }
+                // Arrow pointing up
+                renderer.draw_line(cx, cy - s, cx - s * 0.3, cy - s * 0.5, 1.0, color);
+                renderer.draw_line(cx, cy - s, cx + s * 0.3, cy - s * 0.5, 1.0, color);
+            }
+            DecorType::StairsDown => {
+                // Same as up but arrow points down
+                renderer.stroke_rect(cx - s, cy - s, s * 2.0, s * 2.0, 1.0, color);
+                let steps = 4;
+                for i in 1..steps {
+                    let y = cy - s + (i as f32 / steps as f32) * s * 2.0;
+                    renderer.draw_line(cx - s, y, cx + s, y, 1.0, color);
+                }
+                renderer.draw_line(cx, cy + s, cx - s * 0.3, cy + s * 0.5, 1.0, color);
+                renderer.draw_line(cx, cy + s, cx + s * 0.3, cy + s * 0.5, 1.0, color);
+            }
+            DecorType::Altar => {
+                // Cross shape
+                let t = s * 0.25;
+                renderer.fill_rect(cx - t, cy - s, t * 2.0, s * 2.0, color);
+                renderer.fill_rect(cx - s * 0.7, cy - t, s * 1.4, t * 2.0, color);
+            }
+            DecorType::Fountain => {
+                // Concentric circles
+                renderer.stroke_circle(cx, cy, s * 0.8, 1.0, color);
+                renderer.stroke_circle(cx, cy, s * 0.4, 1.0, color);
+                renderer.fill_circle(cx, cy, s * 0.15, color);
+            }
+            DecorType::Trap => {
+                // X mark
+                renderer.draw_line(cx - s * 0.6, cy - s * 0.6, cx + s * 0.6, cy + s * 0.6, 1.5, color);
+                renderer.draw_line(cx + s * 0.6, cy - s * 0.6, cx - s * 0.6, cy + s * 0.6, 1.5, color);
+            }
+            DecorType::Rubble => {
+                // Scattered dots
+                for &(dx, dy) in &[(0.0, 0.0), (-0.4, -0.3), (0.3, -0.2), (-0.2, 0.4), (0.4, 0.3)] {
+                    renderer.fill_circle(cx + dx * s, cy + dy * s, s * 0.15, color);
                 }
             }
         }

@@ -138,6 +138,13 @@ pub fn render_player_view(
         render_grid(renderer, &visible_floor);
     }
 
+    // Room decor (visible rooms only)
+    for rl in &layout.rooms {
+        let vis = presentation.room_visibility(&rl.room_id);
+        if *vis != Visibility::Visible { continue; }
+        render_decor(renderer, rl, graph, theme);
+    }
+
     // Room walls
     for rl in &layout.rooms {
         let vis = presentation.room_visibility(&rl.room_id);

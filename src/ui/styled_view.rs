@@ -19,6 +19,8 @@ pub struct StyledViewState {
     pub show_notes: bool,
     pub show_secrets: bool,
     render_cache: Option<RenderCache>,
+    /// Set by sidebar export buttons, consumed by app.rs to dispatch async export.
+    pub export_requested: Option<bool>,
 }
 
 impl Default for StyledViewState {
@@ -30,6 +32,7 @@ impl Default for StyledViewState {
             show_notes: true,
             show_secrets: true,
             render_cache: None,
+            export_requested: None,
         }
     }
 }
@@ -254,26 +257,9 @@ pub fn styled_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Styl
     ui.separator();
 
     if ui.button("Export DM Map (PNG)").clicked() {
-        export_png(dungeon, true);
+        state.export_requested = Some(true);
     }
     if ui.button("Export Player Map (PNG)").clicked() {
-        export_png(dungeon, false);
-    }
-}
-
-fn export_png(dungeon: &Dungeon, dm_mode: bool) {
-    if dungeon.layout.is_none() {
-        return;
-    }
-
-    let path = rfd::FileDialog::new()
-        .set_title(if dm_mode { "Export DM Map" } else { "Export Player Map" })
-        .add_filter("PNG Image", &["png"])
-        .save_file();
-
-    if let Some(path) = path {
-        if let Err(e) = crate::io::export::export_png(dungeon, &path, dm_mode, 2) {
-            eprintln!("Export error: {}", e);
-        }
+        state.export_requested = Some(false);
     }
 }

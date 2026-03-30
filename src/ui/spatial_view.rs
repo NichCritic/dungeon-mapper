@@ -376,7 +376,12 @@ fn handle_spatial_interactions(
     }
 
     // === DELETE KEY — remove selected waypoint ===
-    if response.has_focus() {
+    let canvas_id = response.id;
+    let can_delete = response.has_focus()
+        || (response.hovered() && !ui.ctx().memory(|m| {
+            m.focused().is_some_and(|id| id != canvas_id)
+        }));
+    if can_delete {
         let delete_pressed = ui.input(|i| {
             i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)
         });
