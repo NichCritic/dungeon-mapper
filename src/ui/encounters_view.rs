@@ -10,7 +10,7 @@ use crate::model::monster::{
 };
 use crate::presentation::combat_sim::{
     self, build_combatants_from_encounter, build_combatants_from_party,
-    run_combat, run_monte_carlo, MonteCarloResult, SimResult,
+    run_monte_carlo, MonteCarloResult,
 };
 use crate::render::recording::{RecordingRenderer, RenderCommand, replay_commands};
 use crate::render::themed::RenderOptions;
@@ -40,7 +40,6 @@ pub struct SimulationState {
     pub side_a: SimSide,
     pub side_b: SimSide,
     pub monte_carlo_n: u32,
-    pub last_single: Option<SimResult>,
     pub last_monte_carlo: Option<MonteCarloResult>,
 }
 
@@ -50,7 +49,6 @@ impl Default for SimulationState {
             side_a: SimSide::Party,
             side_b: SimSide::default(),
             monte_carlo_n: 100,
-            last_single: None,
             last_monte_carlo: None,
         }
     }
@@ -60,6 +58,8 @@ pub struct EncountersViewState {
     pub view: ViewState,
     render_cache: Option<RenderCache>,
     pub sim_state: SimulationState,
+    /// Room selected on the map canvas (for contextual sidebar).
+    pub selected_room: Option<String>,
 }
 
 impl Default for EncountersViewState {
@@ -68,6 +68,7 @@ impl Default for EncountersViewState {
             view: ViewState::default(),
             render_cache: None,
             sim_state: SimulationState::default(),
+            selected_room: None,
         }
     }
 }
@@ -198,12 +199,14 @@ pub fn encounters_view(ui: &mut egui::Ui, dungeon: &Dungeon, state: &mut Encount
         let (marker, color) = match enc.encounter_type {
             EncounterType::Static => ("S", egui::Color32::from_rgb(255, 80, 80)),
             EncounterType::Wandering(r) => {
-                let radius_px = r as f32 * GRID_PX * 2.0 * transform.zoom;
-                painter.circle_stroke(
-                    screen,
-                    radius_px,
-                    egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(255, 160, 40, 60)),
-                );
+                if let Some(range) = r {
+                    let radius_px = range as f32 * GRID_PX * 2.0 * transform.zoom;
+                    painter.circle_stroke(
+                        screen,
+                        radius_px,
+                        egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(255, 160, 40, 60)),
+                    );
+                }
                 ("W", egui::Color32::from_rgb(255, 160, 40))
             }
         };
@@ -228,6 +231,44 @@ pub fn encounters_view(ui: &mut egui::Ui, dungeon: &Dungeon, state: &mut Encount
             color,
         );
     }
+
+    // Click to select/deselect a room
+    if response.clicked() {
+        if let Some(pos) = response.interact_pointer_pos() {
+            let world = transform.screen_to_world(pos);
+            let gx = (world.x / GRID_PX).floor() as i32;
+            let gy = (world.y / GRID_PX).floor() as i32;
+            let mut hit = None;
+            for rl in &layout.rooms {
+                if gx >= rl.x && gx < rl.x + rl.width as i32
+                    && gy >= rl.y && gy < rl.y + rl.height as i32
+                {
+                    hit = Some(rl.room_id.clone());
+                    break;
+                }
+            }
+            state.selected_room = hit;
+        }
+    }
+
+    // Highlight selected room
+    if let Some(ref sel_id) = state.selected_room {
+        if let Some(rl) = layout.room_by_id(sel_id) {
+            let min = transform.world_to_screen(egui::pos2(
+                rl.x as f32 * GRID_PX, rl.y as f32 * GRID_PX,
+            ));
+            let max = transform.world_to_screen(egui::pos2(
+                (rl.x as f32 + rl.width as f32) * GRID_PX,
+                (rl.y as f32 + rl.height as f32) * GRID_PX,
+            ));
+            painter.rect_stroke(
+                egui::Rect::from_min_max(min, max),
+                0.0,
+                egui::Stroke::new(2.0, egui::Color32::from_rgb(100, 180, 255)),
+                egui::StrokeKind::Middle,
+            );
+        }
+    }
 }
 
 pub fn encounters_sidebar(
@@ -235,44 +276,122 @@ pub fn encounters_sidebar(
     dungeon: &mut Dungeon,
     monster_db: &MonsterDatabase,
     combat_stats_cache: &mut CombatStatsCache,
-    sim_state: &mut SimulationState,
+    state: &mut EncountersViewState,
 ) {
-    ui.heading("Encounters");
-    ui.separator();
+    let sim_state = &mut state.sim_state;
 
-    if !monster_db.is_empty() {
-        ui.label(format!("{} monsters in database", monster_db.len()));
-    } else {
+    if monster_db.is_empty() {
         ui.colored_label(
             egui::Color32::from_rgb(255, 200, 100),
             "No monster database loaded",
         );
+        ui.add_space(4.0);
     }
 
-    ui.add_space(4.0);
+    // Contextual header: selected room
+    if let Some(ref sel_room_id) = state.selected_room.clone() {
+        let room_label = dungeon.graph.room_by_id(sel_room_id)
+            .map(|r| r.label.clone())
+            .unwrap_or_else(|| "?".to_string());
+        ui.heading(&room_label);
+        ui.separator();
 
-    // Add encounter
-    ui.horizontal(|ui| {
-        if ui.button("Add Encounter").clicked() {
-            let room_id = dungeon.graph.rooms.first()
-                .map(|r| r.id.clone())
-                .unwrap_or_default();
-            if !room_id.is_empty() {
-                dungeon.encounters.push(Encounter::new("New Encounter".to_string(), room_id));
+        if ui.small_button("Deselect").clicked() {
+            state.selected_room = None;
+        }
+
+        // Encounters in this room
+        let room_enc_indices: Vec<usize> = dungeon.encounters.iter().enumerate()
+            .filter(|(_, e)| e.home_room_id == *sel_room_id)
+            .map(|(i, _)| i)
+            .collect();
+
+        if room_enc_indices.is_empty() {
+            ui.add_space(4.0);
+            ui.label("No encounters in this room.");
+        }
+
+        ui.add_space(4.0);
+        if ui.button("Add Encounter Here").clicked() {
+            dungeon.encounters.push(Encounter::new("New Encounter".to_string(), sel_room_id.clone()));
+        }
+
+        if !room_enc_indices.is_empty() {
+            ui.add_space(8.0);
+            encounters_list(ui, dungeon, monster_db, &room_enc_indices);
+        }
+
+        // Other rooms' encounters (collapsed)
+        let other_indices: Vec<usize> = (0..dungeon.encounters.len())
+            .filter(|i| !room_enc_indices.contains(i))
+            .collect();
+        if !other_indices.is_empty() {
+            ui.add_space(12.0);
+            egui::CollapsingHeader::new(format!("Other Encounters ({})", other_indices.len()))
+                .default_open(false)
+                .show(ui, |ui| {
+                    encounters_list(ui, dungeon, monster_db, &other_indices);
+                });
+        }
+    } else {
+        ui.heading("Encounters");
+        ui.separator();
+
+        ui.add_space(4.0);
+
+        // Add encounter
+        ui.horizontal(|ui| {
+            if ui.button("Add Encounter").clicked() {
+                let room_id = dungeon.graph.rooms.first()
+                    .map(|r| r.id.clone())
+                    .unwrap_or_default();
+                if !room_id.is_empty() {
+                    dungeon.encounters.push(Encounter::new("New Encounter".to_string(), room_id));
+                }
             }
-        }
-        if ui.button("Merge Monsters").clicked() {
-            ui.ctx().memory_mut(|mem| {
-                mem.data.insert_temp(egui::Id::new("merge_window_open"), true);
-            });
-        }
-    });
+            if ui.button("Monster Workshop").clicked() {
+                ui.ctx().memory_mut(|mem| {
+                    mem.data.insert_temp(egui::Id::new("monster_workshop_open"), true);
+                });
+            }
+        });
 
-    ui.add_space(8.0);
+        ui.add_space(8.0);
+
+        let all_indices: Vec<usize> = (0..dungeon.encounters.len()).collect();
+        encounters_list(ui, dungeon, monster_db, &all_indices);
+    }
+
+    // Monster browser window
+    monster_browser_window(ui.ctx(), dungeon, monster_db);
+    // Custom monster editor window
+    custom_monster_editor_window(ui.ctx(), dungeon);
+    // Monster workshop window (merge + custom editing)
+    monster_workshop_window(ui.ctx(), dungeon, monster_db);
+
+    // Monte Carlo window
+    monte_carlo_window(ui.ctx(), dungeon, monster_db, combat_stats_cache, sim_state);
+
+    ui.add_space(12.0);
+    if ui.button("Monte Carlo Simulator").clicked() {
+        ui.ctx().memory_mut(|mem| {
+            mem.data.insert_temp(egui::Id::new("monte_carlo_open"), true);
+        });
+    }
+}
+
+/// Render a list of encounters by index. Handles all deferred mutations.
+fn encounters_list(
+    ui: &mut egui::Ui,
+    dungeon: &mut Dungeon,
+    monster_db: &MonsterDatabase,
+    indices: &[usize],
+) {
 
     let rooms_list: Vec<_> = dungeon.graph.rooms.iter()
         .map(|r| (r.id.clone(), r.label.clone()))
         .collect();
+    let index_set: std::collections::HashSet<usize> = indices.iter().copied().collect();
 
     // Encounter list
     let mut remove_enc_idx = None;
@@ -283,6 +402,7 @@ pub fn encounters_sidebar(
 
     egui::ScrollArea::vertical().id_salt("enc_scroll").show(ui, |ui| {
         for (enc_idx, enc) in dungeon.encounters.iter_mut().enumerate() {
+            if !index_set.contains(&enc_idx) { continue; }
             let enc_id = enc.id.clone();
             ui.push_id(&enc_id, |ui| {
                 ui.group(|ui| {
@@ -302,14 +422,26 @@ pub fn encounters_sidebar(
                         }
                         let mut wander_range = match enc.encounter_type {
                             EncounterType::Wandering(r) => r,
-                            _ => 2,
+                            _ => Some(2),
                         };
                         let is_wandering = matches!(enc.encounter_type, EncounterType::Wandering(_));
                         if ui.selectable_label(is_wandering, "Wandering").clicked() {
                             enc.encounter_type = EncounterType::Wandering(wander_range);
                         }
                         if is_wandering {
-                            if ui.add(egui::DragValue::new(&mut wander_range).range(1..=20).prefix("range: ")).changed() {
+                            let is_unlimited = wander_range.is_none();
+                            if is_unlimited {
+                                ui.label("-");
+                            } else {
+                                let mut r = wander_range.unwrap_or(2);
+                                if ui.add(egui::DragValue::new(&mut r).range(1..=20).prefix("range: ")).changed() {
+                                    wander_range = Some(r);
+                                    enc.encounter_type = EncounterType::Wandering(wander_range);
+                                }
+                            }
+                            let mut unlimited = is_unlimited;
+                            if ui.checkbox(&mut unlimited, "unlimited").changed() {
+                                wander_range = if unlimited { None } else { Some(2) };
                                 enc.encounter_type = EncounterType::Wandering(wander_range);
                             }
                         }
@@ -423,170 +555,131 @@ pub fn encounters_sidebar(
             mem.data.insert_temp(egui::Id::new("monster_browser_target"), enc_idx);
         });
     }
+}
 
-    // Monster browser window
-    monster_browser_window(ui.ctx(), dungeon, monster_db);
-    // Custom monster editor window
-    custom_monster_editor_window(ui.ctx(), dungeon);
-    // Monster merge window
-    monster_merge_window(ui.ctx(), dungeon, monster_db);
+/// Floating Monte Carlo simulator window.
+fn monte_carlo_window(
+    ctx: &egui::Context,
+    dungeon: &mut Dungeon,
+    monster_db: &MonsterDatabase,
+    combat_stats_cache: &mut CombatStatsCache,
+    sim_state: &mut SimulationState,
+) {
+    let mut open: bool = ctx.memory(|mem|
+        mem.data.get_temp(egui::Id::new("monte_carlo_open")).unwrap_or(false)
+    );
 
-    // --- Combat Simulator ---
-    ui.add_space(12.0);
-    ui.heading("Combat Simulator");
-    ui.separator();
+    if !open { return; }
 
-    let enc_names: Vec<(usize, String)> = dungeon.encounters.iter().enumerate()
-        .map(|(i, e)| (i, e.name.clone()))
-        .collect();
+    egui::Window::new("Monte Carlo Simulator")
+        .open(&mut open)
+        .default_size([400.0, 400.0])
+        .resizable(true)
+        .show(ctx, |ui| {
+            let enc_names: Vec<(usize, String)> = dungeon.encounters.iter().enumerate()
+                .map(|(i, e)| (i, e.name.clone()))
+                .collect();
 
-    // Side A selector
-    ui.horizontal(|ui| {
-        ui.label("Side A:");
-        egui::ComboBox::from_id_salt("sim_side_a")
-            .selected_text(match &sim_state.side_a {
-                SimSide::Party => "Party".to_string(),
-                SimSide::Encounter(idx) => enc_names.iter()
-                    .find(|(i, _)| i == idx)
-                    .map(|(_, n)| n.clone())
-                    .unwrap_or_else(|| "?".to_string()),
-            })
-            .width(140.0)
-            .show_ui(ui, |ui| {
-                if ui.selectable_label(sim_state.side_a == SimSide::Party, "Party").clicked() {
-                    sim_state.side_a = SimSide::Party;
-                }
-                for (i, name) in &enc_names {
-                    if ui.selectable_label(sim_state.side_a == SimSide::Encounter(*i), name).clicked() {
-                        sim_state.side_a = SimSide::Encounter(*i);
+            ui.horizontal(|ui| {
+                ui.label("Side A:");
+                egui::ComboBox::from_id_salt("mc_side_a")
+                    .selected_text(match &sim_state.side_a {
+                        SimSide::Party => "Party".to_string(),
+                        SimSide::Encounter(idx) => enc_names.iter()
+                            .find(|(i, _)| i == idx)
+                            .map(|(_, n)| n.clone())
+                            .unwrap_or_else(|| "?".to_string()),
+                    })
+                    .width(140.0)
+                    .show_ui(ui, |ui| {
+                        if ui.selectable_label(sim_state.side_a == SimSide::Party, "Party").clicked() {
+                            sim_state.side_a = SimSide::Party;
+                        }
+                        for (i, name) in &enc_names {
+                            if ui.selectable_label(sim_state.side_a == SimSide::Encounter(*i), name).clicked() {
+                                sim_state.side_a = SimSide::Encounter(*i);
+                            }
+                        }
+                    });
+            });
+
+            ui.horizontal(|ui| {
+                ui.label("Side B:");
+                egui::ComboBox::from_id_salt("mc_side_b")
+                    .selected_text(match &sim_state.side_b {
+                        SimSide::Party => "Party".to_string(),
+                        SimSide::Encounter(idx) => enc_names.iter()
+                            .find(|(i, _)| i == idx)
+                            .map(|(_, n)| n.clone())
+                            .unwrap_or_else(|| "?".to_string()),
+                    })
+                    .width(140.0)
+                    .show_ui(ui, |ui| {
+                        if ui.selectable_label(sim_state.side_b == SimSide::Party, "Party").clicked() {
+                            sim_state.side_b = SimSide::Party;
+                        }
+                        for (i, name) in &enc_names {
+                            if ui.selectable_label(sim_state.side_b == SimSide::Encounter(*i), name).clicked() {
+                                sim_state.side_b = SimSide::Encounter(*i);
+                            }
+                        }
+                    });
+            });
+
+            ui.add_space(4.0);
+
+            let build_side = |side: &SimSide, side_idx: usize, cache: &mut CombatStatsCache| -> (Vec<combat_sim::SimCombatant>, String) {
+                match side {
+                    SimSide::Party => {
+                        (build_combatants_from_party(&dungeon.party, side_idx), "Party".to_string())
+                    }
+                    SimSide::Encounter(enc_idx) => {
+                        if let Some(enc) = dungeon.encounters.get(*enc_idx) {
+                            let label = enc.name.clone();
+                            let combatants = build_combatants_from_encounter(enc, monster_db, &dungeon.custom_monsters, cache, side_idx);
+                            (combatants, label)
+                        } else {
+                            (Vec::new(), "?".to_string())
+                        }
                     }
                 }
-            });
-    });
-
-    // Side B selector
-    ui.horizontal(|ui| {
-        ui.label("Side B:");
-        egui::ComboBox::from_id_salt("sim_side_b")
-            .selected_text(match &sim_state.side_b {
-                SimSide::Party => "Party".to_string(),
-                SimSide::Encounter(idx) => enc_names.iter()
-                    .find(|(i, _)| i == idx)
-                    .map(|(_, n)| n.clone())
-                    .unwrap_or_else(|| "?".to_string()),
-            })
-            .width(140.0)
-            .show_ui(ui, |ui| {
-                if ui.selectable_label(sim_state.side_b == SimSide::Party, "Party").clicked() {
-                    sim_state.side_b = SimSide::Party;
-                }
-                for (i, name) in &enc_names {
-                    if ui.selectable_label(sim_state.side_b == SimSide::Encounter(*i), name).clicked() {
-                        sim_state.side_b = SimSide::Encounter(*i);
-                    }
-                }
-            });
-    });
-
-    ui.add_space(4.0);
-
-    // Build combatants helper
-    let build_side = |side: &SimSide, side_idx: usize, cache: &mut CombatStatsCache| -> (Vec<combat_sim::SimCombatant>, String) {
-        match side {
-            SimSide::Party => {
-                (build_combatants_from_party(&dungeon.party, side_idx), "Party".to_string())
-            }
-            SimSide::Encounter(enc_idx) => {
-                if let Some(enc) = dungeon.encounters.get(*enc_idx) {
-                    let label = enc.name.clone();
-                    let combatants = build_combatants_from_encounter(enc, monster_db, &dungeon.custom_monsters, cache, side_idx);
-                    (combatants, label)
-                } else {
-                    (Vec::new(), "?".to_string())
-                }
-            }
-        }
-    };
-
-    ui.horizontal(|ui| {
-        if ui.button("Run Single").clicked() {
-            let (side_a, _label_a) = build_side(&sim_state.side_a, 0, combat_stats_cache);
-            let (side_b, _label_b) = build_side(&sim_state.side_b, 1, combat_stats_cache);
-            if !side_a.is_empty() && !side_b.is_empty() {
-                sim_state.last_single = Some(run_combat(&side_a, &side_b));
-                sim_state.last_monte_carlo = None;
-            }
-        }
-    });
-
-    ui.horizontal(|ui| {
-        ui.label("N:");
-        ui.add(egui::DragValue::new(&mut sim_state.monte_carlo_n).range(10..=10000));
-        if ui.button("Run Monte Carlo").clicked() {
-            let (side_a, label_a) = build_side(&sim_state.side_a, 0, combat_stats_cache);
-            let (side_b, label_b) = build_side(&sim_state.side_b, 1, combat_stats_cache);
-            if !side_a.is_empty() && !side_b.is_empty() {
-                sim_state.last_monte_carlo = Some(run_monte_carlo(
-                    &side_a, &side_b, sim_state.monte_carlo_n,
-                    label_a, label_b,
-                ));
-                sim_state.last_single = None;
-            }
-        }
-    });
-
-    // Display results
-    if let Some(result) = &sim_state.last_single {
-        ui.add_space(4.0);
-        ui.group(|ui| {
-            ui.label("Single Combat Result");
-            let winner_text = match result.winner {
-                Some(0) => "Side A wins",
-                Some(1) => "Side B wins",
-                _ => "Draw (timeout)",
             };
-            ui.label(format!("{} in {} rounds", winner_text, result.rounds));
 
-            // Show all combatants grouped by side
-            for side in 0..=1 {
-                let side_combatants: Vec<_> = result.combatants.iter()
-                    .filter(|c| c.side == side)
-                    .collect();
-                if side_combatants.is_empty() { continue; }
-                ui.label(if side == 0 { "Side A:" } else { "Side B:" });
-                for c in &side_combatants {
-                    let status = if c.current_hp <= 0 { "DEAD" } else { "alive" };
-                    let hp_display = if c.current_hp <= 0 {
-                        format!("0/{}", c.max_hp)
-                    } else {
-                        format!("{}/{}", c.current_hp, c.max_hp)
-                    };
-                    let color = if c.current_hp <= 0 {
-                        egui::Color32::from_rgb(255, 100, 100)
-                    } else {
-                        egui::Color32::from_rgb(100, 255, 100)
-                    };
-                    ui.colored_label(color, format!("  {} ({}) - {}", c.name, hp_display, status));
+            ui.horizontal(|ui| {
+                ui.label("N:");
+                ui.add(egui::DragValue::new(&mut sim_state.monte_carlo_n).range(10..=10000));
+                if ui.button("Run").clicked() {
+                    let (side_a, label_a) = build_side(&sim_state.side_a, 0, combat_stats_cache);
+                    let (side_b, label_b) = build_side(&sim_state.side_b, 1, combat_stats_cache);
+                    if !side_a.is_empty() && !side_b.is_empty() {
+                        sim_state.last_monte_carlo = Some(run_monte_carlo(
+                            &side_a, &side_b, sim_state.monte_carlo_n,
+                            label_a, label_b,
+                        ));
+                    }
                 }
-            }
-        });
-    }
+            });
 
-    if let Some(mc) = &sim_state.last_monte_carlo {
-        ui.add_space(4.0);
-        ui.group(|ui| {
-            ui.label(format!("Monte Carlo ({} sims)", mc.num_sims));
-            let a_pct = mc.side_a_wins as f32 / mc.num_sims as f32 * 100.0;
-            let b_pct = mc.side_b_wins as f32 / mc.num_sims as f32 * 100.0;
-            let d_pct = mc.draws as f32 / mc.num_sims as f32 * 100.0;
-            ui.label(format!("{}: {:.1}% ({} wins)", mc.side_a_label, a_pct, mc.side_a_wins));
-            ui.label(format!("{}: {:.1}% ({} wins)", mc.side_b_label, b_pct, mc.side_b_wins));
-            if mc.draws > 0 {
-                ui.label(format!("Draws: {:.1}% ({})", d_pct, mc.draws));
+            if let Some(mc) = &sim_state.last_monte_carlo {
+                ui.add_space(4.0);
+                ui.group(|ui| {
+                    ui.label(format!("Monte Carlo ({} sims)", mc.num_sims));
+                    let a_pct = mc.side_a_wins as f32 / mc.num_sims as f32 * 100.0;
+                    let b_pct = mc.side_b_wins as f32 / mc.num_sims as f32 * 100.0;
+                    let d_pct = mc.draws as f32 / mc.num_sims as f32 * 100.0;
+                    ui.label(format!("{}: {:.1}% ({} wins)", mc.side_a_label, a_pct, mc.side_a_wins));
+                    ui.label(format!("{}: {:.1}% ({} wins)", mc.side_b_label, b_pct, mc.side_b_wins));
+                    if mc.draws > 0 {
+                        ui.label(format!("Draws: {:.1}% ({})", d_pct, mc.draws));
+                    }
+                    ui.label(format!("Avg rounds: {:.1}", mc.avg_rounds));
+                });
             }
-            ui.label(format!("Avg rounds: {:.1}", mc.avg_rounds));
         });
-    }
+
+    ctx.memory_mut(|mem| {
+        mem.data.insert_temp(egui::Id::new("monte_carlo_open"), open);
+    });
 }
 
 /// Floating monster browser window.
@@ -1143,15 +1236,15 @@ fn feature_list_editor(ui: &mut egui::Ui, section_label: &str, features: &mut Ve
         });
 }
 
-// --- Monster Merge Window ---
+// --- Monster Workshop Window (Merge + Custom Monsters) ---
 
-fn monster_merge_window(
+fn monster_workshop_window(
     ctx: &egui::Context,
     dungeon: &mut Dungeon,
     monster_db: &MonsterDatabase,
 ) {
     let mut open: bool = ctx.memory(|mem|
-        mem.data.get_temp(egui::Id::new("merge_window_open")).unwrap_or(false)
+        mem.data.get_temp(egui::Id::new("monster_workshop_open")).unwrap_or(false)
     );
 
     if !open {
@@ -1199,11 +1292,35 @@ fn monster_merge_window(
         MergeStrategy::ALL.get(idx).cloned().unwrap_or(MergeStrategy::Max)
     };
 
-    egui::Window::new("Merge Monsters")
+    egui::Window::new("Monster Workshop")
         .open(&mut open)
         .default_size([550.0, 700.0])
         .resizable(true)
         .show(ctx, |ui| {
+            // --- Custom Monsters List ---
+            if !dungeon.custom_monsters.is_empty() {
+                ui.label(egui::RichText::new("Custom Monsters").strong().size(14.0));
+                let mut edit_id = None;
+                for cm in &dungeon.custom_monsters {
+                    ui.horizontal(|ui| {
+                        ui.label(&cm.monster.name);
+                        if ui.small_button("Edit").clicked() {
+                            edit_id = Some(cm.id.clone());
+                        }
+                    });
+                }
+                if let Some(id) = edit_id {
+                    ctx.memory_mut(|mem| {
+                        mem.data.insert_temp(egui::Id::new("custom_editor_id"), id);
+                    });
+                }
+                ui.separator();
+            }
+
+            // --- Merge Monsters ---
+            ui.label(egui::RichText::new("Merge Monsters").strong().size(14.0));
+            ui.add_space(4.0);
+
             // Monster A picker
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("Monster A:").strong());
@@ -1406,7 +1523,7 @@ fn monster_merge_window(
     // Persist state
     let overrides_json = serde_json::to_string(&overrides).unwrap_or_else(|_| "{}".to_string());
     ctx.memory_mut(|mem| {
-        mem.data.insert_temp(egui::Id::new("merge_window_open"), open);
+        mem.data.insert_temp(egui::Id::new("monster_workshop_open"), open);
         mem.data.insert_temp(egui::Id::new("merge_a_src"), merge_a_src);
         mem.data.insert_temp(egui::Id::new("merge_a_name"), merge_a_name);
         mem.data.insert_temp(egui::Id::new("merge_b_src"), merge_b_src);

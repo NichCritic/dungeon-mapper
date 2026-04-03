@@ -108,7 +108,6 @@ impl Default for GraphEditorState {
 
 const NODE_MIN_WIDTH: f32 = 120.0;
 const NODE_MIN_HEIGHT: f32 = 50.0;
-const CONNECT_HANDLE_RADIUS: f32 = 8.0;
 
 /// Per-room dimensions in world space.
 type NodeSizes = HashMap<String, (f32, f32)>;
@@ -314,14 +313,22 @@ fn handle_interactions(
         }
     }
 
-    // Drag start: room drag, connect handle, or marquee
+    // Right-click drag start: connection creation
+    if response.drag_started_by(egui::PointerButton::Secondary) {
+        if let Some(pos) = pointer {
+            let world_pos = transform.screen_to_world(pos);
+            if let Some(room_id) = hit_test_room(world_pos, &state.room_positions, node_sizes) {
+                state.drag_state = DragState::ConnectingFrom(room_id);
+            }
+        }
+    }
+
+    // Drag start: room drag or marquee
     if response.drag_started_by(egui::PointerButton::Primary) {
         if let Some(pos) = pointer {
             let world_pos = transform.screen_to_world(pos);
 
-            if let Some(room_id) = hit_test_connect_handle(world_pos, &state.room_positions, transform, node_sizes) {
-                state.drag_state = DragState::ConnectingFrom(room_id);
-            } else if let Some(room_id) = hit_test_room(world_pos, &state.room_positions, node_sizes) {
+            if let Some(room_id) = hit_test_room(world_pos, &state.room_positions, node_sizes) {
                 // If dragging a selected room, move all selected rooms
                 if !state.selection.rooms.contains(&room_id) {
                     if !shift {
@@ -370,23 +377,26 @@ fn handle_interactions(
         }
     }
 
+    // Release right-click drag: connection creation
+    if response.drag_stopped_by(egui::PointerButton::Secondary) {
+        if let DragState::ConnectingFrom(src_id) = &state.drag_state {
+            let src_id = src_id.clone();
+            if let Some(pos) = pointer {
+                let world_pos = transform.screen_to_world(pos);
+                if let Some(target_id) = hit_test_room(world_pos, &state.room_positions, node_sizes) {
+                    let conn = Connection::new(ConnectionType::Door);
+                    let conn_id = conn.id.clone();
+                    dungeon.graph.add_connection(src_id, target_id, conn);
+                    state.selection.select_connection(conn_id);
+                }
+            }
+            state.drag_state = DragState::None;
+        }
+    }
+
     // Release drag
     if response.drag_stopped_by(egui::PointerButton::Primary) {
         match &state.drag_state {
-            DragState::ConnectingFrom(src_id) => {
-                let src_id = src_id.clone();
-                if let Some(pos) = pointer {
-                    let world_pos = transform.screen_to_world(pos);
-                    if let Some(target_id) = hit_test_room(world_pos, &state.room_positions, node_sizes) {
-                        if target_id != src_id {
-                            let conn = Connection::new(ConnectionType::Door);
-                            let conn_id = conn.id.clone();
-                            dungeon.graph.add_connection(src_id, target_id, conn);
-                            state.selection.select_connection(conn_id);
-                        }
-                    }
-                }
-            }
             DragState::Marquee(start) => {
                 // Select all rooms within the marquee rectangle
                 if let Some(pos) = pointer {
@@ -516,23 +526,6 @@ fn hit_test_room(
             egui::vec2(nw, nh),
         );
         if room_rect.contains(world_pos) {
-            return Some(id.clone());
-        }
-    }
-    None
-}
-
-fn hit_test_connect_handle(
-    world_pos: egui::Pos2,
-    room_positions: &HashMap<String, egui::Pos2>,
-    _transform: &ViewTransform,
-    node_sizes: &NodeSizes,
-) -> Option<String> {
-    for (id, &pos) in room_positions {
-        let (nw, _) = node_size(node_sizes, id);
-        // Handle on the right edge of the room
-        let handle_center = pos + egui::vec2(nw / 2.0, 0.0);
-        if world_pos.distance(handle_center) < CONNECT_HANDLE_RADIUS * 2.0 {
             return Some(id.clone());
         }
     }
@@ -901,13 +894,6 @@ fn draw_rooms(
                 egui::Color32::WHITE,
             );
 
-            // Connection handle (small circle on right edge)
-            let handle_pos = egui::pos2(node_rect.max.x, screen_pos.y);
-            painter.circle_filled(
-                handle_pos,
-                CONNECT_HANDLE_RADIUS * transform.zoom * 0.5,
-                COLOR_SELECTION.linear_multiply(0.5),
-            );
         }
     }
 }

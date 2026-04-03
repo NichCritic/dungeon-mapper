@@ -374,53 +374,6 @@ impl DungeonApp {
         }
     }
 
-    /// Find the nearest room to a world position (for annotation metadata).
-    fn nearest_room_at_world(&self, pos: Option<(f32, f32)>) -> Option<String> {
-        let (wx, wy) = pos?;
-
-        // For graph view, check room positions
-        if !self.presenting && self.active_tab == Tab::Graph {
-            let mut best: Option<(f32, &str)> = None;
-            for room in &self.dungeon.graph.rooms {
-                if let Some(screen_pos) = self.graph_state.room_positions.get(&room.id) {
-                    let dx = screen_pos.x - wx;
-                    let dy = screen_pos.y - wy;
-                    let dist = (dx * dx + dy * dy).sqrt();
-                    if best.is_none() || dist < best.unwrap().0 {
-                        best = Some((dist, &room.id));
-                    }
-                }
-            }
-            return best.filter(|(d, _)| *d < 200.0).map(|(_, id)| id.to_string());
-        }
-
-        // For spatial/styled/presentation views, check layout
-        let layout = self.dungeon.layout.as_ref()?;
-        let gx = (wx / crate::util::GRID_PX).floor() as i32;
-        let gy = (wy / crate::util::GRID_PX).floor() as i32;
-
-        // Direct hit
-        for rl in &layout.rooms {
-            if gx >= rl.x && gx < rl.x + rl.width as i32
-                && gy >= rl.y && gy < rl.y + rl.height as i32
-            {
-                return Some(rl.room_id.clone());
-            }
-        }
-
-        // Nearest room within reasonable range
-        let mut best: Option<(f32, &str)> = None;
-        for rl in &layout.rooms {
-            let cx = (rl.x as f32 + rl.width as f32 / 2.0) * crate::util::GRID_PX;
-            let cy = (rl.y as f32 + rl.height as f32 / 2.0) * crate::util::GRID_PX;
-            let dist = ((cx - wx).powi(2) + (cy - wy).powi(2)).sqrt();
-            if best.is_none() || dist < best.unwrap().0 {
-                best = Some((dist, &rl.room_id));
-            }
-        }
-        best.filter(|(d, _)| *d < 200.0).map(|(_, id)| id.to_string())
-    }
-
     fn push_server_update_if_changed(&mut self) {
         let hash = self.presentation_hash();
         if hash == self.last_server_push_hash {
@@ -467,8 +420,11 @@ impl eframe::App for DungeonApp {
             self.annotation_state.viewing = None;
         }
 
+        // Collect panel rects for annotation spotlight
+        self.annotation_state.panel_rects.clear();
+
         // Top menu bar
-        egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
+        let menu_response = egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
                     if ui.button("New").clicked() {
@@ -528,10 +484,6 @@ impl eframe::App for DungeonApp {
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if self.annotation_mode {
-                        annotations::annotation_mode_indicator(ui);
-                        ui.separator();
-                    }
                     if self.presenting {
                         ui.colored_label(egui::Color32::from_rgb(255, 100, 100), "PRESENTING");
                         ui.separator();
@@ -540,6 +492,7 @@ impl eframe::App for DungeonApp {
                 });
             });
         });
+        self.annotation_state.panel_rects.push(menu_response.response.rect);
 
         // Handle "Recompute All" request from sidebar
         if self.spatial_state.recompute_requested {
@@ -579,7 +532,7 @@ impl eframe::App for DungeonApp {
         }
 
         // Status bar
-        egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
+        let status_response = egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
             let zoom = if self.presenting {
                 self.presentation_view_state.view.zoom
             } else {
@@ -604,6 +557,7 @@ impl eframe::App for DungeonApp {
                 }
             });
         });
+        self.annotation_state.panel_rects.push(status_response.response.rect);
 
         // Combat log panel (bottom, only during presentation with active combat)
         if self.presenting {
@@ -632,25 +586,11 @@ impl eframe::App for DungeonApp {
         }
 
         // Right sidebar
-        egui::SidePanel::right("properties")
+        let sidebar_response = egui::SidePanel::right("properties")
             .default_width(250.0)
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    if self.annotation_mode {
-                        let prev_count = self.dungeon.annotations.len();
-                        let prev_resolved = self.dungeon.annotations.iter().filter(|a| a.resolved).count();
-                        annotations::annotation_sidebar(
-                            ui,
-                            &mut self.dungeon.annotations,
-                            &mut self.annotation_state,
-                        );
-                        // Dump annotations file if anything changed
-                        let new_count = self.dungeon.annotations.len();
-                        let new_resolved = self.dungeon.annotations.iter().filter(|a| a.resolved).count();
-                        if new_count != prev_count || new_resolved != prev_resolved {
-                            dump_annotations_file(&self.dungeon.annotations, &self.dungeon);
-                        }
-                    } else if self.presenting {
+                    if self.presenting {
                         if let Some(presentation) = &mut self.presentation {
                             let mut server_action = ServerAction::None;
                             presentation_view::presentation_sidebar(
@@ -719,7 +659,7 @@ impl eframe::App for DungeonApp {
                                     &mut self.dungeon,
                                     &self.monster_db,
                                     &mut self.combat_stats_cache,
-                                    &mut self.encounters_state.sim_state,
+                                    &mut self.encounters_state,
                                 );
                             }
                             Tab::Styled => {
@@ -741,6 +681,7 @@ impl eframe::App for DungeonApp {
                     }
                 });
             });
+        self.annotation_state.panel_rects.push(sidebar_response.response.rect);
 
         // Main canvas
         let central_response = egui::CentralPanel::default().show(ctx, |ui| {
@@ -771,73 +712,85 @@ impl eframe::App for DungeonApp {
             }
         });
 
-        // Annotation overlay (drawn on top of the central panel)
+        // Also record central panel rect
+        self.annotation_state.panel_rects.push(central_response.response.rect);
+
+        // Full-screen annotation overlay (drawn on top of everything)
         if self.annotation_mode {
-            let canvas_rect = central_response.response.rect;
             let current_view = self.current_view_name();
-            let view_state = self.current_view_state();
-            let transform = crate::util::ViewTransform::new(
-                view_state.offset, view_state.zoom, canvas_rect,
-            );
+            let canvas_rect = central_response.response.rect;
+            let screen_rect = ctx.screen_rect();
 
-            // Draw annotation overlay using a foreground Area
-            let mut new_annotation: Option<crate::model::Annotation> = None;
-            egui::Area::new(egui::Id::new("annotation_overlay"))
-                .fixed_pos(canvas_rect.min)
-                .order(egui::Order::Foreground)
-                .interactable(true)
-                .show(ctx, |ui| {
-                    // Allocate the full canvas area for interaction
-                    let (response, painter) = ui.allocate_painter(
-                        canvas_rect.size(),
-                        egui::Sense::click(),
-                    );
+            // Pre-extract data for nearest-room lookup to avoid borrowing self in the closure
+            let view_state = self.current_view_state().clone();
+            let is_graph = !self.presenting && self.active_tab == Tab::Graph;
+            let graph_positions = self.graph_state.room_positions.clone();
+            let rooms: Vec<(String, String)> = self.dungeon.graph.rooms.iter()
+                .map(|r| (r.id.clone(), r.label.clone()))
+                .collect();
+            let layout_rooms: Vec<crate::model::RoomLayout> = self.dungeon.layout.as_ref()
+                .map(|l| l.rooms.clone())
+                .unwrap_or_default();
 
-                    // Draw existing annotation pins
-                    let click_consumed = annotations::draw_annotations(
-                        ui,
-                        &painter,
-                        &transform,
-                        &self.dungeon.annotations,
-                        &mut self.annotation_state,
-                        &current_view,
-                    );
+            let nearest_room_fn = move |fx: f32, fy: f32| -> Option<String> {
+                let screen_pos = egui::pos2(
+                    screen_rect.min.x + fx * screen_rect.width(),
+                    screen_rect.min.y + fy * screen_rect.height(),
+                );
+                if !canvas_rect.contains(screen_pos) {
+                    return None;
+                }
+                let transform = crate::util::ViewTransform::new(
+                    view_state.offset, view_state.zoom, canvas_rect,
+                );
+                let world = transform.screen_to_world(screen_pos);
 
-                    // Draw compose popup if composing
-                    let nearest_room = self.nearest_room_at_world(
-                        self.annotation_state.composing.as_ref().map(|c| (c.world_x, c.world_y)),
-                    );
-                    new_annotation = annotations::draw_compose_popup(
-                        ui,
-                        &painter,
-                        &transform,
-                        &mut self.annotation_state,
-                        &current_view,
-                        nearest_room,
-                    );
-
-                    // Click to place a new annotation (if not consumed by existing pin)
-                    if !click_consumed && response.clicked() {
-                        if self.annotation_state.composing.is_some() {
-                            // Cancel composing if clicking elsewhere
-                            self.annotation_state.composing = None;
-                        } else if let Some(pos) = response.interact_pointer_pos() {
-                            let world = transform.screen_to_world(pos);
-                            self.annotation_state.composing = Some(
-                                annotations::ComposingAnnotation {
-                                    world_x: world.x,
-                                    world_y: world.y,
-                                    text: String::new(),
-                                },
-                            );
-                            self.annotation_state.viewing = None;
+                if is_graph {
+                    let mut best: Option<(f32, &str)> = None;
+                    for (id, _) in &rooms {
+                        if let Some(pos) = graph_positions.get(id) {
+                            let dist = ((pos.x - world.x).powi(2) + (pos.y - world.y).powi(2)).sqrt();
+                            if best.is_none() || dist < best.unwrap().0 {
+                                best = Some((dist, id));
+                            }
                         }
                     }
-                });
+                    return best.filter(|(d, _)| *d < 200.0).map(|(_, id)| id.to_string());
+                }
 
-            // Add the new annotation if created
-            if let Some(ann) = new_annotation {
+                let gx = (world.x / crate::util::GRID_PX).floor() as i32;
+                let gy = (world.y / crate::util::GRID_PX).floor() as i32;
+                for rl in &layout_rooms {
+                    if gx >= rl.x && gx < rl.x + rl.width as i32
+                        && gy >= rl.y && gy < rl.y + rl.height as i32
+                    {
+                        return Some(rl.room_id.clone());
+                    }
+                }
+                let mut best: Option<(f32, &str)> = None;
+                for rl in &layout_rooms {
+                    let cx = (rl.x as f32 + rl.width as f32 / 2.0) * crate::util::GRID_PX;
+                    let cy = (rl.y as f32 + rl.height as f32 / 2.0) * crate::util::GRID_PX;
+                    let dist = ((cx - world.x).powi(2) + (cy - world.y).powi(2)).sqrt();
+                    if best.is_none() || dist < best.unwrap().0 {
+                        best = Some((dist, &rl.room_id));
+                    }
+                }
+                best.filter(|(d, _)| *d < 200.0).map(|(_, id)| id.to_string())
+            };
+
+            let overlay_result = annotations::annotation_overlay(
+                ctx,
+                &mut self.dungeon.annotations,
+                &mut self.annotation_state,
+                &current_view,
+                &nearest_room_fn,
+            );
+
+            if let Some(ann) = overlay_result.new_annotation {
                 self.dungeon.annotations.push(ann);
+                dump_annotations_file(&self.dungeon.annotations, &self.dungeon);
+            } else if overlay_result.annotations_changed {
                 dump_annotations_file(&self.dungeon.annotations, &self.dungeon);
             }
         }
@@ -888,7 +841,7 @@ fn dump_annotations_file(annotations: &[crate::model::Annotation], dungeon: &Dun
             contents.push_str(&format!("- **ID:** {}\n", ann.id));
             contents.push_str(&format!("- **Description:** {}\n", ann.text));
             contents.push_str(&format!("- **View:** {}\n", ann.view));
-            contents.push_str(&format!("- **World position:** ({:.1}, {:.1})\n", ann.world_x, ann.world_y));
+            contents.push_str(&format!("- **Screen position:** ({:.3}, {:.3}) [fraction of window]\n", ann.world_x, ann.world_y));
             if let Some(room_id) = &ann.room_id {
                 let room_label = dungeon.graph.room_by_id(room_id)
                     .map(|r| r.label.as_str())

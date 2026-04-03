@@ -1352,97 +1352,123 @@ fn draw_doors(
 }
 
 pub fn spatial_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut SpatialViewState) {
-    ui.heading("Spatial Layout");
-    ui.separator();
+    let has_selection = state.selected_room.is_some()
+        || state.selected_corridor.is_some()
+        || state.selected_group.is_some();
 
-    ui.label("Density gap:");
-    ui.add(egui::Slider::new(&mut state.density_gap, 0..=6));
-
-    ui.add_space(8.0);
-    if ui.button("Recompute All").on_hover_text("Re-solve all room positions and corridors from scratch").clicked() {
-        state.recompute_requested = true;
+    if !has_selection {
+        ui.heading("Spatial Layout");
+        ui.separator();
     }
 
-    // Floor selector
-    ui.add_space(16.0);
-    ui.heading("Floor");
-    ui.separator();
-    {
-        let floors = collect_floors(&dungeon.graph);
-        let label = match state.current_floor {
-            None => "All Floors".to_string(),
-            Some(f) => format!("Floor {}", f),
-        };
-        egui::ComboBox::from_id_salt("spatial_floor_select")
-            .selected_text(&label)
-            .show_ui(ui, |ui| {
-                if ui.selectable_value(&mut state.current_floor, None, "All Floors").changed() {}
-                for f in &floors {
-                    let mut val = Some(*f);
-                    if ui.selectable_value(&mut val, Some(*f), format!("Floor {}", f)).clicked() {
-                        state.current_floor = Some(*f);
+    // Layout controls (collapsible when something is selected)
+    let mut show_controls = |ui: &mut egui::Ui| {
+        ui.label("Density gap:");
+        ui.add(egui::Slider::new(&mut state.density_gap, 0..=6));
+
+        ui.add_space(8.0);
+        if ui.button("Recompute All").on_hover_text("Re-solve all room positions and corridors from scratch").clicked() {
+            state.recompute_requested = true;
+        }
+
+        // Floor selector
+        ui.add_space(16.0);
+        ui.label("Floor:");
+        {
+            let floors = collect_floors(&dungeon.graph);
+            let label = match state.current_floor {
+                None => "All Floors".to_string(),
+                Some(f) => format!("Floor {}", f),
+            };
+            egui::ComboBox::from_id_salt("spatial_floor_select")
+                .selected_text(&label)
+                .show_ui(ui, |ui| {
+                    if ui.selectable_value(&mut state.current_floor, None, "All Floors").changed() {}
+                    for f in &floors {
+                        let mut val = Some(*f);
+                        if ui.selectable_value(&mut val, Some(*f), format!("Floor {}", f)).clicked() {
+                            state.current_floor = Some(*f);
+                        }
                     }
-                }
-            });
-    }
+                });
+        }
 
-    // Bounds management
-    ui.add_space(16.0);
-    ui.heading("Bounds");
-    ui.separator();
+        // Bounds management
+        ui.add_space(16.0);
+        ui.label("Bounds:");
 
-    if ui.button("Add Bounds Rectangle").clicked() {
+        if ui.button("Add Bounds Rectangle").clicked() {
+            if let Some(layout) = &mut dungeon.layout {
+                let (min_x, min_y, max_x, max_y) = layout.extents();
+                let margin = 2;
+                layout.bounds.push(BoundsRect {
+                    label: format!("Bounds {}", layout.bounds.len() + 1),
+                    x: min_x - margin,
+                    y: min_y - margin,
+                    width: (max_x - min_x + margin * 2) as u32,
+                    height: (max_y - min_y + margin * 2) as u32,
+                });
+            }
+        }
+
         if let Some(layout) = &mut dungeon.layout {
-            let (min_x, min_y, max_x, max_y) = layout.extents();
-            let margin = 2;
-            layout.bounds.push(BoundsRect {
-                label: format!("Bounds {}", layout.bounds.len() + 1),
-                x: min_x - margin,
-                y: min_y - margin,
-                width: (max_x - min_x + margin * 2) as u32,
-                height: (max_y - min_y + margin * 2) as u32,
-            });
+            let mut to_remove = None;
+            for (i, b) in layout.bounds.iter_mut().enumerate() {
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.text_edit_singleline(&mut b.label);
+                    if ui.small_button("X").clicked() {
+                        to_remove = Some(i);
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.add(egui::DragValue::new(&mut b.x).prefix("x: "));
+                    ui.add(egui::DragValue::new(&mut b.y).prefix("y: "));
+                });
+                ui.horizontal(|ui| {
+                    ui.add(egui::DragValue::new(&mut b.width).range(1..=500).prefix("w: "));
+                    ui.add(egui::DragValue::new(&mut b.height).range(1..=500).prefix("h: "));
+                });
+            }
+            if let Some(i) = to_remove {
+                layout.bounds.remove(i);
+            }
         }
-    }
+    };
 
-    if let Some(layout) = &mut dungeon.layout {
-        let mut to_remove = None;
-        for (i, b) in layout.bounds.iter_mut().enumerate() {
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.text_edit_singleline(&mut b.label);
-                if ui.small_button("X").clicked() {
-                    to_remove = Some(i);
-                }
-            });
-            ui.horizontal(|ui| {
-                ui.add(egui::DragValue::new(&mut b.x).prefix("x: "));
-                ui.add(egui::DragValue::new(&mut b.y).prefix("y: "));
-            });
-            ui.horizontal(|ui| {
-                ui.add(egui::DragValue::new(&mut b.width).range(1..=500).prefix("w: "));
-                ui.add(egui::DragValue::new(&mut b.height).range(1..=500).prefix("h: "));
-            });
-        }
-        if let Some(i) = to_remove {
-            layout.bounds.remove(i);
-        }
+    if has_selection {
+        // Show layout controls in a collapsible section when something is selected
+        egui::CollapsingHeader::new("Layout Controls")
+            .default_open(false)
+            .show(ui, show_controls);
+    } else {
+        show_controls(ui);
     }
 
     // Selected room info
     if let Some(ref room_id) = state.selected_room {
-        ui.add_space(16.0);
+        let room_id = room_id.clone();
+
+        // Room label as heading
+        let room_label = dungeon.graph.room_by_id(&room_id)
+            .map(|r| r.label.clone())
+            .unwrap_or_else(|| "?".to_string());
+        ui.heading(&room_label);
         ui.separator();
-        if let Some(layout) = &dungeon.layout {
-            if let Some(rl) = layout.room_by_id(room_id) {
-                ui.label(format!("Position: ({}, {})", rl.x, rl.y));
-                ui.label(format!(
-                    "Size: {}x{} ({}x{} ft)",
-                    rl.width,
-                    rl.height,
-                    rl.width * 5,
-                    rl.height * 5
-                ));
+
+        if let Some(layout) = &mut dungeon.layout {
+            if let Some(rl) = layout.room_by_id_mut(&room_id) {
+                ui.label("Position:");
+                ui.horizontal(|ui| {
+                    ui.add(egui::DragValue::new(&mut rl.x).prefix("x: "));
+                    ui.add(egui::DragValue::new(&mut rl.y).prefix("y: "));
+                });
+                ui.label("Size:");
+                ui.horizontal(|ui| {
+                    ui.add(egui::DragValue::new(&mut rl.width).range(1..=100u32).prefix("w: "));
+                    ui.add(egui::DragValue::new(&mut rl.height).range(1..=100u32).prefix("h: "));
+                });
+                ui.label(format!("{}x{} ft", rl.width * 5, rl.height * 5));
                 if !rl.violations.is_empty() {
                     ui.add_space(4.0);
                     ui.colored_label(egui::Color32::from_rgb(220, 60, 60), "Constraint violations:");
@@ -1450,13 +1476,55 @@ pub fn spatial_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Spa
                         ui.colored_label(egui::Color32::from_rgb(220, 60, 60), format!("  {}", v));
                     }
                 }
-            }
-        }
-        if ui.button("Rotate 90\u{00b0}").clicked() {
-            if let Some(layout) = &mut dungeon.layout {
-                if let Some(rl) = layout.room_by_id_mut(room_id) {
+
+                if ui.button("Rotate 90\u{00b0}").clicked() {
                     std::mem::swap(&mut rl.width, &mut rl.height);
                 }
+            }
+        }
+
+        // Connections from this room
+        let connections: Vec<_> = dungeon.graph.connections.iter()
+            .filter(|e| e.source_room_id == room_id || e.target_room_id == room_id)
+            .map(|e| {
+                let other_id = if e.source_room_id == room_id { &e.target_room_id } else { &e.source_room_id };
+                let other_label = dungeon.graph.room_by_id(other_id)
+                    .map(|r| r.label.as_str()).unwrap_or("?");
+                (e.connection.connection_type.label(), other_label.to_string())
+            })
+            .collect();
+        if !connections.is_empty() {
+            ui.add_space(8.0);
+            ui.label("Connections:");
+            for (conn_type, other) in &connections {
+                ui.label(format!("  {} \u{2192} {}", conn_type, other));
+            }
+        }
+
+        // Encounters in this room
+        let room_encounters: Vec<_> = dungeon.encounters.iter()
+            .filter(|e| e.home_room_id == room_id)
+            .map(|e| e.name.clone())
+            .collect();
+        if !room_encounters.is_empty() {
+            ui.add_space(8.0);
+            ui.label("Encounters:");
+            for name in &room_encounters {
+                ui.label(format!("  {}", name));
+            }
+        }
+
+        // Tags
+        if let Some(room) = dungeon.graph.room_by_id(&room_id) {
+            if !room.tags.is_empty() {
+                ui.add_space(8.0);
+                let tags_str: Vec<_> = room.tags.iter().map(|t| t.label()).collect();
+                ui.label(format!("Tags: {}", tags_str.join(", ")));
+            }
+            if !room.notes.is_empty() {
+                ui.add_space(4.0);
+                ui.label("Notes:");
+                ui.label(&room.notes);
             }
         }
     }

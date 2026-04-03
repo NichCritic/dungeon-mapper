@@ -100,7 +100,12 @@ impl PresentationState {
                 .unwrap_or_else(|| encounter.home_room_id.clone());
 
             // BFS from home room to find all reachable rooms within range
-            let reachable = bfs_within_range(&encounter.home_room_id, range, &dungeon.graph);
+            let reachable = if let Some(r) = range {
+                bfs_within_range(&encounter.home_room_id, r, &dungeon.graph)
+            } else {
+                // Unlimited range: all rooms are reachable
+                dungeon.graph.rooms.iter().map(|r| r.id.clone()).collect()
+            };
             if reachable.is_empty() {
                 continue;
             }

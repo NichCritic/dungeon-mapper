@@ -180,7 +180,7 @@ impl MonsterDatabase {
         }
     }
 
-    /// Total number of monsters in the database.
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.monsters.len()
     }

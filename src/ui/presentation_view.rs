@@ -2,8 +2,9 @@ use crate::data::MonsterDatabase;
 use crate::model::*;
 use crate::model::combat_stats::CombatStatsCache;
 use crate::presentation::{PresentationState, Visibility, LightSource};
-use crate::presentation::combat_sim::{self, SimCombatant};
+use crate::presentation::combat_sim::{self, SimCombatant, run_combat, SimResult, build_combatants_from_encounter, build_combatants_from_party};
 use crate::presentation::combat_tracker::{CombatTracker, CombatantId, MonsterInstanceId, STANDARD_CONDITIONS};
+use crate::ui::encounters_view::SimSide;
 use crate::presentation::dice;
 use crate::presentation::fog;
 use crate::render::presentation::render_dm_overlay;
@@ -17,6 +18,22 @@ struct PresentationRenderCache {
     input_hash: u64,
 }
 
+pub struct SingleCombatState {
+    pub side_a: SimSide,
+    pub side_b: SimSide,
+    pub last_result: Option<SimResult>,
+}
+
+impl Default for SingleCombatState {
+    fn default() -> Self {
+        Self {
+            side_a: SimSide::Party,
+            side_b: SimSide::default(),
+            last_result: None,
+        }
+    }
+}
+
 pub struct PresentationViewState {
     pub view: ViewState,
     render_cache: Option<PresentationRenderCache>,
@@ -24,6 +41,9 @@ pub struct PresentationViewState {
     dirty: bool,
     /// Canvas size from the last frame, used by the sidebar for centering.
     pub canvas_size: egui::Vec2,
+    pub single_combat: SingleCombatState,
+    /// Currently selected room in the presentation view.
+    pub selected_room: Option<String>,
 }
 
 impl Default for PresentationViewState {
@@ -33,6 +53,8 @@ impl Default for PresentationViewState {
             render_cache: None,
             dirty: false,
             canvas_size: egui::Vec2::ZERO,
+            single_combat: SingleCombatState::default(),
+            selected_room: None,
         }
     }
 }
@@ -209,21 +231,35 @@ pub fn presentation_view(
     // DM overlay (fog of war + door state indicators)
     render_dm_overlay(&painter, &transform, layout, dungeon, presentation);
 
-    // Left-click: room → cycle visibility, corridor → toggle door
+    // Left-click: select room
     if response.clicked() {
         if let Some(pos) = response.interact_pointer_pos() {
             let world = transform.screen_to_world(pos);
             let gx = (world.x / GRID_PX).floor() as i32;
             let gy = (world.y / GRID_PX).floor() as i32;
 
-            // Prefer corridor click (toggle door)
-            if let Some(conn_id) = corridor_at_grid(layout, gx, gy) {
-                fog::toggle_door(&conn_id, presentation);
-                view_state.mark_dirty();
-            } else if let Some(room_id) = room_at_grid(layout, gx, gy) {
-                fog::cycle_room_visibility(&room_id, presentation);
-                view_state.mark_dirty();
+            if let Some(room_id) = room_at_grid(layout, gx, gy) {
+                view_state.selected_room = Some(room_id);
+            } else {
+                view_state.selected_room = None;
             }
+        }
+    }
+
+    // Draw selection highlight
+    if let Some(ref sel_id) = view_state.selected_room {
+        if let Some(rl) = layout.room_by_id(sel_id) {
+            let min = transform.world_to_screen(egui::pos2(rl.x as f32 * GRID_PX, rl.y as f32 * GRID_PX));
+            let max = transform.world_to_screen(egui::pos2(
+                (rl.x as f32 + rl.width as f32) * GRID_PX,
+                (rl.y as f32 + rl.height as f32) * GRID_PX,
+            ));
+            let sel_rect = egui::Rect::from_min_max(min, max);
+            painter.rect_stroke(
+                sel_rect, 0.0,
+                egui::Stroke::new(2.0, egui::Color32::from_rgb(100, 200, 255)),
+                egui::StrokeKind::Outside,
+            );
         }
     }
 
@@ -375,72 +411,181 @@ pub fn presentation_sidebar(
 
     ui.add_space(8.0);
 
-    // Room list with visibility + center button
-    ui.heading("Rooms");
-    ui.separator();
-    egui::ScrollArea::vertical().max_height(200.0).id_salt("rooms_scroll").show(ui, |ui| {
-        let rooms: Vec<_> = dungeon.graph.rooms.iter().map(|r| (r.id.clone(), r.label.clone())).collect();
-        for (room_id, label) in rooms {
-            ui.horizontal(|ui| {
-                let vis = presentation.room_visibility(&room_id).clone();
-                let vis_label = match vis {
-                    Visibility::Hidden => "H",
-                    Visibility::Explored => "E",
-                    Visibility::Visible => "V",
-                };
-                let vis_color = match vis {
-                    Visibility::Hidden => egui::Color32::from_rgb(255, 100, 100),
-                    Visibility::Explored => egui::Color32::from_rgb(255, 200, 100),
-                    Visibility::Visible => egui::Color32::from_rgb(100, 255, 100),
-                };
-                ui.colored_label(vis_color, vis_label);
-                if ui.button(&label).clicked() {
-                    fog::cycle_room_visibility(&room_id, presentation);
-                    view_state.mark_dirty();
+    if let Some(sel_room_id) = view_state.selected_room.clone() {
+        // --- Contextual sidebar for selected room ---
+        let room_label = dungeon.graph.room_by_id(&sel_room_id)
+            .map(|r| r.label.clone())
+            .unwrap_or_else(|| "?".to_string());
+        ui.heading(&room_label);
+        ui.separator();
+
+        if ui.small_button("Deselect").clicked() {
+            view_state.selected_room = None;
+        }
+
+        // Visibility control
+        let vis = presentation.room_visibility(&sel_room_id).clone();
+        ui.add_space(4.0);
+        ui.label("Visibility:");
+        ui.horizontal(|ui| {
+            if ui.selectable_label(matches!(vis, Visibility::Hidden), "Hidden").clicked() {
+                fog::hide_room(&sel_room_id, presentation);
+                view_state.mark_dirty();
+            }
+            if ui.selectable_label(matches!(vis, Visibility::Explored), "Explored").clicked() {
+                fog::explore_room(&sel_room_id, presentation);
+                view_state.mark_dirty();
+            }
+            if ui.selectable_label(matches!(vis, Visibility::Visible), "Visible").clicked() {
+                fog::reveal_room(&sel_room_id, presentation);
+                view_state.mark_dirty();
+            }
+        });
+
+        // Room position/size info
+        if let Some(layout) = &dungeon.layout {
+            if let Some(rl) = layout.room_by_id(&sel_room_id) {
+                ui.add_space(4.0);
+                ui.label(format!("Position: ({}, {})", rl.x, rl.y));
+                ui.label(format!("Size: {}x{} ({}x{} ft)", rl.width, rl.height, rl.width * 5, rl.height * 5));
+            }
+        }
+
+        // Doors for this room
+        let room_doors: Vec<_> = dungeon.graph.connections.iter()
+            .filter(|e| e.source_room_id == sel_room_id || e.target_room_id == sel_room_id)
+            .map(|e| {
+                let other = if e.source_room_id == sel_room_id { &e.target_room_id } else { &e.source_room_id };
+                let other_label = dungeon.graph.room_by_id(other)
+                    .map(|r| r.label.as_str()).unwrap_or("?");
+                (e.connection.id.clone(), other_label.to_string())
+            })
+            .collect();
+        if !room_doors.is_empty() {
+            ui.add_space(4.0);
+            ui.label("Doors:");
+            for (conn_id, other_label) in &room_doors {
+                ui.horizontal(|ui| {
+                    let is_open = presentation.is_door_open(conn_id);
+                    let (state_label, state_color) = if is_open {
+                        ("O", egui::Color32::from_rgb(100, 255, 100))
+                    } else {
+                        ("C", egui::Color32::from_rgb(255, 100, 100))
+                    };
+                    ui.colored_label(state_color, state_label);
+                    if ui.button(other_label).clicked() {
+                        fog::toggle_door(conn_id, presentation);
+                        view_state.mark_dirty();
+                    }
+                });
+            }
+        }
+
+        // Encounters in this room
+        let room_encounters: Vec<_> = dungeon.encounters.iter()
+            .filter(|e| e.home_room_id == sel_room_id)
+            .map(|e| e.name.clone())
+            .collect();
+        if !room_encounters.is_empty() {
+            ui.add_space(4.0);
+            ui.label("Encounters:");
+            for name in &room_encounters {
+                ui.label(format!("  {}", name));
+            }
+        }
+
+        // Quick actions
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            if ui.button("Reveal + Adjacent").clicked() {
+                fog::reveal_room_and_adjacent(&sel_room_id, presentation, &dungeon.graph);
+                view_state.mark_dirty();
+            }
+            if ui.button("Move Party Here").clicked() {
+                presentation.party_room = Some(sel_room_id.clone());
+                view_state.mark_dirty();
+            }
+        });
+
+        // Center camera
+        if ui.button("Center Camera").clicked() {
+            if let Some(layout) = &dungeon.layout {
+                if let Some(rl) = layout.room_by_id(&sel_room_id) {
+                    let cx = (rl.x as f32 + rl.width as f32 / 2.0) * GRID_PX;
+                    let cy = (rl.y as f32 + rl.height as f32 / 2.0) * GRID_PX;
+                    view_state.view.center_on(cx, cy, view_state.canvas_size);
                 }
-                // Center camera on this room
-                if ui.small_button("\u{2316}").on_hover_text("Center on room").clicked() {
-                    if let Some(layout) = &dungeon.layout {
-                        if let Some(rl) = layout.room_by_id(&room_id) {
-                            let cx = (rl.x as f32 + rl.width as f32 / 2.0) * GRID_PX;
-                            let cy = (rl.y as f32 + rl.height as f32 / 2.0) * GRID_PX;
-                            view_state.view.center_on(cx, cy, view_state.canvas_size);
+            }
+        }
+    } else {
+        // --- General room/door lists (no selection) ---
+        // Room list with visibility + center button
+        ui.heading("Rooms");
+        ui.separator();
+        egui::ScrollArea::vertical().max_height(200.0).id_salt("rooms_scroll").show(ui, |ui| {
+            let rooms: Vec<_> = dungeon.graph.rooms.iter().map(|r| (r.id.clone(), r.label.clone())).collect();
+            for (room_id, label) in rooms {
+                ui.horizontal(|ui| {
+                    let vis = presentation.room_visibility(&room_id).clone();
+                    let vis_label = match vis {
+                        Visibility::Hidden => "H",
+                        Visibility::Explored => "E",
+                        Visibility::Visible => "V",
+                    };
+                    let vis_color = match vis {
+                        Visibility::Hidden => egui::Color32::from_rgb(255, 100, 100),
+                        Visibility::Explored => egui::Color32::from_rgb(255, 200, 100),
+                        Visibility::Visible => egui::Color32::from_rgb(100, 255, 100),
+                    };
+                    ui.colored_label(vis_color, vis_label);
+                    if ui.button(&label).clicked() {
+                        fog::cycle_room_visibility(&room_id, presentation);
+                        view_state.mark_dirty();
+                    }
+                    // Center camera on this room
+                    if ui.small_button("\u{2316}").on_hover_text("Center on room").clicked() {
+                        if let Some(layout) = &dungeon.layout {
+                            if let Some(rl) = layout.room_by_id(&room_id) {
+                                let cx = (rl.x as f32 + rl.width as f32 / 2.0) * GRID_PX;
+                                let cy = (rl.y as f32 + rl.height as f32 / 2.0) * GRID_PX;
+                                view_state.view.center_on(cx, cy, view_state.canvas_size);
+                            }
                         }
                     }
-                }
-            });
-        }
-    });
+                });
+            }
+        });
 
-    ui.add_space(8.0);
+        ui.add_space(8.0);
 
-    // Door list with open/closed state
-    ui.heading("Doors");
-    ui.separator();
-    egui::ScrollArea::vertical().max_height(200.0).id_salt("doors_scroll").show(ui, |ui| {
-        let edges: Vec<_> = dungeon.graph.connections.iter().map(|e| {
-            let src = dungeon.graph.room_by_id(&e.source_room_id)
-                .map(|r| r.label.as_str()).unwrap_or("?");
-            let tgt = dungeon.graph.room_by_id(&e.target_room_id)
-                .map(|r| r.label.as_str()).unwrap_or("?");
-            (e.connection.id.clone(), format!("{} <-> {}", src, tgt))
-        }).collect();
-        for (conn_id, label) in edges {
-            ui.horizontal(|ui| {
-                let is_open = presentation.is_door_open(&conn_id);
-                let (state_label, state_color) = if is_open {
-                    ("O", egui::Color32::from_rgb(100, 255, 100))
-                } else {
-                    ("C", egui::Color32::from_rgb(255, 100, 100))
-                };
-                ui.colored_label(state_color, state_label);
-                if ui.button(&label).clicked() {
-                    fog::toggle_door(&conn_id, presentation);
-                    view_state.mark_dirty();
-                }
-            });
-        }
-    });
+        // Door list with open/closed state
+        ui.heading("Doors");
+        ui.separator();
+        egui::ScrollArea::vertical().max_height(200.0).id_salt("doors_scroll").show(ui, |ui| {
+            let edges: Vec<_> = dungeon.graph.connections.iter().map(|e| {
+                let src = dungeon.graph.room_by_id(&e.source_room_id)
+                    .map(|r| r.label.as_str()).unwrap_or("?");
+                let tgt = dungeon.graph.room_by_id(&e.target_room_id)
+                    .map(|r| r.label.as_str()).unwrap_or("?");
+                (e.connection.id.clone(), format!("{} <-> {}", src, tgt))
+            }).collect();
+            for (conn_id, label) in edges {
+                ui.horizontal(|ui| {
+                    let is_open = presentation.is_door_open(&conn_id);
+                    let (state_label, state_color) = if is_open {
+                        ("O", egui::Color32::from_rgb(100, 255, 100))
+                    } else {
+                        ("C", egui::Color32::from_rgb(255, 100, 100))
+                    };
+                    ui.colored_label(state_color, state_label);
+                    if ui.button(&label).clicked() {
+                        fog::toggle_door(&conn_id, presentation);
+                        view_state.mark_dirty();
+                    }
+                });
+            }
+        });
+    }
 
     ui.add_space(8.0);
 
@@ -1111,6 +1256,143 @@ pub fn presentation_sidebar(
                     }
                 });
         }
+    }
+
+    // --- Single Combat Simulator ---
+    ui.add_space(12.0);
+    ui.heading("Combat Simulator");
+    ui.separator();
+
+    let sim = &mut view_state.single_combat;
+    let enc_names: Vec<(usize, String)> = dungeon.encounters.iter().enumerate()
+        .map(|(i, e)| (i, e.name.clone()))
+        .collect();
+
+    ui.horizontal(|ui| {
+        ui.label("Side A:");
+        egui::ComboBox::from_id_salt("pres_sim_side_a")
+            .selected_text(match &sim.side_a {
+                SimSide::Party => "Party".to_string(),
+                SimSide::Encounter(idx) => enc_names.iter()
+                    .find(|(i, _)| i == idx)
+                    .map(|(_, n)| n.clone())
+                    .unwrap_or_else(|| "?".to_string()),
+            })
+            .width(140.0)
+            .show_ui(ui, |ui| {
+                if ui.selectable_label(sim.side_a == SimSide::Party, "Party").clicked() {
+                    sim.side_a = SimSide::Party;
+                }
+                for (i, name) in &enc_names {
+                    if ui.selectable_label(sim.side_a == SimSide::Encounter(*i), name).clicked() {
+                        sim.side_a = SimSide::Encounter(*i);
+                    }
+                }
+            });
+    });
+
+    ui.horizontal(|ui| {
+        ui.label("Side B:");
+        egui::ComboBox::from_id_salt("pres_sim_side_b")
+            .selected_text(match &sim.side_b {
+                SimSide::Party => "Party".to_string(),
+                SimSide::Encounter(idx) => enc_names.iter()
+                    .find(|(i, _)| i == idx)
+                    .map(|(_, n)| n.clone())
+                    .unwrap_or_else(|| "?".to_string()),
+            })
+            .width(140.0)
+            .show_ui(ui, |ui| {
+                if ui.selectable_label(sim.side_b == SimSide::Party, "Party").clicked() {
+                    sim.side_b = SimSide::Party;
+                }
+                for (i, name) in &enc_names {
+                    if ui.selectable_label(sim.side_b == SimSide::Encounter(*i), name).clicked() {
+                        sim.side_b = SimSide::Encounter(*i);
+                    }
+                }
+            });
+    });
+
+    ui.add_space(4.0);
+
+    if ui.button("Run Single Combat").clicked() {
+        let side_a_combatants = match &sim.side_a {
+            SimSide::Party => build_combatants_from_party(&dungeon.party, 0),
+            SimSide::Encounter(idx) => {
+                if let Some(enc) = dungeon.encounters.get(*idx) {
+                    build_combatants_from_encounter(enc, monster_db, &dungeon.custom_monsters, combat_stats_cache, 0)
+                } else { Vec::new() }
+            }
+        };
+        let side_b_combatants = match &sim.side_b {
+            SimSide::Party => build_combatants_from_party(&dungeon.party, 1),
+            SimSide::Encounter(idx) => {
+                if let Some(enc) = dungeon.encounters.get(*idx) {
+                    build_combatants_from_encounter(enc, monster_db, &dungeon.custom_monsters, combat_stats_cache, 1)
+                } else { Vec::new() }
+            }
+        };
+        if !side_a_combatants.is_empty() && !side_b_combatants.is_empty() {
+            let result = run_combat(&side_a_combatants, &side_b_combatants);
+
+            // Persist results to combat tracker if active
+            if let Some(tracker) = &mut presentation.combat_tracker {
+                for final_c in &result.combatants {
+                    // Try to match to tracker monster instances by name
+                    for (_, inst) in tracker.instances.iter_mut() {
+                        if inst.label == final_c.name {
+                            inst.current_hp = final_c.current_hp.max(0);
+                            inst.is_dead = inst.current_hp <= 0;
+                            break;
+                        }
+                    }
+                    // Try to match to tracker players by name
+                    for (_, pc) in tracker.players.iter_mut() {
+                        if pc.name == final_c.name {
+                            pc.current_hp = final_c.current_hp.max(0);
+                            break;
+                        }
+                    }
+                }
+            }
+
+            sim.last_result = Some(result);
+        }
+    }
+
+    if let Some(result) = &sim.last_result {
+        ui.add_space(4.0);
+        ui.group(|ui| {
+            let winner_text = match result.winner {
+                Some(0) => "Side A wins",
+                Some(1) => "Side B wins",
+                _ => "Draw (timeout)",
+            };
+            ui.label(format!("{} in {} rounds", winner_text, result.rounds));
+
+            for side in 0..=1 {
+                let side_combatants: Vec<_> = result.combatants.iter()
+                    .filter(|c| c.side == side)
+                    .collect();
+                if side_combatants.is_empty() { continue; }
+                ui.label(if side == 0 { "Side A:" } else { "Side B:" });
+                for c in &side_combatants {
+                    let status = if c.current_hp <= 0 { "DEAD" } else { "alive" };
+                    let hp_display = if c.current_hp <= 0 {
+                        format!("0/{}", c.max_hp)
+                    } else {
+                        format!("{}/{}", c.current_hp, c.max_hp)
+                    };
+                    let color = if c.current_hp <= 0 {
+                        egui::Color32::from_rgb(255, 100, 100)
+                    } else {
+                        egui::Color32::from_rgb(100, 255, 100)
+                    };
+                    ui.colored_label(color, format!("  {} ({}) - {}", c.name, hp_display, status));
+                }
+            }
+        });
     }
 
     ui.add_space(8.0);

@@ -25,6 +25,8 @@ pub struct StyledViewState {
     render_cache: Option<RenderCache>,
     /// Set by sidebar export buttons, consumed by app.rs to dispatch async export.
     pub export_requested: Option<bool>,
+    /// Room selected on the canvas (for contextual sidebar info).
+    pub selected_room: Option<String>,
 }
 
 impl Default for StyledViewState {
@@ -38,6 +40,7 @@ impl Default for StyledViewState {
             current_floor: None,
             render_cache: None,
             export_requested: None,
+            selected_room: None,
         }
     }
 }
@@ -247,6 +250,44 @@ pub fn styled_view(ui: &mut egui::Ui, dungeon: &Dungeon, state: &mut StyledViewS
 
         // Live text overlay (labels, notes, secret door markers)
         draw_text_overlay(&painter, &transform, &dungeon.graph, render_layout, &dungeon.theme, state);
+
+        // Click to select/deselect a room
+        if response.clicked() {
+            if let Some(pos) = response.interact_pointer_pos() {
+                let world = transform.screen_to_world(pos);
+                let gx = (world.x / GRID_PX).floor() as i32;
+                let gy = (world.y / GRID_PX).floor() as i32;
+                let mut hit = None;
+                for rl in &render_layout.rooms {
+                    if gx >= rl.x && gx < rl.x + rl.width as i32
+                        && gy >= rl.y && gy < rl.y + rl.height as i32
+                    {
+                        hit = Some(rl.room_id.clone());
+                        break;
+                    }
+                }
+                state.selected_room = hit;
+            }
+        }
+
+        // Highlight selected room
+        if let Some(ref sel_id) = state.selected_room {
+            if let Some(rl) = render_layout.room_by_id(sel_id) {
+                let min = transform.world_to_screen(egui::pos2(
+                    rl.x as f32 * GRID_PX, rl.y as f32 * GRID_PX,
+                ));
+                let max = transform.world_to_screen(egui::pos2(
+                    (rl.x as f32 + rl.width as f32) * GRID_PX,
+                    (rl.y as f32 + rl.height as f32) * GRID_PX,
+                ));
+                painter.rect_stroke(
+                    egui::Rect::from_min_max(min, max),
+                    0.0,
+                    egui::Stroke::new(2.0, egui::Color32::from_rgb(100, 180, 255)),
+                    egui::StrokeKind::Middle,
+                );
+            }
+        }
     } else {
         painter.text(
             rect.center(),
@@ -354,64 +395,129 @@ fn draw_text_overlay(
 
 
 pub fn styled_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut StyledViewState) {
-    ui.heading("Styled View");
-    ui.separator();
+    // Contextual: selected room info
+    if let Some(ref sel_room_id) = state.selected_room.clone() {
+        let room_label = dungeon.graph.room_by_id(sel_room_id)
+            .map(|r| r.label.clone())
+            .unwrap_or_else(|| "?".to_string());
+        ui.heading(&room_label);
+        ui.separator();
 
-    ui.label("Theme:");
-    ui.label(&dungeon.theme.name);
-
-    ui.add_space(8.0);
-    ui.checkbox(&mut state.show_grid, "Grid lines");
-    ui.checkbox(&mut state.show_labels, "Room labels");
-    ui.checkbox(&mut state.show_notes, "DM notes");
-    ui.checkbox(&mut state.show_secrets, "Show secrets");
-    ui.checkbox(&mut dungeon.theme.exterior_shading, "Exterior shading");
-    if dungeon.theme.exterior_shading {
-        ui.add(egui::Slider::new(&mut dungeon.theme.shading_radius, 0.2..=3.0).text("Radius"));
-        egui::ComboBox::from_id_salt("shading_style")
-            .selected_text(dungeon.theme.shading_style.label())
-            .show_ui(ui, |ui| {
-                for s in ShadingStyle::ALL {
-                    ui.selectable_value(&mut dungeon.theme.shading_style, s, s.label());
-                }
-            });
-        if dungeon.theme.shading_style == ShadingStyle::Hatched
-            || dungeon.theme.shading_style == ShadingStyle::Stippled
-        {
-            ui.add(egui::Slider::new(&mut dungeon.theme.hatching_density, 0.3..=3.0).text("Density"));
+        if ui.small_button("Deselect").clicked() {
+            state.selected_room = None;
         }
+
+        if let Some(room) = dungeon.graph.room_by_id(sel_room_id) {
+            let (w, h) = room.grid_size();
+            ui.label(format!("{}x{} ({}x{} ft)", w, h, w * 5, h * 5));
+            ui.label(format!("Shape: {}", room.shape.label()));
+
+            if !room.tags.is_empty() {
+                let tags_str: Vec<_> = room.tags.iter().map(|t| t.label()).collect();
+                ui.label(format!("Tags: {}", tags_str.join(", ")));
+            }
+
+            if !room.notes.is_empty() {
+                ui.add_space(4.0);
+                ui.label("Notes:");
+                ui.label(&room.notes);
+            }
+        }
+
+        // Connections
+        let connections: Vec<_> = dungeon.graph.connections.iter()
+            .filter(|e| e.source_room_id == *sel_room_id || e.target_room_id == *sel_room_id)
+            .map(|e| {
+                let other_id = if e.source_room_id == *sel_room_id { &e.target_room_id } else { &e.source_room_id };
+                let other_label = dungeon.graph.room_by_id(other_id)
+                    .map(|r| r.label.as_str()).unwrap_or("?");
+                (e.connection.connection_type.label(), other_label.to_string())
+            })
+            .collect();
+        if !connections.is_empty() {
+            ui.add_space(4.0);
+            ui.label("Connections:");
+            for (conn_type, other) in &connections {
+                ui.label(format!("  {} \u{2192} {}", conn_type, other));
+            }
+        }
+
+        // Encounters
+        let room_encounters: Vec<_> = dungeon.encounters.iter()
+            .filter(|e| e.home_room_id == *sel_room_id)
+            .map(|e| e.name.clone())
+            .collect();
+        if !room_encounters.is_empty() {
+            ui.add_space(4.0);
+            ui.label("Encounters:");
+            for name in &room_encounters {
+                ui.label(format!("  {}", name));
+            }
+        }
+
+        ui.add_space(12.0);
     }
 
-    ui.add_space(8.0);
-    ui.label("Corridor corners:");
-    egui::ComboBox::from_id_salt("chamfer_style")
-        .selected_text(dungeon.theme.corridor_chamfer.label())
-        .show_ui(ui, |ui| {
-            for s in ChamferStyle::ALL {
-                ui.selectable_value(&mut dungeon.theme.corridor_chamfer, s, s.label());
+    // Rendering options (always visible)
+    egui::CollapsingHeader::new("Rendering")
+        .default_open(state.selected_room.is_none())
+        .show(ui, |ui| {
+            ui.label("Theme:");
+            ui.label(&dungeon.theme.name);
+
+            ui.add_space(8.0);
+            ui.checkbox(&mut state.show_grid, "Grid lines");
+            ui.checkbox(&mut state.show_labels, "Room labels");
+            ui.checkbox(&mut state.show_notes, "DM notes");
+            ui.checkbox(&mut state.show_secrets, "Show secrets");
+            ui.checkbox(&mut dungeon.theme.exterior_shading, "Exterior shading");
+            if dungeon.theme.exterior_shading {
+                ui.add(egui::Slider::new(&mut dungeon.theme.shading_radius, 0.2..=3.0).text("Radius"));
+                egui::ComboBox::from_id_salt("shading_style")
+                    .selected_text(dungeon.theme.shading_style.label())
+                    .show_ui(ui, |ui| {
+                        for s in ShadingStyle::ALL {
+                            ui.selectable_value(&mut dungeon.theme.shading_style, s, s.label());
+                        }
+                    });
+                if dungeon.theme.shading_style == ShadingStyle::Hatched
+                    || dungeon.theme.shading_style == ShadingStyle::Stippled
+                {
+                    ui.add(egui::Slider::new(&mut dungeon.theme.hatching_density, 0.3..=3.0).text("Density"));
+                }
+            }
+
+            ui.add_space(8.0);
+            ui.label("Corridor corners:");
+            egui::ComboBox::from_id_salt("chamfer_style")
+                .selected_text(dungeon.theme.corridor_chamfer.label())
+                .show_ui(ui, |ui| {
+                    for s in ChamferStyle::ALL {
+                        ui.selectable_value(&mut dungeon.theme.corridor_chamfer, s, s.label());
+                    }
+                });
+
+            // Floor selector
+            ui.add_space(8.0);
+            {
+                let floors = collect_floors(&dungeon.graph);
+                let label = match state.current_floor {
+                    None => "All Floors".to_string(),
+                    Some(f) => format!("Floor {}", f),
+                };
+                egui::ComboBox::from_id_salt("styled_floor_select")
+                    .selected_text(&label)
+                    .show_ui(ui, |ui| {
+                        if ui.selectable_value(&mut state.current_floor, None, "All Floors").changed() {}
+                        for f in &floors {
+                            let mut val = Some(*f);
+                            if ui.selectable_value(&mut val, Some(*f), format!("Floor {}", f)).clicked() {
+                                state.current_floor = Some(*f);
+                            }
+                        }
+                    });
             }
         });
-
-    // Floor selector
-    ui.add_space(8.0);
-    {
-        let floors = collect_floors(&dungeon.graph);
-        let label = match state.current_floor {
-            None => "All Floors".to_string(),
-            Some(f) => format!("Floor {}", f),
-        };
-        egui::ComboBox::from_id_salt("styled_floor_select")
-            .selected_text(&label)
-            .show_ui(ui, |ui| {
-                if ui.selectable_value(&mut state.current_floor, None, "All Floors").changed() {}
-                for f in &floors {
-                    let mut val = Some(*f);
-                    if ui.selectable_value(&mut val, Some(*f), format!("Floor {}", f)).clicked() {
-                        state.current_floor = Some(*f);
-                    }
-                }
-            });
-    }
 
     ui.add_space(16.0);
     ui.heading("Export");

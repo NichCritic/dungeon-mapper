@@ -5,7 +5,8 @@ use super::monster::EncounterMonster;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum EncounterType {
     Static,
-    Wandering(u32),
+    /// Wandering encounter. `None` means unlimited range.
+    Wandering(Option<u32>),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -54,7 +55,8 @@ mod tests {
     #[test]
     fn test_encounter_type_equality() {
         assert_eq!(EncounterType::Static, EncounterType::Static);
-        assert_eq!(EncounterType::Wandering(3), EncounterType::Wandering(3));
-        assert_ne!(EncounterType::Static, EncounterType::Wandering(1));
+        assert_eq!(EncounterType::Wandering(Some(3)), EncounterType::Wandering(Some(3)));
+        assert_ne!(EncounterType::Static, EncounterType::Wandering(Some(1)));
+        assert_eq!(EncounterType::Wandering(None), EncounterType::Wandering(None));
     }
 }
