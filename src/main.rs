@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod data;
 mod io;
 mod model;
 mod presentation;
@@ -22,6 +23,9 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "Dungeon Drafter",
         options,
-        Box::new(|_cc| Ok(Box::new(app::DungeonApp::default()))),
+        Box::new(|cc| {
+            egui_extras::install_image_loaders(&cc.egui_ctx);
+            Ok(Box::new(app::DungeonApp::default()))
+        }),
     )
 }

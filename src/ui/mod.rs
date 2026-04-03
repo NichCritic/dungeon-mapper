@@ -1,4 +1,5 @@
 pub mod canvas_common;
+pub mod encounters_view;
 pub mod graph_editor;
 pub mod spatial_view;
 pub mod styled_view;

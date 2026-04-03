@@ -82,6 +82,11 @@ fn presentation_input_hash(
         light.intensity.to_bits().hash(&mut h);
     }
     presentation.ambient_light.to_bits().hash(&mut h);
+    presentation.encounter_positions.len().hash(&mut h);
+    for (eid, rid) in &presentation.encounter_positions {
+        eid.hash(&mut h);
+        rid.hash(&mut h);
+    }
     h.finish()
 }
 
@@ -196,7 +201,7 @@ pub fn presentation_view(
     }
 
     // DM overlay (fog of war + door state indicators)
-    render_dm_overlay(&painter, &transform, layout, &dungeon.graph, presentation);
+    render_dm_overlay(&painter, &transform, layout, dungeon, presentation);
 
     // Left-click: room → cycle visibility, corridor → toggle door
     if response.clicked() {
@@ -422,6 +427,48 @@ pub fn presentation_sidebar(
             });
         }
     });
+
+    ui.add_space(8.0);
+
+    // Encounters
+    if !dungeon.encounters.is_empty() {
+        ui.heading("Encounters");
+        ui.separator();
+
+        ui.horizontal(|ui| {
+            if ui.button("Tick").on_hover_text("Move wandering encounters").clicked() {
+                presentation.tick_encounters(dungeon);
+                view_state.mark_dirty();
+            }
+            if ui.button("Reset All").on_hover_text("Return all encounters to home rooms").clicked() {
+                presentation.reset_encounter_positions(dungeon);
+                view_state.mark_dirty();
+            }
+        });
+
+        egui::ScrollArea::vertical().max_height(150.0).id_salt("enc_pres_scroll").show(ui, |ui| {
+            for enc in &dungeon.encounters {
+                let current_room_id = presentation.encounter_room(enc);
+                let current_label = dungeon.graph.room_by_id(current_room_id)
+                    .map(|r| r.label.as_str())
+                    .unwrap_or("?");
+                let home_label = dungeon.graph.room_by_id(&enc.home_room_id)
+                    .map(|r| r.label.as_str())
+                    .unwrap_or("?");
+                let type_marker = match enc.encounter_type {
+                    EncounterType::Static => "S",
+                    EncounterType::Wandering(_) => "W",
+                };
+                let at_home = current_room_id == enc.home_room_id;
+                let location = if at_home {
+                    current_label.to_string()
+                } else {
+                    format!("{} (home: {})", current_label, home_label)
+                };
+                ui.label(format!("[{}] {} - {}", type_marker, enc.name, location));
+            }
+        });
+    }
 
     ui.add_space(8.0);
 

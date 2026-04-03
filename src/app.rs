@@ -1,6 +1,8 @@
+use crate::data::MonsterDatabase;
 use crate::model::Dungeon;
 use crate::presentation::PresentationState;
 use crate::server::PresentationServer;
+use crate::ui::encounters_view::{self, EncountersViewState};
 use crate::ui::graph_editor::{self, GraphEditorState};
 use crate::ui::spatial_view::{self, SpatialViewState};
 use crate::ui::styled_view::{self, StyledViewState};
@@ -11,6 +13,7 @@ use crate::ui::player_view::{self, PlayerViewState};
 pub enum Tab {
     Graph,
     Spatial,
+    Encounters,
     Styled,
 }
 
@@ -19,9 +22,12 @@ pub struct DungeonApp {
     pub active_tab: Tab,
     pub graph_state: GraphEditorState,
     pub spatial_state: SpatialViewState,
+    pub encounters_state: EncountersViewState,
     pub styled_state: StyledViewState,
     /// Snapshot of graph state to detect when a re-solve is needed
     last_graph_snapshot: u64,
+    /// Monster stats database loaded from 5e-Tools data files.
+    pub monster_db: MonsterDatabase,
 
     // Presentation mode
     pub presenting: bool,
@@ -40,13 +46,26 @@ pub struct DungeonApp {
 
 impl Default for DungeonApp {
     fn default() -> Self {
+        // Try to find the bestiary data directory
+        let bestiary_dir = find_bestiary_dir();
+        let monster_db = match bestiary_dir {
+            Some(dir) => MonsterDatabase::load_from_directory(&dir),
+            None => {
+                eprintln!("No bestiary data directory found. Monster database will be empty.");
+                eprintln!("Place 5e-Tools bestiary JSON files in data/bestiary/ or 5etools-src/data/bestiary/");
+                MonsterDatabase::empty()
+            }
+        };
+
         Self {
             dungeon: Dungeon::default(),
             active_tab: Tab::Graph,
             graph_state: GraphEditorState::default(),
             spatial_state: SpatialViewState::default(),
+            encounters_state: EncountersViewState::default(),
             styled_state: StyledViewState::default(),
             last_graph_snapshot: 0,
+            monster_db,
 
             presenting: false,
             presentation: None,
@@ -307,6 +326,11 @@ impl DungeonApp {
             light.room_id.hash(&mut h);
         }
         presentation.ambient_light.to_bits().hash(&mut h);
+        presentation.encounter_positions.len().hash(&mut h);
+        for (eid, rid) in &presentation.encounter_positions {
+            eid.hash(&mut h);
+            rid.hash(&mut h);
+        }
         h.finish()
     }
 
@@ -391,6 +415,7 @@ impl eframe::App for DungeonApp {
                     // Normal tab buttons
                     ui.selectable_value(&mut self.active_tab, Tab::Graph, "Graph");
                     ui.selectable_value(&mut self.active_tab, Tab::Spatial, "Spatial");
+                    ui.selectable_value(&mut self.active_tab, Tab::Encounters, "Encounters");
                     ui.selectable_value(&mut self.active_tab, Tab::Styled, "Styled");
 
                     ui.separator();
@@ -443,7 +468,7 @@ impl eframe::App for DungeonApp {
         // Auto-solve layout when graph topology changes or first entering spatial/styled
         if !self.presenting {
             let current_hash = self.graph_hash();
-            let needs_layout = matches!(self.active_tab, Tab::Spatial | Tab::Styled);
+            let needs_layout = matches!(self.active_tab, Tab::Spatial | Tab::Encounters | Tab::Styled);
             if needs_layout
                 && (current_hash != self.last_graph_snapshot
                     || self.dungeon.layout.is_none()
@@ -462,6 +487,7 @@ impl eframe::App for DungeonApp {
                 match self.active_tab {
                     Tab::Graph => self.graph_state.view.zoom,
                     Tab::Spatial => self.spatial_state.view.zoom,
+                    Tab::Encounters => self.encounters_state.view.zoom,
                     Tab::Styled => self.styled_state.view.zoom,
                 }
             };
@@ -546,6 +572,13 @@ impl eframe::App for DungeonApp {
                                     &mut self.spatial_state,
                                 );
                             }
+                            Tab::Encounters => {
+                                encounters_view::encounters_sidebar(
+                                    ui,
+                                    &mut self.dungeon,
+                                    &self.monster_db,
+                                );
+                            }
                             Tab::Styled => {
                                 styled_view::styled_sidebar(
                                     ui,
@@ -585,6 +618,9 @@ impl eframe::App for DungeonApp {
                     Tab::Spatial => {
                         spatial_view::spatial_view(ui, &mut self.dungeon, &mut self.spatial_state);
                     }
+                    Tab::Encounters => {
+                        encounters_view::encounters_view(ui, &self.dungeon, &mut self.encounters_state);
+                    }
                     Tab::Styled => {
                         styled_view::styled_view(ui, &self.dungeon, &mut self.styled_state);
                     }
@@ -617,4 +653,19 @@ impl eframe::App for DungeonApp {
             }
         }
     }
+}
+
+/// Search for the bestiary data directory in several candidate locations.
+fn find_bestiary_dir() -> Option<std::path::PathBuf> {
+    let candidates = [
+        // Relative to CWD
+        std::path::PathBuf::from("data/bestiary"),
+        std::path::PathBuf::from("5etools-src/data/bestiary"),
+        // Relative to executable
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|p| p.join("data/bestiary")))
+            .unwrap_or_default(),
+    ];
+    candidates.into_iter().find(|p| p.is_dir())
 }

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::{DungeonGraph, SpatialLayout, Theme};
+use super::{CustomMonster, DungeonGraph, Encounter, SpatialLayout, Theme};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Dungeon {
@@ -8,6 +8,11 @@ pub struct Dungeon {
     pub graph: DungeonGraph,
     pub layout: Option<SpatialLayout>,
     pub theme: Theme,
+    #[serde(default)]
+    pub encounters: Vec<Encounter>,
+    /// User-created or cloned custom monsters, saved with the dungeon.
+    #[serde(default)]
+    pub custom_monsters: Vec<CustomMonster>,
 }
 
 impl Dungeon {
@@ -17,6 +22,8 @@ impl Dungeon {
             graph: DungeonGraph::new(),
             layout: None,
             theme: Theme::default(),
+            encounters: Vec::new(),
+            custom_monsters: Vec::new(),
         }
     }
 }

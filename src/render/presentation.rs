@@ -8,6 +8,16 @@ use crate::render::themed::*;
 use crate::render::traits::MapRenderer;
 use crate::util::GRID_PX;
 
+/// Truncate a name to at most `max_len` chars, appending "…" if truncated.
+fn truncate_name(name: &str, max_len: usize) -> String {
+    if name.chars().count() <= max_len {
+        name.to_string()
+    } else {
+        let truncated: String = name.chars().take(max_len).collect();
+        format!("{}…", truncated)
+    }
+}
+
 /// Blend a color toward bg_color at a given ratio (0.0 = original, 1.0 = fully bg).
 fn blend_toward(color: [u8; 4], bg: [u8; 4], ratio: f32) -> [u8; 4] {
     [
@@ -366,9 +376,10 @@ pub fn render_dm_overlay(
     painter: &egui::Painter,
     transform: &crate::util::ViewTransform,
     layout: &SpatialLayout,
-    graph: &DungeonGraph,
+    dungeon: &crate::model::Dungeon,
     presentation: &PresentationState,
 ) {
+    let graph = &dungeon.graph;
     // Room overlays (derived visibility)
     for rl in &layout.rooms {
         let vis = presentation.room_visibility(&rl.room_id);
@@ -449,6 +460,55 @@ pub fn render_dm_overlay(
                     egui::Color32::from_rgba_unmultiplied(0, 0, 0, alpha),
                 );
             }
+        }
+    }
+
+    // Encounter markers (shown at their current runtime positions)
+    for rl in &layout.rooms {
+        // Find encounters currently in this room
+        let enc_ids = presentation.encounter_ids_in_room(&rl.room_id);
+        let encounters: Vec<_> = dungeon.encounters.iter()
+            .filter(|e| enc_ids.contains(&e.id))
+            .collect();
+        if encounters.is_empty() { continue; }
+
+        let cx = (rl.x as f32 + rl.width as f32 / 2.0) * GRID_PX;
+        let cy = (rl.y as f32 + rl.height as f32 / 2.0) * GRID_PX;
+        let screen = transform.world_to_screen(egui::pos2(cx, cy));
+
+        for (j, enc) in encounters.iter().enumerate() {
+            let offset_y = (j as f32 - (encounters.len() as f32 - 1.0) / 2.0) * 12.0 * transform.zoom;
+            let pos = screen + egui::vec2(0.0, 16.0 * transform.zoom + offset_y);
+
+            let (marker, color) = match enc.encounter_type {
+                crate::model::EncounterType::Static => {
+                    ("S", egui::Color32::from_rgb(255, 80, 80))
+                }
+                crate::model::EncounterType::Wandering(_) => {
+                    ("W", egui::Color32::from_rgb(255, 160, 40))
+                }
+            };
+
+            let text_size = 8.0 * transform.zoom;
+            let display = format!("{} {}", marker, truncate_name(&enc.name, 6));
+
+            // Background pill sized to text
+            let galley = painter.layout_no_wrap(
+                display.clone(),
+                egui::FontId::monospace(text_size),
+                color,
+            );
+            let pill_size = galley.size() + egui::vec2(6.0, 2.0);
+            let pill_rect = egui::Rect::from_center_size(pos, pill_size);
+            painter.rect_filled(pill_rect, 3.0, egui::Color32::from_rgba_unmultiplied(0, 0, 0, 180));
+
+            painter.text(
+                pos,
+                egui::Align2::CENTER_CENTER,
+                &display,
+                egui::FontId::monospace(text_size),
+                color,
+            );
         }
     }
 
