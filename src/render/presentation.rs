@@ -29,27 +29,50 @@ fn build_visible_floor_set(
     for rl in &layout.rooms {
         let vis = presentation.room_visibility(&rl.room_id);
         if *vis == Visibility::Hidden { continue; }
-        let is_circle = graph.room_by_id(&rl.room_id)
-            .is_some_and(|r| r.shape == RoomShape::Circle);
-        if is_circle {
-            let cx = rl.x as f32 + rl.width as f32 / 2.0;
-            let cy = rl.y as f32 + rl.height as f32 / 2.0;
-            let r = (rl.width.min(rl.height) as f32) / 2.0;
-            for y in rl.y..(rl.y + rl.height as i32) {
-                for x in rl.x..(rl.x + rl.width as i32) {
-                    let cell_cx = x as f32 + 0.5;
-                    let cell_cy = y as f32 + 0.5;
-                    let dx = cell_cx - cx;
-                    let dy = cell_cy - cy;
-                    if dx * dx + dy * dy <= r * r {
-                        floor.insert((x, y));
+        let room = graph.room_by_id(&rl.room_id);
+        let shape = room.map(|r| r.shape).unwrap_or_default();
+        match shape {
+            RoomShape::Circle => {
+                let cx = rl.x as f32 + rl.width as f32 / 2.0;
+                let cy = rl.y as f32 + rl.height as f32 / 2.0;
+                let r = (rl.width.min(rl.height) as f32) / 2.0;
+                for y in rl.y..(rl.y + rl.height as i32) {
+                    for x in rl.x..(rl.x + rl.width as i32) {
+                        let cell_cx = x as f32 + 0.5;
+                        let cell_cy = y as f32 + 0.5;
+                        let dx = cell_cx - cx;
+                        let dy = cell_cy - cy;
+                        if dx * dx + dy * dy <= r * r {
+                            floor.insert((x, y));
+                        }
                     }
                 }
             }
-        } else {
-            for y in rl.y..(rl.y + rl.height as i32) {
-                for x in rl.x..(rl.x + rl.width as i32) {
-                    floor.insert((x, y));
+            RoomShape::Cave => {
+                if let Some(cave) = room.and_then(|r| r.cave_data.as_ref()) {
+                    if !cave.cells.is_empty() {
+                        let w = rl.width as usize;
+                        for ly in 0..rl.height as usize {
+                            for lx in 0..w {
+                                if cave.cells.get(ly * w + lx).copied().unwrap_or(false) {
+                                    floor.insert((rl.x + lx as i32, rl.y + ly as i32));
+                                }
+                            }
+                        }
+                    } else {
+                        for y in rl.y..(rl.y + rl.height as i32) {
+                            for x in rl.x..(rl.x + rl.width as i32) {
+                                floor.insert((x, y));
+                            }
+                        }
+                    }
+                }
+            }
+            RoomShape::Rectangle => {
+                for y in rl.y..(rl.y + rl.height as i32) {
+                    for x in rl.x..(rl.x + rl.width as i32) {
+                        floor.insert((x, y));
+                    }
                 }
             }
         }
@@ -102,7 +125,11 @@ pub fn render_player_view(
             density: theme.hatching_density,
             color: theme.wall_color,
         };
-        draw_exterior_shading(renderer, layout, &visible_floor, &params);
+        let contour: Vec<(f32, f32, f32, f32)> = graph.rooms.iter()
+            .filter_map(|r| r.cave_data.as_ref())
+            .flat_map(|c| c.contour_segments.iter().copied())
+            .collect();
+        draw_exterior_shading(renderer, layout, &visible_floor, &params, &contour);
     }
 
     // Room floors
@@ -158,11 +185,21 @@ pub fn render_player_view(
     for rl in &layout.rooms {
         let vis = presentation.room_visibility(&rl.room_id);
         if *vis == Visibility::Hidden { continue; }
+        let wall_color = if *vis == Visibility::Explored { dimmed_wall } else { theme.wall_color };
+        // Cave rooms use baked contour segments
+        let room = graph.room_by_id(&rl.room_id);
+        if let Some(cave) = room.and_then(|r| {
+            if r.shape == RoomShape::Cave { r.cave_data.as_ref() } else { None }
+        }) {
+            if !cave.contour_segments.is_empty() {
+                for &(x1, y1, x2, y2) in &cave.contour_segments {
+                    renderer.draw_line(x1, y1, x2, y2, 2.0, wall_color);
+                }
+                continue;
+            }
+        }
         if *vis == Visibility::Explored {
-            let dimmed_theme = Theme {
-                wall_color: dimmed_wall,
-                ..theme.clone()
-            };
+            let dimmed_theme = Theme { wall_color: dimmed_wall, ..theme.clone() };
             render_room_walls(renderer, rl, graph, &dimmed_theme);
         } else {
             render_room_walls(renderer, rl, graph, theme);
@@ -171,6 +208,7 @@ pub fn render_player_view(
     repair_circle_junctions(renderer, graph, layout, theme);
 
     // Corridor walls
+    let cave_cells = build_cave_cell_set(layout, graph);
     for corridor in &layout.corridors {
         let vis = corridor_visibility(&corridor.connection_id, presentation, graph);
         if vis == Visibility::Hidden { continue; }
@@ -179,9 +217,9 @@ pub fn render_player_view(
                 wall_color: dimmed_wall,
                 ..theme.clone()
             };
-            render_corridor_walls(renderer, corridor, &visible_floor, &dimmed_theme);
+            render_corridor_walls(renderer, corridor, &visible_floor, &dimmed_theme, &cave_cells);
         } else {
-            render_corridor_walls(renderer, corridor, &visible_floor, theme);
+            render_corridor_walls(renderer, corridor, &visible_floor, theme, &cave_cells);
         }
     }
 
@@ -224,7 +262,6 @@ fn render_doors_filtered(
         if edge.connection.connection_type == ConnectionType::Open {
             continue;
         }
-
         // Show door if either endpoint room is visible or explored
         let src_vis = presentation.room_visibility(&edge.source_room_id);
         let tgt_vis = presentation.room_visibility(&edge.target_room_id);
@@ -244,6 +281,10 @@ fn render_doors_filtered(
         let corr_vis = corridor_visibility(&edge.connection.id, presentation, graph);
 
         for (room_id, wp) in room_ids.iter().zip(wp_ends.iter()) {
+            // Skip drawing door on cave room walls
+            let is_cave = graph.room_by_id(room_id)
+                .is_some_and(|r| r.shape == RoomShape::Cave);
+            if is_cave { continue; }
             // Draw door on this room's wall if:
             // - the room itself is shown, OR
             // - the corridor is visible (door open + other room shown),

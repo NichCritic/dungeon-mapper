@@ -17,6 +17,8 @@ enum DragTarget {
     GroupCorner(usize, u8),
     /// Dragging a whole group (group index)
     Group(usize),
+    /// Painting cave cells: (room_id, painting_floor)
+    CaveCell(String, bool),
 }
 
 pub struct SpatialViewState {
@@ -30,6 +32,10 @@ pub struct SpatialViewState {
     pub density_gap: u32,
     /// Set by sidebar "Recompute All" button, consumed by app.
     pub recompute_requested: bool,
+    /// Set when cave cells are edited, consumed by app to recompute contours.
+    pub cave_contours_dirty: bool,
+    /// Currently viewed floor (None = show all floors)
+    pub current_floor: Option<i32>,
 }
 
 impl Default for SpatialViewState {
@@ -44,6 +50,8 @@ impl Default for SpatialViewState {
             drag_accum: egui::Vec2::ZERO,
             density_gap: 0,
             recompute_requested: false,
+            cave_contours_dirty: false,
+            current_floor: None,
         }
     }
 }
@@ -92,6 +100,36 @@ fn resolve_diagonal_segments_clean(waypoints: &mut Vec<GridPos>) {
     resolve_diagonal_segments(waypoints);
 }
 
+/// Collect all distinct floor numbers used by rooms in the graph, sorted.
+pub(crate) fn collect_floors(graph: &DungeonGraph) -> Vec<i32> {
+    let mut floors: Vec<i32> = graph.rooms.iter()
+        .flat_map(|r| r.floor.floors())
+        .collect::<std::collections::BTreeSet<i32>>()
+        .into_iter()
+        .collect();
+    if floors.is_empty() {
+        floors.push(0);
+    }
+    floors
+}
+
+/// Darken a color by multiplying RGB and reducing alpha.
+fn dim_color(c: egui::Color32, factor: f32) -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(
+        (c.r() as f32 * factor) as u8,
+        (c.g() as f32 * factor) as u8,
+        (c.b() as f32 * factor) as u8,
+        (c.a() as f32 * factor.sqrt()) as u8,
+    )
+}
+
+/// Check if a room is on a lower floor than the current floor.
+fn is_lower_floor(room: &crate::model::Room, current_floor: i32) -> bool {
+    room.floor.floors().iter().all(|f| *f < current_floor)
+}
+
+const LOWER_FLOOR_DIM: f32 = 0.35;
+
 const HANDLE_RADIUS: f32 = 5.0;
 /// Hit radius in screen pixels (fixed, does not scale with zoom).
 const HANDLE_HIT_RADIUS: f32 = 12.0;
@@ -112,9 +150,9 @@ pub fn spatial_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Spatia
         draw_infinite_grid(&painter, &transform, rect);
         draw_groups_spatial(&painter, &transform, layout, &dungeon.graph, state);
         draw_bounds(&painter, &transform, layout);
-        draw_corridors(&painter, &transform, layout, state);
+        draw_corridors(&painter, &transform, layout, &dungeon.graph, state);
         draw_rooms(&painter, &transform, layout, &dungeon.graph, state);
-        draw_doors(&painter, &transform, layout, &dungeon.graph);
+        draw_doors(&painter, &transform, layout, &dungeon.graph, state);
         draw_waypoint_handles(&painter, &transform, layout, state);
     } else if !dungeon.graph.rooms.is_empty() {
         painter.text(
@@ -204,11 +242,49 @@ fn handle_spatial_interactions(
             let gy = world_to_grid(world.y);
             if let Some(layout) = &dungeon.layout {
                 for rl in &layout.rooms {
+                    // Floor filtering: skip rooms not on the current floor
+                    if let Some(floor) = state.current_floor {
+                        if let Some(room) = dungeon.graph.room_by_id(&rl.room_id) {
+                            if !room.floor.visible_on(floor) {
+                                continue;
+                            }
+                        }
+                    }
+
                     if gx >= rl.x
                         && gx < rl.x + rl.width as i32
                         && gy >= rl.y
                         && gy < rl.y + rl.height as i32
                     {
+                        // If this is a cave room that's already selected, start cell painting
+                        if state.selected_room.as_deref() == Some(&rl.room_id) {
+                            if let Some(room) = dungeon.graph.room_by_id(&rl.room_id) {
+                                if room.shape == RoomShape::Cave {
+                                    if let Some(cave) = &room.cave_data {
+                                        if !cave.cells.is_empty() {
+                                            let lx = (gx - rl.x) as usize;
+                                            let ly = (gy - rl.y) as usize;
+                                            let w = rl.width as usize;
+                                            let idx = ly * w + lx;
+                                            let painting_floor = !cave.cells.get(idx).copied().unwrap_or(false);
+                                            state.drag_target = DragTarget::CaveCell(rl.room_id.clone(), painting_floor);
+                                            state.drag_accum = egui::Vec2::ZERO;
+                                            // Toggle the clicked cell immediately
+                                            if let Some(room) = dungeon.graph.room_by_id_mut(&rl.room_id) {
+                                                if let Some(cave) = &mut room.cave_data {
+                                                    if let Some(cell) = cave.cells.get_mut(idx) {
+                                                        *cell = painting_floor;
+                                                        cave.generation += 1;
+                                                    }
+                                                }
+                                            }
+                                            state.cave_contours_dirty = true;
+                                            return;
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         state.selected_room = Some(rl.room_id.clone());
                         state.selected_corridor = None;
                         state.selected_waypoint = None;
@@ -398,6 +474,39 @@ fn handle_spatial_interactions(
                                 layout.corridors[ci].waypoints.clone();
                             state.selected_waypoint = None;
                             layout.recheck_corridor_overlaps();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // === CAVE CELL PAINTING (continuous, not grid-stepped) ===
+    if let DragTarget::CaveCell(ref room_id, painting_floor) = state.drag_target {
+        if response.dragged_by(egui::PointerButton::Primary) {
+            if let Some(pos) = response.hover_pos() {
+                let world = transform.screen_to_world(pos);
+                let gx = world_to_grid(world.x);
+                let gy = world_to_grid(world.y);
+                let room_id = room_id.clone();
+                if let Some(layout) = &dungeon.layout {
+                    if let Some(rl) = layout.room_by_id(&room_id) {
+                        let lx = gx - rl.x;
+                        let ly = gy - rl.y;
+                        if lx >= 0 && ly >= 0 && lx < rl.width as i32 && ly < rl.height as i32 {
+                            let w = rl.width as usize;
+                            let idx = ly as usize * w + lx as usize;
+                            if let Some(room) = dungeon.graph.room_by_id_mut(&room_id) {
+                                if let Some(cave) = &mut room.cave_data {
+                                    if let Some(cell) = cave.cells.get_mut(idx) {
+                                        if *cell != painting_floor {
+                                            *cell = painting_floor;
+                                            cave.generation += 1;
+                                            state.cave_contours_dirty = true;
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -595,6 +704,7 @@ fn handle_spatial_interactions(
                         }
                     }
                 }
+                DragTarget::CaveCell(_, _) => {} // handled above, not grid-stepped
                 DragTarget::None => {}
             }
             state.drag_accum.x -= grid_steps_x as f32 * GRID_PX;
@@ -634,6 +744,7 @@ fn handle_spatial_interactions(
                     layout.recheck_corridor_overlaps();
                 }
             }
+            DragTarget::CaveCell(_, _) => {} // painting done during drag
             DragTarget::None => {}
         }
         state.drag_target = DragTarget::None;
@@ -793,17 +904,48 @@ fn draw_corridors(
     painter: &egui::Painter,
     transform: &ViewTransform,
     layout: &SpatialLayout,
+    graph: &DungeonGraph,
     state: &SpatialViewState,
 ) {
     for (ci, corridor) in layout.corridors.iter().enumerate() {
+        // Floor filtering: dim corridors to lower floors, hide higher
+        let dim = if let Some(floor) = state.current_floor {
+            if let Some(edge) = graph.connections.iter().find(|e| e.connection.id == corridor.connection_id) {
+                let src_visible = graph.room_by_id(&edge.source_room_id)
+                    .is_some_and(|r| r.floor.visible_on(floor));
+                let tgt_visible = graph.room_by_id(&edge.target_room_id)
+                    .is_some_and(|r| r.floor.visible_on(floor));
+                if src_visible || tgt_visible {
+                    1.0
+                } else {
+                    // Both rooms not on current floor — check if lower
+                    let src_lower = graph.room_by_id(&edge.source_room_id)
+                        .is_some_and(|r| is_lower_floor(r, floor));
+                    let tgt_lower = graph.room_by_id(&edge.target_room_id)
+                        .is_some_and(|r| is_lower_floor(r, floor));
+                    if src_lower || tgt_lower {
+                        LOWER_FLOOR_DIM
+                    } else {
+                        continue; // higher floor - hide
+                    }
+                }
+            } else {
+                1.0
+            }
+        } else {
+            1.0
+        };
         let is_selected = state.selected_corridor == Some(ci);
-        let color = if corridor.invalid {
+        let mut color = if corridor.invalid {
             egui::Color32::from_rgb(220, 50, 50)
         } else if is_selected {
             egui::Color32::from_rgb(130, 200, 255)
         } else {
             egui::Color32::from_rgb(180, 180, 180)
         };
+        if dim < 1.0 {
+            color = dim_color(color, dim);
+        }
 
         let w = corridor.width as i32;
         let half = w / 2; // integer: same offset used by solver
@@ -903,6 +1045,23 @@ fn draw_rooms(
     state: &SpatialViewState,
 ) {
     for rl in &layout.rooms {
+        // Floor filtering: dim lower floors, hide higher floors
+        let dim = if let Some(floor) = state.current_floor {
+            if let Some(room) = graph.room_by_id(&rl.room_id) {
+                if room.floor.visible_on(floor) {
+                    1.0
+                } else if is_lower_floor(room, floor) {
+                    LOWER_FLOOR_DIM
+                } else {
+                    continue; // higher floor - hide
+                }
+            } else {
+                1.0
+            }
+        } else {
+            1.0
+        };
+
         let min = transform.world_to_screen(egui::pos2(grid_to_world(rl.x), grid_to_world(rl.y)));
         let max = transform.world_to_screen(egui::pos2(
             grid_to_world(rl.x + rl.width as i32),
@@ -912,14 +1071,15 @@ fn draw_rooms(
 
         let is_selected = state.selected_room.as_deref() == Some(&rl.room_id);
         let room = graph.room_by_id(&rl.room_id);
-        let is_circle = room.is_some_and(|r| r.shape == RoomShape::Circle);
+        let shape = room.map(|r| r.shape).unwrap_or_default();
         let has_violations = !rl.violations.is_empty();
 
-        let fill = if has_violations {
+        let mut fill = if has_violations {
             egui::Color32::from_rgb(240, 200, 200)
         } else {
             egui::Color32::from_rgb(220, 220, 220)
         };
+        let mut wall_fill = egui::Color32::from_rgb(140, 130, 120);
         let border_color = if is_selected {
             COLOR_SELECTION
         } else if has_violations {
@@ -927,25 +1087,92 @@ fn draw_rooms(
         } else {
             egui::Color32::from_rgb(60, 60, 60)
         };
-        let stroke = egui::Stroke::new(2.0, border_color);
+        let mut stroke_color = border_color;
+        if dim < 1.0 {
+            fill = dim_color(fill, dim);
+            wall_fill = dim_color(wall_fill, dim);
+            stroke_color = dim_color(border_color, dim);
+        }
+        let stroke = egui::Stroke::new(2.0, stroke_color);
 
-        if is_circle {
-            let center = rect.center();
-            let radius = rect.width().min(rect.height()) / 2.0;
-            painter.circle_filled(center, radius, fill);
-            painter.circle_stroke(center, radius, stroke);
-        } else {
-            painter.rect_filled(rect, 0.0, fill);
-            painter.rect_stroke(rect, 0.0, stroke, egui::StrokeKind::Middle);
+        match shape {
+            RoomShape::Circle => {
+                let center = rect.center();
+                let radius = rect.width().min(rect.height()) / 2.0;
+                painter.circle_filled(center, radius, fill);
+                painter.circle_stroke(center, radius, stroke);
+            }
+            RoomShape::Cave => {
+                // Draw cave cells individually
+                if let Some(cave) = room.and_then(|r| r.cave_data.as_ref()) {
+                    if !cave.cells.is_empty() {
+                        let w = rl.width as usize;
+                        for ly in 0..rl.height as usize {
+                            for lx in 0..w {
+                                let gx = rl.x + lx as i32;
+                                let gy = rl.y + ly as i32;
+                                let cell_min = transform.world_to_screen(
+                                    egui::pos2(grid_to_world(gx), grid_to_world(gy)),
+                                );
+                                let cell_max = transform.world_to_screen(
+                                    egui::pos2(grid_to_world(gx + 1), grid_to_world(gy + 1)),
+                                );
+                                let cell_rect = egui::Rect::from_min_max(cell_min, cell_max);
+                                let is_floor = cave.cells.get(ly * w + lx).copied().unwrap_or(false);
+                                let c = if is_floor { fill } else { wall_fill };
+                                painter.rect_filled(cell_rect, 0.0, c);
+                            }
+                        }
+                        // Draw cell grid when selected
+                        if is_selected {
+                            let grid_stroke = egui::Stroke::new(0.5, egui::Color32::from_rgba_unmultiplied(80, 80, 80, 60));
+                            for ly in 0..=rl.height as i32 {
+                                let y = transform.world_to_screen(egui::pos2(grid_to_world(rl.x), grid_to_world(rl.y + ly)));
+                                let y2 = transform.world_to_screen(egui::pos2(grid_to_world(rl.x + rl.width as i32), grid_to_world(rl.y + ly)));
+                                painter.line_segment([y, y2], grid_stroke);
+                            }
+                            for lx in 0..=rl.width as i32 {
+                                let x = transform.world_to_screen(egui::pos2(grid_to_world(rl.x + lx), grid_to_world(rl.y)));
+                                let x2 = transform.world_to_screen(egui::pos2(grid_to_world(rl.x + lx), grid_to_world(rl.y + rl.height as i32)));
+                                painter.line_segment([x, x2], grid_stroke);
+                            }
+                        }
+                        // Draw baked marching squares contour
+                        let contour_stroke = egui::Stroke::new(1.5, egui::Color32::from_rgb(40, 40, 40));
+                        for &(x1, y1, x2, y2) in &cave.contour_segments {
+                            let s1 = transform.world_to_screen(egui::pos2(x1, y1));
+                            let s2 = transform.world_to_screen(egui::pos2(x2, y2));
+                            painter.line_segment([s1, s2], contour_stroke);
+                        }
+                    } else {
+                        // No cells yet — draw as rectangle
+                        painter.rect_filled(rect, 0.0, fill);
+                    }
+                } else {
+                    painter.rect_filled(rect, 0.0, fill);
+                }
+                // Always draw AABB border (dashed for caves)
+                let aabb_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(60, 60, 60, 80));
+                painter.rect_stroke(rect, 0.0, aabb_stroke, egui::StrokeKind::Middle);
+            }
+            RoomShape::Rectangle => {
+                painter.rect_filled(rect, 0.0, fill);
+                painter.rect_stroke(rect, 0.0, stroke, egui::StrokeKind::Middle);
+            }
         }
 
         if let Some(room) = room {
+            let label_color = if dim < 1.0 {
+                dim_color(egui::Color32::from_rgb(30, 30, 30), dim)
+            } else {
+                egui::Color32::from_rgb(30, 30, 30)
+            };
             painter.text(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
                 &room.label,
                 egui::FontId::monospace(11.0 * transform.zoom),
-                egui::Color32::from_rgb(30, 30, 30),
+                label_color,
             );
         }
     }
@@ -958,11 +1185,33 @@ fn draw_doors(
     transform: &ViewTransform,
     layout: &SpatialLayout,
     graph: &DungeonGraph,
+    state: &SpatialViewState,
 ) {
-    let white = egui::Color32::WHITE;
-    let dark = egui::Color32::from_rgb(30, 30, 30);
-
     for edge in &graph.connections {
+        // Floor filtering: dim doors to lower floors, hide higher
+        let dim = if let Some(floor) = state.current_floor {
+            let src_visible = graph.room_by_id(&edge.source_room_id)
+                .is_some_and(|r| r.floor.visible_on(floor));
+            let tgt_visible = graph.room_by_id(&edge.target_room_id)
+                .is_some_and(|r| r.floor.visible_on(floor));
+            if src_visible || tgt_visible {
+                1.0
+            } else {
+                let src_lower = graph.room_by_id(&edge.source_room_id)
+                    .is_some_and(|r| is_lower_floor(r, floor));
+                let tgt_lower = graph.room_by_id(&edge.target_room_id)
+                    .is_some_and(|r| is_lower_floor(r, floor));
+                if src_lower || tgt_lower {
+                    LOWER_FLOOR_DIM
+                } else {
+                    continue;
+                }
+            }
+        } else {
+            1.0
+        };
+        let white = if dim < 1.0 { dim_color(egui::Color32::WHITE, dim) } else { egui::Color32::WHITE };
+        let dark = if dim < 1.0 { dim_color(egui::Color32::from_rgb(30, 30, 30), dim) } else { egui::Color32::from_rgb(30, 30, 30) };
         if edge.connection.connection_type == ConnectionType::Open {
             continue;
         }
@@ -1112,6 +1361,29 @@ pub fn spatial_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Spa
     ui.add_space(8.0);
     if ui.button("Recompute All").on_hover_text("Re-solve all room positions and corridors from scratch").clicked() {
         state.recompute_requested = true;
+    }
+
+    // Floor selector
+    ui.add_space(16.0);
+    ui.heading("Floor");
+    ui.separator();
+    {
+        let floors = collect_floors(&dungeon.graph);
+        let label = match state.current_floor {
+            None => "All Floors".to_string(),
+            Some(f) => format!("Floor {}", f),
+        };
+        egui::ComboBox::from_id_salt("spatial_floor_select")
+            .selected_text(&label)
+            .show_ui(ui, |ui| {
+                if ui.selectable_value(&mut state.current_floor, None, "All Floors").changed() {}
+                for f in &floors {
+                    let mut val = Some(*f);
+                    if ui.selectable_value(&mut val, Some(*f), format!("Floor {}", f)).clicked() {
+                        state.current_floor = Some(*f);
+                    }
+                }
+            });
     }
 
     // Bounds management

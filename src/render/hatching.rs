@@ -17,6 +17,7 @@ pub fn draw_exterior_shading(
     layout: &SpatialLayout,
     floor: &HashSet<(i32, i32)>,
     params: &ShadingParams,
+    contour_segments: &[(f32, f32, f32, f32)],
 ) {
     if floor.is_empty() || params.radius <= 0.0 {
         return;
@@ -38,7 +39,7 @@ pub fn draw_exterior_shading(
 
     match params.style {
         ShadingStyle::Hatched => {
-            draw_dyson_hatching(renderer, floor, &boundary_cells, radius_px, params.density, params.color);
+            draw_dyson_hatching(renderer, floor, &boundary_cells, radius_px, params.density, params.color, contour_segments);
         }
         ShadingStyle::Solid => {
             let extents = layout.extents();
@@ -49,7 +50,7 @@ pub fn draw_exterior_shading(
                 extents.2 + search_r,
                 extents.3 + search_r,
             );
-            draw_solid_shading(renderer, floor, &boundary_cells, search_extents, radius_px, params.color);
+            draw_solid_shading(renderer, floor, &boundary_cells, search_extents, radius_px, params.color, contour_segments);
         }
         ShadingStyle::Stippled => {
             let extents = layout.extents();
@@ -60,7 +61,7 @@ pub fn draw_exterior_shading(
                 extents.2 + search_r,
                 extents.3 + search_r,
             );
-            draw_stippled_shading(renderer, floor, &boundary_cells, search_extents, radius_px, params.density, params.color);
+            draw_stippled_shading(renderer, floor, &boundary_cells, search_extents, radius_px, params.density, params.color, contour_segments);
         }
     }
 }
@@ -92,6 +93,7 @@ fn draw_dyson_hatching(
     radius_px: f32,
     density: f32,
     color: [u8; 4],
+    contour_segments: &[(f32, f32, f32, f32)],
 ) {
     let base_spacing = (6.0 / density).max(2.0);
 
@@ -117,7 +119,7 @@ fn draw_dyson_hatching(
         let wx = gx as f32 * GRID_PX;
         let wy = gy as f32 * GRID_PX;
 
-        let d = dist_to_floor(wx + GRID_PX / 2.0, wy + GRID_PX / 2.0, boundary_cells);
+        let d = dist_to_floor(wx + GRID_PX / 2.0, wy + GRID_PX / 2.0, boundary_cells, contour_segments);
         if d > radius_px {
             continue;
         }
@@ -135,7 +137,7 @@ fn draw_dyson_hatching(
                 let jgx = (jx / GRID_PX).floor() as i32;
                 let jgy = (jy / GRID_PX).floor() as i32;
                 if !floor.contains(&(jgx, jgy)) {
-                    let jd = dist_to_floor(jx, jy, boundary_cells);
+                    let jd = dist_to_floor(jx, jy, boundary_cells, contour_segments);
                     if jd <= radius_px {
                         let angle = hash_f32(jx, jy, 7) * std::f32::consts::PI;
                         seeds.push((jx, jy, angle));
@@ -204,7 +206,7 @@ fn draw_dyson_hatching(
                 let pgx = (px / GRID_PX).floor() as i32;
                 let pgy = (py / GRID_PX).floor() as i32;
                 if floor.contains(&(pgx, pgy)) { break; }
-                if dist_to_floor(px, py, boundary_cells) > radius_px { break; }
+                if dist_to_floor(px, py, boundary_cells, contour_segments) > radius_px { break; }
                 if nearest_seed(px, py) != seed_idx { break; }
                 pos_t = t;
                 t += step;
@@ -218,7 +220,7 @@ fn draw_dyson_hatching(
                 let pgx = (px / GRID_PX).floor() as i32;
                 let pgy = (py / GRID_PX).floor() as i32;
                 if floor.contains(&(pgx, pgy)) { break; }
-                if dist_to_floor(px, py, boundary_cells) > radius_px { break; }
+                if dist_to_floor(px, py, boundary_cells, contour_segments) > radius_px { break; }
                 if nearest_seed(px, py) != seed_idx { break; }
                 neg_t = t;
                 t -= step;
@@ -239,7 +241,7 @@ fn draw_dyson_hatching(
     }
 }
 
-fn dist_to_floor(wx: f32, wy: f32, boundary_cells: &HashSet<(i32, i32)>) -> f32 {
+fn dist_to_floor(wx: f32, wy: f32, boundary_cells: &HashSet<(i32, i32)>, contour_segments: &[(f32, f32, f32, f32)]) -> f32 {
     let gx = (wx / GRID_PX).floor() as i32;
     let gy = (wy / GRID_PX).floor() as i32;
     let mut min_dist_sq = f32::MAX;
@@ -256,7 +258,29 @@ fn dist_to_floor(wx: f32, wy: f32, boundary_cells: &HashSet<(i32, i32)>) -> f32 
             min_dist_sq = min_dist_sq.min(d);
         }
     }
+
+    // Also check distance to marching squares contour segments (for smooth cave boundaries)
+    for &(x1, y1, x2, y2) in contour_segments {
+        let d = point_to_segment_dist_sq(wx, wy, x1, y1, x2, y2);
+        min_dist_sq = min_dist_sq.min(d);
+    }
+
     min_dist_sq.sqrt()
+}
+
+/// Squared distance from point (px, py) to line segment (x1,y1)-(x2,y2).
+fn point_to_segment_dist_sq(px: f32, py: f32, x1: f32, y1: f32, x2: f32, y2: f32) -> f32 {
+    let dx = x2 - x1;
+    let dy = y2 - y1;
+    let len_sq = dx * dx + dy * dy;
+    if len_sq < 0.001 {
+        return (px - x1).powi(2) + (py - y1).powi(2);
+    }
+    let t = ((px - x1) * dx + (py - y1) * dy) / len_sq;
+    let t = t.clamp(0.0, 1.0);
+    let proj_x = x1 + t * dx;
+    let proj_y = y1 + t * dy;
+    (px - proj_x).powi(2) + (py - proj_y).powi(2)
 }
 
 fn draw_solid_shading(
@@ -266,6 +290,7 @@ fn draw_solid_shading(
     extents: (i32, i32, i32, i32),
     radius_px: f32,
     color: [u8; 4],
+    contour_segments: &[(f32, f32, f32, f32)],
 ) {
     let mut shade_color = color;
     shade_color[3] = (color[3] as f32 * 0.3) as u8;
@@ -276,7 +301,7 @@ fn draw_solid_shading(
             if floor.contains(&(gx, gy)) { continue; }
             let wx = gx as f32 * GRID_PX + GRID_PX / 2.0;
             let wy = gy as f32 * GRID_PX + GRID_PX / 2.0;
-            let d = dist_to_floor(wx, wy, boundary_cells);
+            let d = dist_to_floor(wx, wy, boundary_cells, contour_segments);
             if d < radius_px {
                 let alpha = 1.0 - (d / radius_px);
                 let mut c = shade_color;
@@ -295,6 +320,7 @@ fn draw_stippled_shading(
     radius_px: f32,
     density: f32,
     color: [u8; 4],
+    contour_segments: &[(f32, f32, f32, f32)],
 ) {
     let dot_interval = (4.0 / density).max(1.5);
 
@@ -304,7 +330,7 @@ fn draw_stippled_shading(
             if floor.contains(&(gx, gy)) { continue; }
             let wx = gx as f32 * GRID_PX;
             let wy = gy as f32 * GRID_PX;
-            let d = dist_to_floor(wx + GRID_PX / 2.0, wy + GRID_PX / 2.0, boundary_cells);
+            let d = dist_to_floor(wx + GRID_PX / 2.0, wy + GRID_PX / 2.0, boundary_cells, contour_segments);
             if d >= radius_px { continue; }
 
             let mut dy = 1.0;
@@ -314,7 +340,7 @@ fn draw_stippled_shading(
                 while dx < GRID_PX {
                     let px = wx + dx;
                     let py = wy + dy;
-                    let pd = dist_to_floor(px, py, boundary_cells);
+                    let pd = dist_to_floor(px, py, boundary_cells, contour_segments);
                     if pd < radius_px {
                         let pgx = (px / GRID_PX).floor() as i32;
                         let pgy = (py / GRID_PX).floor() as i32;

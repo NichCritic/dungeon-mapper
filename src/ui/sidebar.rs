@@ -60,11 +60,11 @@ fn mixed_label(ui: &mut egui::Ui, all_same: bool) {
 
 fn multi_room_properties(ui: &mut egui::Ui, dungeon: &mut Dungeon, ids: &[String]) {
     // Snapshot values to avoid borrow conflicts
-    struct RoomSnap { hint: SizeHint, w: u32, h: u32, shape: RoomShape, rot: bool, tags: Vec<RoomTag> }
+    struct RoomSnap { hint: SizeHint, w: u32, h: u32, shape: RoomShape, rot: bool, tags: Vec<RoomTag>, floor: FloorAssignment }
     let snaps: Vec<RoomSnap> = ids.iter().filter_map(|id| {
         dungeon.graph.room_by_id(id).map(|r| {
             let (w, h) = r.grid_size();
-            RoomSnap { hint: r.size_hint, w, h, shape: r.shape, rot: r.allow_rotation, tags: r.tags.clone() }
+            RoomSnap { hint: r.size_hint, w, h, shape: r.shape, rot: r.allow_rotation, tags: r.tags.clone(), floor: r.floor }
         })
     }).collect();
     if snaps.is_empty() { return; }
@@ -171,6 +171,27 @@ fn multi_room_properties(ui: &mut egui::Ui, dungeon: &mut Dungeon, ids: &[String
             }
         });
     }
+
+    // Floor
+    ui.add_space(8.0);
+    let all_same_floor = snaps.iter().all(|s| s.floor == snaps[0].floor);
+    let floor_label = if all_same_floor { snaps[0].floor.label() } else { "(mixed)".to_string() };
+    ui.horizontal(|ui| {
+        ui.label(format!("Floor: {}", floor_label));
+    });
+    let mut floor_val = match snaps[0].floor {
+        FloorAssignment::Single(f) | FloorAssignment::Half(f, _) => f,
+    };
+    ui.horizontal(|ui| {
+        if ui.add(egui::DragValue::new(&mut floor_val).speed(0.1).prefix("Set floor: ")).changed() {
+            for id in ids {
+                if let Some(room) = dungeon.graph.room_by_id_mut(id) {
+                    room.floor = FloorAssignment::Single(floor_val);
+                }
+            }
+        }
+        mixed_label(ui, all_same_floor);
+    });
 
     // Allow rotation
     ui.add_space(8.0);
@@ -463,9 +484,56 @@ fn room_properties(ui: &mut egui::Ui, room: &mut Room, focus_label: &mut bool) {
             }
         });
 
+    // Shape-specific controls
     let (ew, eh) = room.grid_size();
     if room.shape == RoomShape::Rectangle && ew != eh {
         ui.checkbox(&mut room.allow_rotation, "Allow solver to rotate");
+    }
+
+    if room.shape == RoomShape::Cave {
+        // Initialize cave_data if missing
+        if room.cave_data.is_none() {
+            room.cave_data = Some(CaveData {
+                cells: Vec::new(),
+                seed: rand::random(),
+                algorithm: CaveAlgorithm::CellularAutomata,
+                density: 0.45,
+                smoothing_iterations: 4,
+                generation: 0,
+                contour_segments: Vec::new(),
+            });
+        }
+        if let Some(cave) = &mut room.cave_data {
+            ui.add_space(8.0);
+            ui.label("Cave Settings:");
+            egui::ComboBox::from_id_salt("cave_algorithm")
+                .selected_text(cave.algorithm.label())
+                .show_ui(ui, |ui| {
+                    for alg in CaveAlgorithm::ALL {
+                        ui.selectable_value(&mut cave.algorithm, alg, alg.label());
+                    }
+                });
+            ui.horizontal(|ui| {
+                ui.label("Seed:");
+                ui.add(egui::DragValue::new(&mut cave.seed).speed(1.0));
+                if ui.small_button("Rand").clicked() {
+                    cave.seed = rand::random();
+                    cave.cells.clear();
+                    cave.generation += 1;
+                }
+            });
+            ui.add(egui::Slider::new(&mut cave.density, 0.3..=0.7).text("Density"));
+            if cave.algorithm == CaveAlgorithm::CellularAutomata {
+                ui.add(egui::Slider::new(&mut cave.smoothing_iterations, 1..=10).text("Smoothing"));
+            }
+            if ui.button("Regenerate").clicked() {
+                cave.cells.clear();
+                cave.generation += 1;
+            }
+        }
+    } else if room.cave_data.is_some() {
+        // Switched away from Cave — clear cave data
+        room.cave_data = None;
     }
 
     ui.add_space(8.0);
@@ -487,6 +555,32 @@ fn room_properties(ui: &mut egui::Ui, room: &mut Room, focus_label: &mut bool) {
             } else {
                 room.tags.retain(|t| t != tag);
             }
+        }
+    }
+
+    // Floor assignment
+    ui.add_space(8.0);
+    ui.label("Floor:");
+    let mut is_half = matches!(room.floor, FloorAssignment::Half(_, _));
+    let (mut floor_a, mut floor_b) = match room.floor {
+        FloorAssignment::Single(f) => (f, f + 1),
+        FloorAssignment::Half(a, b) => (a, b),
+    };
+    ui.horizontal(|ui| {
+        ui.add(egui::DragValue::new(&mut floor_a).speed(0.1).prefix("Floor: "));
+        if is_half {
+            ui.add(egui::DragValue::new(&mut floor_b).speed(0.1).prefix("& "));
+        }
+    });
+    if ui.checkbox(&mut is_half, "Half floor (spans two)").changed() || floor_a != match room.floor { FloorAssignment::Single(f) | FloorAssignment::Half(f, _) => f } || (is_half && floor_b != match room.floor { FloorAssignment::Half(_, b) => b, _ => floor_a + 1 }) {
+        if is_half {
+            // Ensure the two floors are adjacent and ordered
+            if floor_b <= floor_a {
+                floor_b = floor_a + 1;
+            }
+            room.floor = FloorAssignment::Half(floor_a, floor_b);
+        } else {
+            room.floor = FloorAssignment::Single(floor_a);
         }
     }
 

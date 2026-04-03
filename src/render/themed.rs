@@ -23,7 +23,13 @@ pub fn render_themed(
     let floor = build_floor_set(layout, graph);
 
     render_background(renderer, layout, theme);
-    render_exterior_shading(renderer, layout, &floor, theme);
+
+    // Collect baked marching squares contour segments from cave rooms (used by shading)
+    let contour_segments: Vec<(f32, f32, f32, f32)> = graph.rooms.iter()
+        .filter_map(|r| r.cave_data.as_ref())
+        .flat_map(|c| c.contour_segments.iter().copied())
+        .collect();
+    render_exterior_shading(renderer, layout, &floor, theme, &contour_segments);
 
     for rl in &layout.rooms {
         render_room_floor(renderer, rl, graph, theme);
@@ -44,13 +50,27 @@ pub fn render_themed(
         render_decor(renderer, rl, graph, theme);
     }
     for rl in &layout.rooms {
+        // Cave rooms use baked marching squares contour segments
+        let room = graph.room_by_id(&rl.room_id);
+        if let Some(cave) = room.and_then(|r| {
+            if r.shape == RoomShape::Cave { r.cave_data.as_ref() } else { None }
+        }) {
+            if !cave.contour_segments.is_empty() {
+                for &(x1, y1, x2, y2) in &cave.contour_segments {
+                    renderer.draw_line(x1, y1, x2, y2, 2.0, theme.wall_color);
+                }
+                continue;
+            }
+        }
         render_room_walls(renderer, rl, graph, theme);
     }
     // Redraw corridor floors at circular room junctions to punch through
     // the circle wall stroke that covers the corridor opening.
     repair_circle_junctions(renderer, graph, layout, theme);
+    // Build set of cells inside cave rooms (so corridor walls don't double-draw there)
+    let cave_cells = build_cave_cell_set(layout, graph);
     for corridor in &layout.corridors {
-        render_corridor_walls(renderer, corridor, &floor, theme);
+        render_corridor_walls(renderer, corridor, &floor, theme, &cave_cells);
     }
     render_doors(renderer, graph, layout, theme, options);
     if options.show_labels {
@@ -79,6 +99,7 @@ pub fn render_exterior_shading(
     layout: &SpatialLayout,
     floor: &HashSet<(i32, i32)>,
     theme: &Theme,
+    contour_segments: &[(f32, f32, f32, f32)],
 ) {
     if theme.exterior_shading {
         let params = ShadingParams {
@@ -87,7 +108,7 @@ pub fn render_exterior_shading(
             density: theme.hatching_density,
             color: theme.wall_color,
         };
-        draw_exterior_shading(renderer, layout, floor, &params);
+        draw_exterior_shading(renderer, layout, floor, &params, contour_segments);
     }
 }
 
@@ -112,16 +133,38 @@ pub fn render_room_floor_with_color(
     let ry = rl.y as f32 * GRID_PX;
     let rw = rl.width as f32 * GRID_PX;
     let rh = rl.height as f32 * GRID_PX;
-    let is_circle = graph.room_by_id(&rl.room_id)
-        .is_some_and(|r| r.shape == RoomShape::Circle);
+    let room = graph.room_by_id(&rl.room_id);
+    let shape = room.map(|r| r.shape).unwrap_or_default();
 
-    if is_circle {
-        let cx = rx + rw / 2.0;
-        let cy = ry + rh / 2.0;
-        let r = rw.min(rh) / 2.0;
-        renderer.fill_circle(cx, cy, r, color);
-    } else {
-        renderer.fill_rect(rx, ry, rw, rh, color);
+    match shape {
+        RoomShape::Circle => {
+            let cx = rx + rw / 2.0;
+            let cy = ry + rh / 2.0;
+            let r = rw.min(rh) / 2.0;
+            renderer.fill_circle(cx, cy, r, color);
+        }
+        RoomShape::Cave => {
+            if let Some(cave) = room.and_then(|r| r.cave_data.as_ref()) {
+                if !cave.cells.is_empty() {
+                    let w = rl.width as usize;
+                    for ly in 0..rl.height as usize {
+                        for lx in 0..w {
+                            if cave.cells.get(ly * w + lx).copied().unwrap_or(false) {
+                                let px = (rl.x as usize + lx) as f32 * GRID_PX;
+                                let py = (rl.y as usize + ly) as f32 * GRID_PX;
+                                renderer.fill_rect(px, py, GRID_PX, GRID_PX, color);
+                            }
+                        }
+                    }
+                    return;
+                }
+            }
+            // No cells yet — draw as full rectangle
+            renderer.fill_rect(rx, ry, rw, rh, color);
+        }
+        RoomShape::Rectangle => {
+            renderer.fill_rect(rx, ry, rw, rh, color);
+        }
     }
 }
 
@@ -293,25 +336,234 @@ pub fn render_room_walls(
     let ry = rl.y as f32 * GRID_PX;
     let rw = rl.width as f32 * GRID_PX;
     let rh = rl.height as f32 * GRID_PX;
-    let is_circle = graph.room_by_id(&rl.room_id)
-        .is_some_and(|r| r.shape == RoomShape::Circle);
+    let room = graph.room_by_id(&rl.room_id);
+    let shape = room.map(|r| r.shape).unwrap_or_default();
 
-    if is_circle {
-        let cx = rx + rw / 2.0;
-        let cy = ry + rh / 2.0;
-        let r = rw.min(rh) / 2.0;
-        renderer.stroke_circle(cx, cy, r, wall_w, theme.wall_color);
-    } else {
-        renderer.stroke_rect(rx, ry, rw, rh, wall_w, theme.wall_color);
+    match shape {
+        RoomShape::Circle => {
+            let cx = rx + rw / 2.0;
+            let cy = ry + rh / 2.0;
+            let r = rw.min(rh) / 2.0;
+            renderer.stroke_circle(cx, cy, r, wall_w, theme.wall_color);
+        }
+        RoomShape::Cave => {
+            // Cave walls are drawn per-cell-edge, similar to corridor walls.
+            // For each floor cell, draw wall lines on edges where neighbor is not floor.
+            if let Some(cave) = room.and_then(|r| r.cave_data.as_ref()) {
+                if !cave.cells.is_empty() {
+                    let w = rl.width as i32;
+                    let h = rl.height as i32;
+                    let is_floor = |lx: i32, ly: i32| -> bool {
+                        if lx < 0 || ly < 0 || lx >= w || ly >= h { return false; }
+                        cave.cells.get((ly * w + lx) as usize).copied().unwrap_or(false)
+                    };
+                    for ly in 0..h {
+                        for lx in 0..w {
+                            if !is_floor(lx, ly) { continue; }
+                            let px = (rl.x + lx) as f32 * GRID_PX;
+                            let py = (rl.y + ly) as f32 * GRID_PX;
+                            // Top edge
+                            if !is_floor(lx, ly - 1) {
+                                renderer.draw_line(px, py, px + GRID_PX, py, wall_w, theme.wall_color);
+                            }
+                            // Bottom edge
+                            if !is_floor(lx, ly + 1) {
+                                renderer.draw_line(px, py + GRID_PX, px + GRID_PX, py + GRID_PX, wall_w, theme.wall_color);
+                            }
+                            // Left edge
+                            if !is_floor(lx - 1, ly) {
+                                renderer.draw_line(px, py, px, py + GRID_PX, wall_w, theme.wall_color);
+                            }
+                            // Right edge
+                            if !is_floor(lx + 1, ly) {
+                                renderer.draw_line(px + GRID_PX, py, px + GRID_PX, py + GRID_PX, wall_w, theme.wall_color);
+                            }
+                        }
+                    }
+                    return;
+                }
+            }
+            // No cells yet — draw as rectangle
+            renderer.stroke_rect(rx, ry, rw, rh, wall_w, theme.wall_color);
+        }
+        RoomShape::Rectangle => {
+            renderer.stroke_rect(rx, ry, rw, rh, wall_w, theme.wall_color);
+        }
     }
 }
 
-/// Render one corridor's walls, skipping edges where adjacent cells are floor.
+/// Build marching squares contour line segments for all cave rooms.
+/// Returns segments in world pixel coordinates for use by the shading system.
+pub fn build_cave_contour_segments(
+    layout: &SpatialLayout,
+    graph: &DungeonGraph,
+    floor: &HashSet<(i32, i32)>,
+) -> Vec<(f32, f32, f32, f32)> {
+    let mut segments = Vec::new();
+    for rl in &layout.rooms {
+        let room = graph.room_by_id(&rl.room_id);
+        let cave = match room.and_then(|r| {
+            if r.shape == RoomShape::Cave { r.cave_data.as_ref() } else { None }
+        }) {
+            Some(c) if !c.cells.is_empty() => c,
+            _ => continue,
+        };
+        let w = rl.width as i32;
+        let h = rl.height as i32;
+        let is_floor = |gx: i32, gy: i32| -> bool {
+            let lx = gx - rl.x;
+            let ly = gy - rl.y;
+            if lx >= 0 && ly >= 0 && lx < w && ly < h {
+                cave.cells.get((ly * w + lx) as usize).copied().unwrap_or(false)
+            } else {
+                floor.contains(&(gx, gy))
+            }
+        };
+        for by in (rl.y - 1)..(rl.y + h) {
+            for bx in (rl.x - 1)..(rl.x + w) {
+                let tl = is_floor(bx, by) as u8;
+                let tr = is_floor(bx + 1, by) as u8;
+                let br = is_floor(bx + 1, by + 1) as u8;
+                let bl = is_floor(bx, by + 1) as u8;
+                let index = (tl << 3) | (tr << 2) | (br << 1) | bl;
+                if index == 0 || index == 15 { continue; }
+
+                let cx = (bx + 1) as f32 * GRID_PX;
+                let cy = (by + 1) as f32 * GRID_PX;
+                let half = GRID_PX / 2.0;
+                let top = (cx, cy - half);
+                let right = (cx + half, cy);
+                let bottom = (cx, cy + half);
+                let left = (cx - half, cy);
+
+                let segs: &[((f32, f32), (f32, f32))] = match index {
+                    1  => &[(left, bottom)],
+                    2  => &[(bottom, right)],
+                    3  => &[(left, right)],
+                    4  => &[(top, right)],
+                    5  => &[(top, left), (bottom, right)],
+                    6  => &[(top, bottom)],
+                    7  => &[(top, left)],
+                    8  => &[(top, left)],
+                    9  => &[(top, bottom)],
+                    10 => &[(top, right), (left, bottom)],
+                    11 => &[(top, right)],
+                    12 => &[(left, right)],
+                    13 => &[(bottom, right)],
+                    14 => &[(left, bottom)],
+                    _ => &[],
+                };
+                for &((x1, y1), (x2, y2)) in segs {
+                    segments.push((x1, y1, x2, y2));
+                }
+            }
+        }
+    }
+    segments
+}
+
+/// Render cave walls using marching squares for smooth contours.
+pub fn render_cave_walls_smooth(
+    renderer: &mut dyn MapRenderer,
+    rl: &RoomLayout,
+    cave: &CaveData,
+    floor: &HashSet<(i32, i32)>,
+    wall_color: [u8; 4],
+    wall_w: f32,
+) {
+    let w = rl.width as i32;
+    let h = rl.height as i32;
+
+    // Sample function: returns true if (global_x, global_y) is floor.
+    // Inside room bounds: check cave cells. Outside: check global floor set.
+    let is_floor = |gx: i32, gy: i32| -> bool {
+        let lx = gx - rl.x;
+        let ly = gy - rl.y;
+        if lx >= 0 && ly >= 0 && lx < w && ly < h {
+            cave.cells.get((ly * w + lx) as usize).copied().unwrap_or(false)
+        } else {
+            floor.contains(&(gx, gy))
+        }
+    };
+
+    // Iterate over each 2x2 block. The block at (bx, by) samples corners:
+    //   TL = (bx, by), TR = (bx+1, by), BL = (bx, by+1), BR = (bx+1, by+1)
+    // We extend 1 cell outside the room in each direction for boundary handling.
+    for by in (rl.y - 1)..(rl.y + h) {
+        for bx in (rl.x - 1)..(rl.x + w) {
+            let tl = is_floor(bx, by) as u8;
+            let tr = is_floor(bx + 1, by) as u8;
+            let br = is_floor(bx + 1, by + 1) as u8;
+            let bl = is_floor(bx, by + 1) as u8;
+            let index = (tl << 3) | (tr << 2) | (br << 1) | bl;
+
+            // Skip cases 0 (all wall) and 15 (all floor) — no boundary
+            if index == 0 || index == 15 {
+                continue;
+            }
+
+            // The 2x2 block samples cell centers at (bx,by), (bx+1,by), (bx,by+1), (bx+1,by+1).
+            // The contour passes through the shared corner at ((bx+1)*GRID_PX, (by+1)*GRID_PX).
+            // Edge midpoints are on the cell boundaries between the 4 sampled cells.
+            let cx = (bx + 1) as f32 * GRID_PX; // shared corner x
+            let cy = (by + 1) as f32 * GRID_PX; // shared corner y
+            let half = GRID_PX / 2.0;
+            let top = (cx, cy - half);     // midpoint between TL and TR cells
+            let right = (cx + half, cy);   // midpoint between TR and BR cells
+            let bottom = (cx, cy + half);  // midpoint between BL and BR cells
+            let left = (cx - half, cy);    // midpoint between TL and BL cells
+
+            // Draw line segments based on marching squares case
+            let segments: &[((f32, f32), (f32, f32))] = match index {
+                1  => &[(left, bottom)],
+                2  => &[(bottom, right)],
+                3  => &[(left, right)],
+                4  => &[(top, right)],
+                5  => &[(top, left), (bottom, right)],  // saddle
+                6  => &[(top, bottom)],
+                7  => &[(top, left)],
+                8  => &[(top, left)],
+                9  => &[(top, bottom)],
+                10 => &[(top, right), (left, bottom)],  // saddle
+                11 => &[(top, right)],
+                12 => &[(left, right)],
+                13 => &[(bottom, right)],
+                14 => &[(left, bottom)],
+                _ => &[],
+            };
+
+            for &((x1, y1), (x2, y2)) in segments {
+                renderer.draw_line(x1, y1, x2, y2, wall_w, wall_color);
+            }
+        }
+    }
+}
+
+/// Build the set of all cells inside cave room bounding boxes.
+/// Used to prevent corridor walls from double-drawing at cave boundaries.
+pub fn build_cave_cell_set(layout: &SpatialLayout, graph: &DungeonGraph) -> HashSet<(i32, i32)> {
+    let mut cells = HashSet::new();
+    for rl in &layout.rooms {
+        let is_cave = graph.room_by_id(&rl.room_id)
+            .is_some_and(|r| r.shape == RoomShape::Cave && r.cave_data.as_ref().is_some_and(|c| !c.cells.is_empty()));
+        if !is_cave { continue; }
+        for y in rl.y..(rl.y + rl.height as i32) {
+            for x in rl.x..(rl.x + rl.width as i32) {
+                cells.insert((x, y));
+            }
+        }
+    }
+    cells
+}
+
+/// Render one corridor's walls, skipping edges where adjacent cells are floor
+/// or inside a cave room (cave rooms handle their own wall rendering).
 pub fn render_corridor_walls(
     renderer: &mut dyn MapRenderer,
     corridor: &CorridorSegment,
     floor: &HashSet<(i32, i32)>,
     theme: &Theme,
+    cave_cells: &HashSet<(i32, i32)>,
 ) {
     let wall_w = 2.0;
     let cw = corridor.width as i32;
@@ -327,30 +579,35 @@ pub fn render_corridor_walls(
         let px2 = max_gx as f32 * GRID_PX;
         let py2 = max_gy as f32 * GRID_PX;
 
+        // Skip wall if neighbor is floor OR inside a cave room
+        let skip = |gx: i32, gy: i32| -> bool {
+            floor.contains(&(gx, gy)) || cave_cells.contains(&(gx, gy))
+        };
+
         // Top wall
         for x in min_gx..max_gx {
-            if !floor.contains(&(x, min_gy - 1)) {
+            if !skip(x, min_gy - 1) {
                 let lx = x as f32 * GRID_PX;
                 renderer.draw_line(lx, py1, lx + GRID_PX, py1, wall_w, theme.wall_color);
             }
         }
         // Bottom wall
         for x in min_gx..max_gx {
-            if !floor.contains(&(x, max_gy)) {
+            if !skip(x, max_gy) {
                 let lx = x as f32 * GRID_PX;
                 renderer.draw_line(lx, py2, lx + GRID_PX, py2, wall_w, theme.wall_color);
             }
         }
         // Left wall
         for y in min_gy..max_gy {
-            if !floor.contains(&(min_gx - 1, y)) {
+            if !skip(min_gx - 1, y) {
                 let ly = y as f32 * GRID_PX;
                 renderer.draw_line(px1, ly, px1, ly + GRID_PX, wall_w, theme.wall_color);
             }
         }
         // Right wall
         for y in min_gy..max_gy {
-            if !floor.contains(&(max_gx, y)) {
+            if !skip(max_gx, y) {
                 let ly = y as f32 * GRID_PX;
                 renderer.draw_line(px2, ly, px2, ly + GRID_PX, wall_w, theme.wall_color);
             }
@@ -506,7 +763,6 @@ pub fn render_doors(
         if edge.connection.connection_type == ConnectionType::Open {
             continue;
         }
-
         let corridor = layout.corridors.iter().find(|c| c.connection_id == edge.connection.id);
         let Some(corridor) = corridor else { continue };
         if corridor.waypoints.len() < 2 { continue; }
@@ -518,6 +774,10 @@ pub fn render_doors(
         let wp_ends = [&corridor.waypoints[0], corridor.waypoints.last().unwrap()];
 
         for (room_id, wp) in room_ids.iter().zip(wp_ends.iter()) {
+            // Skip drawing door on cave room walls — caves have irregular boundaries
+            let is_cave = graph.room_by_id(room_id)
+                .is_some_and(|r| r.shape == RoomShape::Cave);
+            if is_cave { continue; }
             let Some(rl) = layout.room_by_id(room_id) else { continue };
 
             let wp_cx = wp.x as f32;
@@ -596,27 +856,51 @@ pub fn render_labels(
 pub fn build_floor_set(layout: &SpatialLayout, graph: &DungeonGraph) -> HashSet<(i32, i32)> {
     let mut floor: HashSet<(i32, i32)> = HashSet::new();
     for rl in &layout.rooms {
-        let is_circle = graph.room_by_id(&rl.room_id)
-            .is_some_and(|r| r.shape == RoomShape::Circle);
-        if is_circle {
-            let cx = rl.x as f32 + rl.width as f32 / 2.0;
-            let cy = rl.y as f32 + rl.height as f32 / 2.0;
-            let r = (rl.width.min(rl.height) as f32) / 2.0;
-            for y in rl.y..(rl.y + rl.height as i32) {
-                for x in rl.x..(rl.x + rl.width as i32) {
-                    let cell_cx = x as f32 + 0.5;
-                    let cell_cy = y as f32 + 0.5;
-                    let dx = cell_cx - cx;
-                    let dy = cell_cy - cy;
-                    if dx * dx + dy * dy <= r * r {
-                        floor.insert((x, y));
+        let room = graph.room_by_id(&rl.room_id);
+        let shape = room.map(|r| r.shape).unwrap_or_default();
+        match shape {
+            RoomShape::Circle => {
+                let cx = rl.x as f32 + rl.width as f32 / 2.0;
+                let cy = rl.y as f32 + rl.height as f32 / 2.0;
+                let r = (rl.width.min(rl.height) as f32) / 2.0;
+                for y in rl.y..(rl.y + rl.height as i32) {
+                    for x in rl.x..(rl.x + rl.width as i32) {
+                        let cell_cx = x as f32 + 0.5;
+                        let cell_cy = y as f32 + 0.5;
+                        let dx = cell_cx - cx;
+                        let dy = cell_cy - cy;
+                        if dx * dx + dy * dy <= r * r {
+                            floor.insert((x, y));
+                        }
                     }
                 }
             }
-        } else {
-            for y in rl.y..(rl.y + rl.height as i32) {
-                for x in rl.x..(rl.x + rl.width as i32) {
-                    floor.insert((x, y));
+            RoomShape::Cave => {
+                if let Some(cave) = room.and_then(|r| r.cave_data.as_ref()) {
+                    if !cave.cells.is_empty() {
+                        let w = rl.width as usize;
+                        for ly in 0..rl.height as usize {
+                            for lx in 0..w {
+                                if cave.cells.get(ly * w + lx).copied().unwrap_or(false) {
+                                    floor.insert((rl.x + lx as i32, rl.y + ly as i32));
+                                }
+                            }
+                        }
+                    } else {
+                        // No cells yet — treat as full rectangle
+                        for y in rl.y..(rl.y + rl.height as i32) {
+                            for x in rl.x..(rl.x + rl.width as i32) {
+                                floor.insert((x, y));
+                            }
+                        }
+                    }
+                }
+            }
+            RoomShape::Rectangle => {
+                for y in rl.y..(rl.y + rl.height as i32) {
+                    for x in rl.x..(rl.x + rl.width as i32) {
+                        floor.insert((x, y));
+                    }
                 }
             }
         }

@@ -1,10 +1,13 @@
 use std::hash::{Hash, Hasher};
 
+use std::collections::HashSet;
+
 use crate::model::*;
 use crate::render::recording::{RecordingRenderer, RenderCommand, replay_commands};
 use crate::render::themed::RenderOptions;
 use crate::ui::canvas_common::{handle_pan_zoom, truncate_to_fit, ViewState, COLOR_PLACEHOLDER_TEXT};
-use crate::util::{ViewTransform, GRID_PX};
+use crate::ui::spatial_view::collect_floors;
+use crate::util::{grid_to_world, ViewTransform, GRID_PX};
 
 /// Cached world-space drawing commands from render_themed.
 struct RenderCache {
@@ -18,6 +21,7 @@ pub struct StyledViewState {
     pub show_labels: bool,
     pub show_notes: bool,
     pub show_secrets: bool,
+    pub current_floor: Option<i32>,
     render_cache: Option<RenderCache>,
     /// Set by sidebar export buttons, consumed by app.rs to dispatch async export.
     pub export_requested: Option<bool>,
@@ -31,6 +35,7 @@ impl Default for StyledViewState {
             show_labels: true,
             show_notes: true,
             show_secrets: true,
+            current_floor: None,
             render_cache: None,
             export_requested: None,
         }
@@ -40,7 +45,7 @@ impl Default for StyledViewState {
 /// Compute a hash over all inputs that affect the cached render commands.
 /// Text (labels, notes, secret "S" markers) is drawn as a live overlay
 /// so show_labels/show_notes don't trigger a cache rebuild.
-fn render_input_hash(layout: &SpatialLayout, theme: &Theme, show_grid: bool) -> u64 {
+fn render_input_hash(layout: &SpatialLayout, graph: &DungeonGraph, theme: &Theme, show_grid: bool, current_floor: Option<i32>) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     let mut h = DefaultHasher::new();
     layout.rooms.len().hash(&mut h);
@@ -50,6 +55,12 @@ fn render_input_hash(layout: &SpatialLayout, theme: &Theme, show_grid: bool) -> 
         rl.y.hash(&mut h);
         rl.width.hash(&mut h);
         rl.height.hash(&mut h);
+        // Hash cave generation counter so cell edits invalidate cache
+        if let Some(room) = graph.room_by_id(&rl.room_id) {
+            if let Some(cave) = &room.cave_data {
+                cave.generation.hash(&mut h);
+            }
+        }
     }
     layout.corridors.len().hash(&mut h);
     for c in &layout.corridors {
@@ -68,6 +79,7 @@ fn render_input_hash(layout: &SpatialLayout, theme: &Theme, show_grid: bool) -> 
     theme.hatching_density.to_bits().hash(&mut h);
     (theme.corridor_chamfer as u8).hash(&mut h);
     show_grid.hash(&mut h);
+    current_floor.hash(&mut h);
     h.finish()
 }
 
@@ -85,8 +97,38 @@ pub fn styled_view(ui: &mut egui::Ui, dungeon: &Dungeon, state: &mut StyledViewS
     let transform = ViewTransform::new(state.view.offset, state.view.zoom, rect);
 
     if let Some(layout) = &dungeon.layout {
+        // Build floor-filtered layout if a floor is selected
+        let filtered_layout;
+        let render_layout = if let Some(floor) = state.current_floor {
+            let visible_room_ids: HashSet<&str> = dungeon.graph.rooms.iter()
+                .filter(|r| r.floor.visible_on(floor))
+                .map(|r| r.id.as_str())
+                .collect();
+            filtered_layout = SpatialLayout {
+                rooms: layout.rooms.iter()
+                    .filter(|rl| visible_room_ids.contains(rl.room_id.as_str()))
+                    .cloned()
+                    .collect(),
+                corridors: layout.corridors.iter()
+                    .filter(|c| {
+                        dungeon.graph.connections.iter()
+                            .find(|e| e.connection.id == c.connection_id)
+                            .is_some_and(|e| {
+                                visible_room_ids.contains(e.source_room_id.as_str())
+                                    || visible_room_ids.contains(e.target_room_id.as_str())
+                            })
+                    })
+                    .cloned()
+                    .collect(),
+                bounds: layout.bounds.clone(),
+            };
+            &filtered_layout
+        } else {
+            layout
+        };
+
         // Rebuild cached render commands if inputs changed
-        let hash = render_input_hash(layout, &dungeon.theme, state.show_grid);
+        let hash = render_input_hash(layout, &dungeon.graph, &dungeon.theme, state.show_grid, state.current_floor);
         let needs_rebuild = state.render_cache.as_ref()
             .is_none_or(|c| c.input_hash != hash);
 
@@ -101,7 +143,7 @@ pub fn styled_view(ui: &mut egui::Ui, dungeon: &Dungeon, state: &mut StyledViewS
             crate::render::themed::render_themed(
                 &mut recorder,
                 &dungeon.graph,
-                layout,
+                render_layout,
                 &dungeon.theme,
                 &options,
             );
@@ -116,8 +158,95 @@ pub fn styled_view(ui: &mut egui::Ui, dungeon: &Dungeon, state: &mut StyledViewS
             replay_commands(&painter, &transform, &cache.commands);
         }
 
+        // Draw lower-floor room/corridor silhouettes as dark semi-transparent shapes
+        if let Some(floor) = state.current_floor {
+            let ghost_fill = egui::Color32::from_rgba_unmultiplied(50, 50, 60, 70);
+            let ghost_stroke = egui::Stroke::new(1.5, egui::Color32::from_rgba_unmultiplied(70, 70, 80, 90));
+            // Lower-floor rooms
+            for rl in &layout.rooms {
+                if let Some(room) = dungeon.graph.room_by_id(&rl.room_id) {
+                    if !room.floor.visible_on(floor) && room.floor.floors().iter().all(|f| *f < floor) {
+                        let min = transform.world_to_screen(egui::pos2(
+                            rl.x as f32 * GRID_PX,
+                            rl.y as f32 * GRID_PX,
+                        ));
+                        let max = transform.world_to_screen(egui::pos2(
+                            (rl.x + rl.width as i32) as f32 * GRID_PX,
+                            (rl.y + rl.height as i32) as f32 * GRID_PX,
+                        ));
+                        let r = egui::Rect::from_min_max(min, max);
+                        match room.shape {
+                            crate::model::RoomShape::Circle => {
+                                let center = r.center();
+                                let radius = r.width().min(r.height()) / 2.0;
+                                painter.circle_filled(center, radius, ghost_fill);
+                                painter.circle_stroke(center, radius, ghost_stroke);
+                            }
+                            _ => {
+                                painter.rect_filled(r, 0.0, ghost_fill);
+                                painter.rect_stroke(r, 0.0, ghost_stroke, egui::StrokeKind::Middle);
+                            }
+                        }
+                        // Ghost label
+                        let cx = (rl.x as f32 + rl.width as f32 / 2.0) * GRID_PX;
+                        let cy = (rl.y as f32 + rl.height as f32 / 2.0) * GRID_PX;
+                        let screen = transform.world_to_screen(egui::pos2(cx, cy));
+                        let max_width = rl.width as f32 * GRID_PX * transform.zoom;
+                        let font = egui::FontId::monospace(10.0 * transform.zoom);
+                        let label = truncate_to_fit(&painter, &room.label, &font, max_width);
+                        painter.text(
+                            screen,
+                            egui::Align2::CENTER_CENTER,
+                            &label,
+                            font,
+                            egui::Color32::from_rgba_unmultiplied(80, 80, 90, 100),
+                        );
+                    }
+                }
+            }
+            // Lower-floor corridors
+            for corridor in &layout.corridors {
+                if let Some(edge) = dungeon.graph.connections.iter().find(|e| e.connection.id == corridor.connection_id) {
+                    let src_on = dungeon.graph.room_by_id(&edge.source_room_id)
+                        .is_some_and(|r| r.floor.visible_on(floor));
+                    let tgt_on = dungeon.graph.room_by_id(&edge.target_room_id)
+                        .is_some_and(|r| r.floor.visible_on(floor));
+                    if src_on || tgt_on { continue; }
+                    let src_lower = dungeon.graph.room_by_id(&edge.source_room_id)
+                        .is_some_and(|r| r.floor.floors().iter().all(|f| *f < floor));
+                    let tgt_lower = dungeon.graph.room_by_id(&edge.target_room_id)
+                        .is_some_and(|r| r.floor.floors().iter().all(|f| *f < floor));
+                    if !src_lower && !tgt_lower { continue; }
+
+                    let w = corridor.width as i32;
+                    let half = w / 2;
+                    for pair in corridor.waypoints.windows(2) {
+                        let x1 = pair[0].x;
+                        let y1 = pair[0].y;
+                        let x2 = pair[1].x;
+                        let y2 = pair[1].y;
+                        let min_x = x1.min(x2) - half;
+                        let min_y = y1.min(y2) - half;
+                        let max_x = x1.max(x2) - half + w;
+                        let max_y = y1.max(y2) - half + w;
+                        let smin = transform.world_to_screen(egui::pos2(
+                            grid_to_world(min_x), grid_to_world(min_y),
+                        ));
+                        let smax = transform.world_to_screen(egui::pos2(
+                            grid_to_world(max_x), grid_to_world(max_y),
+                        ));
+                        painter.rect_filled(
+                            egui::Rect::from_min_max(smin, smax),
+                            0.0,
+                            ghost_fill,
+                        );
+                    }
+                }
+            }
+        }
+
         // Live text overlay (labels, notes, secret door markers)
-        draw_text_overlay(&painter, &transform, &dungeon.graph, layout, &dungeon.theme, state);
+        draw_text_overlay(&painter, &transform, &dungeon.graph, render_layout, &dungeon.theme, state);
     } else {
         painter.text(
             rect.center(),
@@ -262,6 +391,27 @@ pub fn styled_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Styl
                 ui.selectable_value(&mut dungeon.theme.corridor_chamfer, s, s.label());
             }
         });
+
+    // Floor selector
+    ui.add_space(8.0);
+    {
+        let floors = collect_floors(&dungeon.graph);
+        let label = match state.current_floor {
+            None => "All Floors".to_string(),
+            Some(f) => format!("Floor {}", f),
+        };
+        egui::ComboBox::from_id_salt("styled_floor_select")
+            .selected_text(&label)
+            .show_ui(ui, |ui| {
+                if ui.selectable_value(&mut state.current_floor, None, "All Floors").changed() {}
+                for f in &floors {
+                    let mut val = Some(*f);
+                    if ui.selectable_value(&mut val, Some(*f), format!("Floor {}", f)).clicked() {
+                        state.current_floor = Some(*f);
+                    }
+                }
+            });
+    }
 
     ui.add_space(16.0);
     ui.heading("Export");

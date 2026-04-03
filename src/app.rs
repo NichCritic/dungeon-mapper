@@ -71,6 +71,7 @@ impl DungeonApp {
             r.id.hash(&mut h);
             r.grid_size().hash(&mut h);
             r.tags.len().hash(&mut h);
+            r.floor.hash(&mut h);
         }
         self.dungeon.graph.connections.len().hash(&mut h);
         for e in &self.dungeon.graph.connections {
@@ -106,6 +107,16 @@ impl DungeonApp {
             }
             Err(e) => eprintln!("Layout solver error: {}", e),
         }
+        // Clear cave cells so they regenerate with updated exits
+        for room in &mut self.dungeon.graph.rooms {
+            if room.shape == crate::model::RoomShape::Cave {
+                if let Some(cave) = &mut room.cave_data {
+                    cave.cells.clear();
+                }
+            }
+        }
+        self.generate_caves();
+        self.recompute_cave_contours();
         self.last_graph_snapshot = self.graph_hash();
     }
 
@@ -128,8 +139,101 @@ impl DungeonApp {
         } else {
             // No existing layout — do a full solve
             self.solve_layout_full();
+            return; // full solve already generates caves
         }
+        self.generate_caves();
+        self.recompute_cave_contours();
         self.last_graph_snapshot = self.graph_hash();
+    }
+
+    /// Generate cave cell data for any cave rooms that need it.
+    fn generate_caves(&mut self) {
+        let Some(layout) = &self.dungeon.layout else { return };
+
+        // First pass: initialize missing cave_data (mutable)
+        for room in &mut self.dungeon.graph.rooms {
+            if room.shape == crate::model::RoomShape::Cave && room.cave_data.is_none() {
+                room.cave_data = Some(crate::model::CaveData {
+                    cells: Vec::new(),
+                    seed: rand::random(),
+                    algorithm: crate::model::CaveAlgorithm::CellularAutomata,
+                    density: 0.45,
+                    smoothing_iterations: 4,
+                    generation: 0,
+                    contour_segments: Vec::new(),
+                });
+            }
+        }
+
+        // Second pass: collect tasks (immutable borrow)
+        struct CaveTask {
+            room_idx: usize,
+            w: u32,
+            h: u32,
+            algorithm: crate::model::CaveAlgorithm,
+            seed: u64,
+            density: f32,
+            smoothing_iterations: u32,
+            exits: Vec<(u32, u32)>,
+        }
+        let mut tasks: Vec<CaveTask> = Vec::new();
+        for (i, room) in self.dungeon.graph.rooms.iter().enumerate() {
+            if room.shape != crate::model::RoomShape::Cave {
+                continue;
+            }
+            let Some(cave) = &room.cave_data else { continue };
+            if !cave.cells.is_empty() {
+                continue;
+            }
+            let (w, h) = room.grid_size();
+            let exits = crate::solver::cave_gen::compute_exit_cells(
+                &room.id, layout, &self.dungeon.graph,
+            );
+            tasks.push(CaveTask {
+                room_idx: i, w, h,
+                algorithm: cave.algorithm,
+                seed: cave.seed,
+                density: cave.density,
+                smoothing_iterations: cave.smoothing_iterations,
+                exits,
+            });
+        }
+
+        // Third pass: generate and store (mutable)
+        for task in tasks {
+            let cells = crate::solver::cave_gen::generate_cave(
+                task.w, task.h, task.algorithm, task.seed,
+                task.density, task.smoothing_iterations, &task.exits,
+            );
+            if let Some(cave) = self.dungeon.graph.rooms[task.room_idx].cave_data.as_mut() {
+                cave.cells = cells;
+                cave.generation += 1;
+            }
+        }
+    }
+
+    /// Recompute marching squares contour segments for all cave rooms.
+    /// Must be called after cave generation or cell edits.
+    pub fn recompute_cave_contours(&mut self) {
+        let Some(layout) = &self.dungeon.layout else { return };
+        let floor = crate::render::themed::build_floor_set(layout, &self.dungeon.graph);
+
+        // Collect room indices and layouts for caves
+        let cave_rooms: Vec<(usize, crate::model::RoomLayout)> = self.dungeon.graph.rooms.iter()
+            .enumerate()
+            .filter(|(_, r)| r.shape == crate::model::RoomShape::Cave
+                && r.cave_data.as_ref().is_some_and(|c| !c.cells.is_empty()))
+            .filter_map(|(i, r)| {
+                layout.room_by_id(&r.id).map(|rl| (i, rl.clone()))
+            })
+            .collect();
+
+        for (idx, rl) in cave_rooms {
+            let room = &self.dungeon.graph.rooms[idx];
+            let cave = room.cave_data.as_ref().unwrap();
+            let segments = crate::solver::cave_gen::compute_contour_segments(&rl, cave, &floor);
+            self.dungeon.graph.rooms[idx].cave_data.as_mut().unwrap().contour_segments = segments;
+        }
     }
 
     /// Render a player-view PNG for the web server.
@@ -318,6 +422,22 @@ impl eframe::App for DungeonApp {
             self.spatial_state.recompute_requested = false;
             self.solve_layout_full();
             ctx.request_repaint();
+        }
+        // Recompute cave contours after cell edits
+        if self.spatial_state.cave_contours_dirty {
+            self.spatial_state.cave_contours_dirty = false;
+            self.recompute_cave_contours();
+        }
+        // Regenerate caves with empty cells (e.g. after sidebar Regenerate button)
+        if self.dungeon.layout.is_some() {
+            let needs_gen = self.dungeon.graph.rooms.iter().any(|r| {
+                r.shape == crate::model::RoomShape::Cave
+                    && r.cave_data.as_ref().is_some_and(|c| c.cells.is_empty())
+            });
+            if needs_gen {
+                self.generate_caves();
+                self.recompute_cave_contours();
+            }
         }
 
         // Auto-solve layout when graph topology changes or first entering spatial/styled

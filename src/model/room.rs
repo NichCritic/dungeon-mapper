@@ -1,5 +1,45 @@
 use serde::{Deserialize, Serialize};
 
+/// Which floor(s) a room belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum FloorAssignment {
+    /// Room exists on a single floor.
+    Single(i32),
+    /// Room spans two adjacent floors (a "half floor"), appearing on both.
+    Half(i32, i32),
+}
+
+impl Default for FloorAssignment {
+    fn default() -> Self {
+        FloorAssignment::Single(0)
+    }
+}
+
+impl FloorAssignment {
+    /// Returns true if this room should be visible on the given floor.
+    pub fn visible_on(&self, floor: i32) -> bool {
+        match self {
+            FloorAssignment::Single(f) => *f == floor,
+            FloorAssignment::Half(a, b) => *a == floor || *b == floor,
+        }
+    }
+
+    /// Returns all floors this room belongs to.
+    pub fn floors(&self) -> Vec<i32> {
+        match self {
+            FloorAssignment::Single(f) => vec![*f],
+            FloorAssignment::Half(a, b) => vec![*a, *b],
+        }
+    }
+
+    pub fn label(&self) -> String {
+        match self {
+            FloorAssignment::Single(f) => format!("Floor {}", f),
+            FloorAssignment::Half(a, b) => format!("Floor {}/{}", a, b),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Room {
     pub id: String,
@@ -22,6 +62,53 @@ pub struct Room {
     /// Decorative elements placed inside the room
     #[serde(default)]
     pub decor: Vec<RoomDecor>,
+    /// Cave generation data (only used when shape == Cave)
+    #[serde(default)]
+    pub cave_data: Option<CaveData>,
+    /// Which floor(s) this room belongs to
+    #[serde(default)]
+    pub floor: FloorAssignment,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub enum CaveAlgorithm {
+    #[default]
+    CellularAutomata,
+    DrunkardsWalk,
+}
+
+impl CaveAlgorithm {
+    pub const ALL: [CaveAlgorithm; 2] = [
+        CaveAlgorithm::CellularAutomata,
+        CaveAlgorithm::DrunkardsWalk,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            CaveAlgorithm::CellularAutomata => "Cellular Automata",
+            CaveAlgorithm::DrunkardsWalk => "Drunkard's Walk",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CaveData {
+    /// Per-cell floor mask. Index = y * width + x. true = floor, false = wall.
+    /// Empty vec means "needs generation".
+    pub cells: Vec<bool>,
+    pub seed: u64,
+    pub algorithm: CaveAlgorithm,
+    /// Initial fill density (0.0–1.0)
+    pub density: f32,
+    /// Smoothing iterations (cellular automata)
+    pub smoothing_iterations: u32,
+    /// Incremented on each edit/regeneration for cache invalidation
+    #[serde(default)]
+    pub generation: u32,
+    /// Precomputed marching squares contour segments in world pixel coords (x1, y1, x2, y2).
+    /// Computed from the global floor set so adjacent caves/corridors merge seamlessly.
+    #[serde(skip)]
+    pub contour_segments: Vec<(f32, f32, f32, f32)>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
@@ -94,15 +181,17 @@ pub enum RoomShape {
     #[default]
     Rectangle,
     Circle,
+    Cave,
 }
 
 impl RoomShape {
-    pub const ALL: [RoomShape; 2] = [RoomShape::Rectangle, RoomShape::Circle];
+    pub const ALL: [RoomShape; 3] = [RoomShape::Rectangle, RoomShape::Circle, RoomShape::Cave];
 
     pub fn label(self) -> &'static str {
         match self {
             RoomShape::Rectangle => "Rectangle",
             RoomShape::Circle => "Circle",
+            RoomShape::Cave => "Cave",
         }
     }
 }
@@ -195,6 +284,8 @@ impl Room {
             shape: RoomShape::default(),
             allow_rotation: false,
             decor: Vec::new(),
+            cave_data: None,
+            floor: FloorAssignment::default(),
         }
     }
 

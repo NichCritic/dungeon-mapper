@@ -11,11 +11,18 @@ struct GridRect {
     h: u32,
 }
 
+/// A placed rectangle with its floor assignment, used for floor-aware overlap checks.
+#[derive(Clone, Copy)]
+struct PlacedRect {
+    rect: GridRect,
+    floor: FloorAssignment,
+}
+
 /// Mutable state accumulated during placement.
 struct PlacementState {
     layout: SpatialLayout,
     placed: HashSet<String>,
-    placed_rects: Vec<GridRect>,
+    placed_rects: Vec<PlacedRect>,
     placed_rooms: Vec<(String, GridRect)>,
 }
 
@@ -29,7 +36,7 @@ impl PlacementState {
         }
     }
 
-    fn place_room(&mut self, room_id: &str, rect: GridRect) {
+    fn place_room(&mut self, room_id: &str, rect: GridRect, floor: FloorAssignment) {
         self.layout.rooms.push(RoomLayout {
             room_id: room_id.to_string(),
             x: rect.x,
@@ -39,7 +46,7 @@ impl PlacementState {
             violations: Vec::new(),
         });
         self.placed.insert(room_id.to_string());
-        self.placed_rects.push(rect);
+        self.placed_rects.push(PlacedRect { rect, floor });
         self.placed_rooms.push((room_id.to_string(), rect));
     }
 }
@@ -152,15 +159,15 @@ fn violates_length_constraints(
     false
 }
 
-fn try_place(rect: GridRect, room_id: &str, state: &PlacementState, ctx: &PlacementContext) -> bool {
-    !overlaps_any(rect, &state.placed_rects, ctx.gap)
+fn try_place(rect: GridRect, room_id: &str, floor: FloorAssignment, state: &PlacementState, ctx: &PlacementContext) -> bool {
+    !overlaps_any(rect, floor, &state.placed_rects, ctx.gap)
         && !violates_group_constraints(room_id, rect, ctx.groups, &state.placed_rooms)
         && !violates_length_constraints(room_id, rect, ctx.connections, &state.placed_rooms)
 }
 
 /// Try placement with only overlap checking (no constraint checks).
-fn try_place_unconstrained(rect: GridRect, placed_rects: &[GridRect], gap: u32) -> bool {
-    !overlaps_any(rect, placed_rects, gap)
+fn try_place_unconstrained(rect: GridRect, floor: FloorAssignment, placed_rects: &[PlacedRect], gap: u32) -> bool {
+    !overlaps_any(rect, floor, placed_rects, gap)
 }
 
 /// Collect violation descriptions for a room placement.
@@ -266,7 +273,7 @@ pub fn solve_layout(
     let (ew, eh) = entrance.grid_size();
     let entrance_graph_pos = graph_pos.get(&entrance.id).copied().unwrap_or((0.0, 0.0));
 
-    state.place_room(&entrance.id, GridRect { x: 0, y: 0, w: ew, h: eh });
+    state.place_room(&entrance.id, GridRect { x: 0, y: 0, w: ew, h: eh }, entrance.floor);
 
     let mut queue = VecDeque::new();
     if let Some(&start_idx) = node_map.get(&entrance.id) {
@@ -289,6 +296,7 @@ pub fn solve_layout(
                 }
 
                 let neighbor_room = graph.room_by_id(neighbor_id).unwrap();
+                let neighbor_floor = neighbor_room.floor;
                 let (nw, nh) = neighbor_room.grid_size();
 
                 let mut orientations = vec![(nw, nh)];
@@ -339,8 +347,8 @@ pub fn solve_layout(
                     if g == 0 {
                         for &(px, py) in &adjacent {
                             let rect = GridRect { x: px, y: py, w: tw, h: th };
-                            if try_place(rect, neighbor_id, &state, &ctx) {
-                                state.place_room(neighbor_id, rect);
+                            if try_place(rect, neighbor_id, neighbor_floor, &state, &ctx) {
+                                state.place_room(neighbor_id, rect, neighbor_floor);
                                 queue.push_back(neighbor_idx);
                                 did_place = true;
                                 break 'orient;
@@ -351,8 +359,8 @@ pub fn solve_layout(
                     // Then try spaced
                     for &(px, py) in &spaced {
                         let rect = GridRect { x: px, y: py, w: tw, h: th };
-                        if try_place(rect, neighbor_id, &state, &ctx) {
-                            state.place_room(neighbor_id, rect);
+                        if try_place(rect, neighbor_id, neighbor_floor, &state, &ctx) {
+                            state.place_room(neighbor_id, rect, neighbor_floor);
                             queue.push_back(neighbor_idx);
                             did_place = true;
                             break 'orient;
@@ -373,8 +381,8 @@ pub fn solve_layout(
                         sort_by_preference(&mut extra, pref_x, pref_y);
                         for &(px, py) in &extra {
                             let rect = GridRect { x: px, y: py, w: tw, h: th };
-                            if try_place(rect, neighbor_id, &state, &ctx) {
-                                state.place_room(neighbor_id, rect);
+                            if try_place(rect, neighbor_id, neighbor_floor, &state, &ctx) {
+                                state.place_room(neighbor_id, rect, neighbor_floor);
                                 queue.push_back(neighbor_idx);
                                 did_place = true;
                                 break 'outer;
@@ -394,9 +402,9 @@ pub fn solve_layout(
                     ];
                     for &(px, py) in &fallback_candidates {
                         let rect = GridRect { x: px, y: py, w: tw, h: th };
-                        if try_place_unconstrained(rect, &state.placed_rects, gap) {
+                        if try_place_unconstrained(rect, neighbor_floor, &state.placed_rects, gap) {
                             let v = collect_violations(neighbor_id, rect, &state, &ctx);
-                            state.place_room(neighbor_id, rect);
+                            state.place_room(neighbor_id, rect, neighbor_floor);
                             if let Some(room_layout) = state.layout.rooms.last_mut() {
                                 room_layout.violations = v;
                             }
@@ -424,8 +432,8 @@ pub fn solve_layout(
                     for sy in (-ring * step..=ring * step).step_by(step as usize) {
                         for sx in (-ring * step..=ring * step).step_by((nw + gap).max(1) as usize) {
                             let rect = GridRect { x: sx, y: sy, w: nw, h: nh };
-                            if try_place(rect, &room.id, &state, &ctx) {
-                                state.place_room(&room.id, rect);
+                            if try_place(rect, &room.id, room.floor, &state, &ctx) {
+                                state.place_room(&room.id, rect, room.floor);
                                 if let Some(&idx) = node_map.get(&room.id) {
                                     queue.push_back(idx);
                                 }
@@ -493,8 +501,16 @@ pub fn solve_incremental(
         let mut placed: HashSet<String> = layout.rooms.iter()
             .map(|rl| rl.room_id.clone())
             .collect();
-        let mut placed_rects: Vec<GridRect> = layout.rooms.iter()
-            .map(|rl| GridRect { x: rl.x, y: rl.y, w: rl.width, h: rl.height })
+        let mut placed_rects: Vec<PlacedRect> = layout.rooms.iter()
+            .map(|rl| {
+                let floor = graph.room_by_id(&rl.room_id)
+                    .map(|r| r.floor)
+                    .unwrap_or_default();
+                PlacedRect {
+                    rect: GridRect { x: rl.x, y: rl.y, w: rl.width, h: rl.height },
+                    floor,
+                }
+            })
             .collect();
         let placed_rooms: Vec<(String, GridRect)> = layout.rooms.iter()
             .map(|rl| (rl.room_id.clone(), GridRect { x: rl.x, y: rl.y, w: rl.width, h: rl.height }))
@@ -592,7 +608,7 @@ pub fn solve_incremental(
 
                 for &(px, py) in &candidates {
                     let rect = GridRect { x: px, y: py, w: tw, h: th };
-                    if try_place(rect, room_id, &temp_state, &ctx) {
+                    if try_place(rect, room_id, room.floor, &temp_state, &ctx) {
                         layout.rooms.push(RoomLayout {
                             room_id: room_id.clone(),
                             x: px,
@@ -602,7 +618,7 @@ pub fn solve_incremental(
                             violations: Vec::new(),
                         });
                         placed.insert(room_id.clone());
-                        placed_rects.push(rect);
+                        placed_rects.push(PlacedRect { rect, floor: room.floor });
                         did_place = true;
                         break 'orient;
                     }
@@ -622,7 +638,7 @@ pub fn solve_incremental(
                     sort_by_preference(&mut extra, pref_x, pref_y);
                     for &(px, py) in &extra {
                         let rect = GridRect { x: px, y: py, w: tw, h: th };
-                        if !overlaps_any(rect, &placed_rects, gap) {
+                        if !overlaps_any(rect, room.floor, &placed_rects, gap) {
                             layout.rooms.push(RoomLayout {
                                 room_id: room_id.clone(),
                                 x: px,
@@ -632,7 +648,7 @@ pub fn solve_incremental(
                                 violations: Vec::new(),
                             });
                             placed.insert(room_id.clone());
-                            placed_rects.push(rect);
+                            placed_rects.push(PlacedRect { rect, floor: room.floor });
                             did_place = true;
                             break 'far;
                         }
@@ -652,9 +668,16 @@ pub fn solve_incremental(
     Ok(layout)
 }
 
-fn overlaps_any(rect: GridRect, rects: &[GridRect], gap: u32) -> bool {
+/// Check if a rect overlaps any placed rect that shares at least one floor.
+fn overlaps_any(rect: GridRect, floor: FloorAssignment, placed: &[PlacedRect], gap: u32) -> bool {
     let g = gap as i32;
-    for r in rects {
+    let floors = floor.floors();
+    for pr in placed {
+        // Skip overlap check if rooms are on entirely different floors
+        if !pr.floor.floors().iter().any(|f| floors.contains(f)) {
+            continue;
+        }
+        let r = &pr.rect;
         if rect.x < r.x + r.w as i32 + g
             && rect.x + rect.w as i32 + g > r.x
             && rect.y < r.y + r.h as i32 + g
