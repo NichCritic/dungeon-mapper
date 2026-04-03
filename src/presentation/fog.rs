@@ -135,7 +135,7 @@ mod tests {
     #[test]
     fn test_cycle_room_visibility() {
         let graph = test_graph();
-        let dungeon = Dungeon { name: "test".into(), graph, layout: None, theme: Theme::default(), encounters: Vec::new(), custom_monsters: Vec::new() };
+        let dungeon = Dungeon { name: "test".into(), graph, layout: None, theme: Theme::default(), encounters: Vec::new(), custom_monsters: Vec::new(), party: Vec::new() };
         let mut state = PresentationState::new_from_dungeon(&dungeon);
         let room_id = &dungeon.graph.rooms[0].id;
 
@@ -151,7 +151,7 @@ mod tests {
     #[test]
     fn test_corridor_hidden_when_door_closed() {
         let graph = test_graph();
-        let dungeon = Dungeon { name: "test".into(), graph, layout: None, theme: Theme::default(), encounters: Vec::new(), custom_monsters: Vec::new() };
+        let dungeon = Dungeon { name: "test".into(), graph, layout: None, theme: Theme::default(), encounters: Vec::new(), custom_monsters: Vec::new(), party: Vec::new() };
         let mut state = PresentationState::new_from_dungeon(&dungeon);
         let conn_id = &dungeon.graph.connections[0].connection.id;
         let src_id = &dungeon.graph.connections[0].source_room_id;
@@ -168,7 +168,7 @@ mod tests {
     #[test]
     fn test_corridor_hidden_when_both_rooms_hidden() {
         let graph = test_graph();
-        let dungeon = Dungeon { name: "test".into(), graph, layout: None, theme: Theme::default(), encounters: Vec::new(), custom_monsters: Vec::new() };
+        let dungeon = Dungeon { name: "test".into(), graph, layout: None, theme: Theme::default(), encounters: Vec::new(), custom_monsters: Vec::new(), party: Vec::new() };
         let mut state = PresentationState::new_from_dungeon(&dungeon);
         let conn_id = &dungeon.graph.connections[0].connection.id;
 
@@ -180,7 +180,7 @@ mod tests {
     #[test]
     fn test_toggle_door() {
         let graph = test_graph();
-        let dungeon = Dungeon { name: "test".into(), graph, layout: None, theme: Theme::default(), encounters: Vec::new(), custom_monsters: Vec::new() };
+        let dungeon = Dungeon { name: "test".into(), graph, layout: None, theme: Theme::default(), encounters: Vec::new(), custom_monsters: Vec::new(), party: Vec::new() };
         let mut state = PresentationState::new_from_dungeon(&dungeon);
         let conn_id = &dungeon.graph.connections[0].connection.id;
 
@@ -194,7 +194,7 @@ mod tests {
     #[test]
     fn test_reveal_room_and_adjacent() {
         let graph = test_graph();
-        let dungeon = Dungeon { name: "test".into(), graph, layout: None, theme: Theme::default(), encounters: Vec::new(), custom_monsters: Vec::new() };
+        let dungeon = Dungeon { name: "test".into(), graph, layout: None, theme: Theme::default(), encounters: Vec::new(), custom_monsters: Vec::new(), party: Vec::new() };
         let mut state = PresentationState::new_from_dungeon(&dungeon);
         let room_b_id = &dungeon.graph.rooms[1].id;
 
@@ -208,5 +208,87 @@ mod tests {
         for edge in &dungeon.graph.connections {
             assert!(state.is_door_open(&edge.connection.id));
         }
+    }
+
+    #[test]
+    fn test_corridor_visibility_explored() {
+        let graph = test_graph();
+        let dungeon = Dungeon { name: "test".into(), graph, layout: None, theme: Theme::default(), encounters: Vec::new(), custom_monsters: Vec::new(), party: Vec::new() };
+        let mut state = PresentationState::new_from_dungeon(&dungeon);
+        let conn_id = &dungeon.graph.connections[0].connection.id;
+        let src_id = &dungeon.graph.connections[0].source_room_id;
+
+        // Set room to Explored (not Visible)
+        explore_room(src_id, &mut state);
+        open_door(conn_id, &mut state);
+
+        // Corridor should be Explored (best of the two endpoints, other is Hidden)
+        assert_eq!(corridor_visibility(conn_id, &state, &dungeon.graph), Visibility::Explored);
+    }
+
+    #[test]
+    fn test_corridor_visibility_explored_both_sides() {
+        let graph = test_graph();
+        let dungeon = Dungeon { name: "test".into(), graph, layout: None, theme: Theme::default(), encounters: Vec::new(), custom_monsters: Vec::new(), party: Vec::new() };
+        let mut state = PresentationState::new_from_dungeon(&dungeon);
+        let conn_id = &dungeon.graph.connections[0].connection.id;
+        let src_id = &dungeon.graph.connections[0].source_room_id;
+        let tgt_id = &dungeon.graph.connections[0].target_room_id;
+
+        explore_room(src_id, &mut state);
+        explore_room(tgt_id, &mut state);
+        open_door(conn_id, &mut state);
+
+        assert_eq!(corridor_visibility(conn_id, &state, &dungeon.graph), Visibility::Explored);
+    }
+
+    #[test]
+    fn test_open_room_doors() {
+        let graph = test_graph();
+        let dungeon = Dungeon { name: "test".into(), graph, layout: None, theme: Theme::default(), encounters: Vec::new(), custom_monsters: Vec::new(), party: Vec::new() };
+        let mut state = PresentationState::new_from_dungeon(&dungeon);
+        let room_b_id = &dungeon.graph.rooms[1].id;
+
+        // Room B has two connections (A-B and B-C)
+        open_room_doors(room_b_id, &mut state, &dungeon.graph);
+
+        for edge in &dungeon.graph.connections {
+            assert!(state.is_door_open(&edge.connection.id));
+        }
+    }
+
+    #[test]
+    fn test_close_room_doors() {
+        let graph = test_graph();
+        let dungeon = Dungeon { name: "test".into(), graph, layout: None, theme: Theme::default(), encounters: Vec::new(), custom_monsters: Vec::new(), party: Vec::new() };
+        let mut state = PresentationState::new_from_dungeon(&dungeon);
+        let room_b_id = &dungeon.graph.rooms[1].id;
+
+        // First open all, then close for room B
+        for edge in &dungeon.graph.connections {
+            open_door(&edge.connection.id, &mut state);
+        }
+        close_room_doors(room_b_id, &mut state, &dungeon.graph);
+
+        for edge in &dungeon.graph.connections {
+            assert!(!state.is_door_open(&edge.connection.id));
+        }
+    }
+
+    #[test]
+    fn test_reveal_room_and_adjacent_no_neighbors() {
+        // Single room with no connections
+        let mut graph = DungeonGraph::new();
+        let room = Room::new("Alone".to_string());
+        let room_id = room.id.clone();
+        graph.add_room(room);
+
+        let dungeon = Dungeon { name: "test".into(), graph, layout: None, theme: Theme::default(), encounters: Vec::new(), custom_monsters: Vec::new(), party: Vec::new() };
+        let mut state = PresentationState::new_from_dungeon(&dungeon);
+
+        reveal_room_and_adjacent(&room_id, &mut state, &dungeon.graph);
+
+        assert_eq!(*state.room_visibility(&room_id), Visibility::Visible);
+        assert!(state.doors_open.is_empty());
     }
 }

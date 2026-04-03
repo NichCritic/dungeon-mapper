@@ -1,3 +1,6 @@
+pub mod combat_log;
+pub mod combat_tracker;
+pub mod dice;
 pub mod fog;
 pub mod lighting;
 
@@ -35,6 +38,8 @@ pub struct PresentationState {
     /// Runtime positions of encounters: encounter_id -> current_room_id.
     /// Initialized from encounter home rooms, mutated by tick.
     pub encounter_positions: HashMap<String, String>,
+    /// Combat tracker, activated by the DM during a session.
+    pub combat_tracker: Option<combat_tracker::CombatTracker>,
 }
 
 impl PresentationState {
@@ -54,6 +59,7 @@ impl PresentationState {
             ambient_light: 0.0,
             show_labels_player: false,
             encounter_positions,
+            combat_tracker: None,
         }
     }
 
@@ -166,4 +172,150 @@ fn bfs_within_range(start_room_id: &str, max_dist: u32, graph: &DungeonGraph) ->
     }
 
     visited.into_keys().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::*;
+
+    fn make_dungeon_with_encounters() -> Dungeon {
+        let mut graph = DungeonGraph::new();
+        let r1 = Room::new("Room A".to_string());
+        let r2 = Room::new("Room B".to_string());
+        let id1 = r1.id.clone();
+        let id2 = r2.id.clone();
+        graph.add_room(r1);
+        graph.add_room(r2);
+        graph.add_connection(id1.clone(), id2.clone(), Connection::new(ConnectionType::Door));
+
+        let enc = Encounter::new("Goblins".to_string(), id1.clone());
+
+        Dungeon {
+            name: "test".to_string(),
+            graph,
+            layout: None,
+            theme: Theme::default(),
+            encounters: vec![enc],
+            custom_monsters: Vec::new(),
+            party: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn test_new_from_dungeon_all_hidden() {
+        let dungeon = make_dungeon_with_encounters();
+        let state = PresentationState::new_from_dungeon(&dungeon);
+
+        for room in &dungeon.graph.rooms {
+            assert_eq!(*state.room_visibility(&room.id), Visibility::Hidden);
+        }
+    }
+
+    #[test]
+    fn test_new_from_dungeon_encounter_positions() {
+        let dungeon = make_dungeon_with_encounters();
+        let state = PresentationState::new_from_dungeon(&dungeon);
+
+        let enc = &dungeon.encounters[0];
+        assert_eq!(
+            state.encounter_positions.get(&enc.id).unwrap(),
+            &enc.home_room_id
+        );
+    }
+
+    #[test]
+    fn test_encounter_room_from_positions() {
+        let dungeon = make_dungeon_with_encounters();
+        let mut state = PresentationState::new_from_dungeon(&dungeon);
+        let enc = &dungeon.encounters[0];
+        let room_b_id = dungeon.graph.rooms[1].id.clone();
+
+        // Move encounter to room B
+        state.encounter_positions.insert(enc.id.clone(), room_b_id.clone());
+        assert_eq!(state.encounter_room(enc), room_b_id);
+    }
+
+    #[test]
+    fn test_encounter_room_fallback() {
+        let dungeon = make_dungeon_with_encounters();
+        let mut state = PresentationState::new_from_dungeon(&dungeon);
+        let enc = &dungeon.encounters[0];
+
+        // Remove from positions to trigger fallback
+        state.encounter_positions.remove(&enc.id);
+        assert_eq!(state.encounter_room(enc), enc.home_room_id);
+    }
+
+    #[test]
+    fn test_encounter_ids_in_room_empty() {
+        let dungeon = make_dungeon_with_encounters();
+        let state = PresentationState::new_from_dungeon(&dungeon);
+        let room_b_id = &dungeon.graph.rooms[1].id;
+
+        // No encounters in room B
+        assert!(state.encounter_ids_in_room(room_b_id).is_empty());
+    }
+
+    #[test]
+    fn test_encounter_ids_in_room_found() {
+        let dungeon = make_dungeon_with_encounters();
+        let state = PresentationState::new_from_dungeon(&dungeon);
+        let room_a_id = &dungeon.graph.rooms[0].id;
+
+        let ids = state.encounter_ids_in_room(room_a_id);
+        assert_eq!(ids.len(), 1);
+        assert_eq!(ids[0], dungeon.encounters[0].id);
+    }
+
+    #[test]
+    fn test_bfs_within_range_single_room() {
+        let mut graph = DungeonGraph::new();
+        let r1 = Room::new("A".to_string());
+        let id1 = r1.id.clone();
+        graph.add_room(r1);
+
+        let reachable = bfs_within_range(&id1, 0, &graph);
+        assert_eq!(reachable.len(), 1);
+        assert!(reachable.contains(&id1));
+    }
+
+    #[test]
+    fn test_bfs_within_range_linear_chain() {
+        // Build a chain: A -- B -- C -- D -- E
+        let mut graph = DungeonGraph::new();
+        let rooms: Vec<Room> = (0..5).map(|i| Room::new(format!("Room {}", i))).collect();
+        let ids: Vec<String> = rooms.iter().map(|r| r.id.clone()).collect();
+        for room in rooms {
+            graph.add_room(room);
+        }
+        for i in 0..4 {
+            graph.add_connection(ids[i].clone(), ids[i + 1].clone(), Connection::new(ConnectionType::Open));
+        }
+
+        // From room A (index 0) with range 2, should reach A, B, C
+        let reachable = bfs_within_range(&ids[0], 2, &graph);
+        assert_eq!(reachable.len(), 3);
+        assert!(reachable.contains(&ids[0]));
+        assert!(reachable.contains(&ids[1]));
+        assert!(reachable.contains(&ids[2]));
+        assert!(!reachable.contains(&ids[3]));
+    }
+
+    #[test]
+    fn test_bfs_within_range_disconnected() {
+        let mut graph = DungeonGraph::new();
+        let r1 = Room::new("A".to_string());
+        let r2 = Room::new("B".to_string());
+        let id1 = r1.id.clone();
+        let id2 = r2.id.clone();
+        graph.add_room(r1);
+        graph.add_room(r2);
+        // No connections
+
+        let reachable = bfs_within_range(&id1, 5, &graph);
+        assert_eq!(reachable.len(), 1);
+        assert!(reachable.contains(&id1));
+        assert!(!reachable.contains(&id2));
+    }
 }

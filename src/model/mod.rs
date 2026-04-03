@@ -1,8 +1,10 @@
 pub mod room;
+pub mod combat_stats;
 pub mod connection;
 pub mod encounter;
 pub mod graph;
 pub mod monster;
+pub mod party;
 pub mod spatial;
 pub mod theme;
 pub mod dungeon;
@@ -12,6 +14,7 @@ pub use connection::*;
 pub use encounter::*;
 pub use graph::*;
 pub use monster::*;
+pub use party::*;
 pub use spatial::*;
 pub use theme::*;
 pub use dungeon::*;

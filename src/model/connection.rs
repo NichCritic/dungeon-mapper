@@ -70,3 +70,47 @@ impl Connection {
         if self.double_door { 2 } else { 1 }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_connection_new() {
+        let conn = Connection::new(ConnectionType::Door);
+        assert_eq!(conn.id.len(), 36); // UUID
+        assert_eq!(conn.connection_type, ConnectionType::Door);
+        assert_eq!(conn.label, None);
+        assert_eq!(conn.corridor_width, 2);
+        assert!(!conn.double_door);
+        assert_eq!(conn.min_length, None);
+        assert_eq!(conn.max_length, None);
+    }
+
+    #[test]
+    fn test_connection_door_width_single() {
+        let conn = Connection::new(ConnectionType::Door);
+        assert_eq!(conn.door_width(), 1);
+    }
+
+    #[test]
+    fn test_connection_door_width_double() {
+        let mut conn = Connection::new(ConnectionType::Door);
+        conn.double_door = true;
+        assert_eq!(conn.door_width(), 2);
+    }
+
+    #[test]
+    fn test_connection_type_label() {
+        assert_eq!(ConnectionType::Open.label(), "Open");
+        assert_eq!(ConnectionType::Door.label(), "Door");
+        assert_eq!(ConnectionType::Locked.label(), "Locked");
+        assert_eq!(ConnectionType::Secret.label(), "Secret");
+        assert_eq!(ConnectionType::OneWay.label(), "One-Way");
+    }
+
+    #[test]
+    fn test_connection_type_all() {
+        assert_eq!(ConnectionType::ALL.len(), 5);
+    }
+}

@@ -1002,3 +1002,498 @@ pub fn merge_monsters(a: &Monster, b: &Monster, config: &MergeConfig) -> Monster
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    /// Helper to create a Monster with sensible defaults for testing.
+    fn test_monster(name: &str) -> Monster {
+        Monster {
+            name: name.to_string(),
+            source: "TEST".to_string(),
+            page: None,
+            size: vec!["M".to_string()],
+            monster_type: MonsterType::Simple("beast".to_string()),
+            alignment: Vec::new(),
+            str_score: 10,
+            dex_score: 10,
+            con_score: 10,
+            int_score: 10,
+            wis_score: 10,
+            cha_score: 10,
+            ac: vec![ArmorClass::Simple(10)],
+            hp: HitPoints::Formula { average: 10, formula: "2d8+2".to_string() },
+            speed: Speed {
+                walk: SpeedValue::Simple(30),
+                fly: SpeedValue::None,
+                swim: SpeedValue::None,
+                climb: SpeedValue::None,
+                burrow: SpeedValue::None,
+                can_hover: false,
+            },
+            cr: ChallengeRating::Simple("1".to_string()),
+            save: HashMap::new(),
+            skill: HashMap::new(),
+            senses: Vec::new(),
+            passive: Some(10),
+            languages: vec!["Common".to_string()],
+            immune: Vec::new(),
+            resist: Vec::new(),
+            vulnerable: Vec::new(),
+            condition_immune: Vec::new(),
+            traits: Vec::new(),
+            action: vec![Feature { name: "Bite".to_string(), entries: vec![serde_json::Value::String("bite attack".to_string())] }],
+            reaction: Vec::new(),
+            legendary: Vec::new(),
+            mythic: Vec::new(),
+            spellcasting: Vec::new(),
+            environment: Vec::new(),
+        }
+    }
+
+    // --- strip_5e_markup tests ---
+
+    #[test]
+    fn test_strip_5e_markup_empty() {
+        assert_eq!(strip_5e_markup(""), "");
+    }
+
+    #[test]
+    fn test_strip_5e_markup_plain_text() {
+        assert_eq!(strip_5e_markup("Hello world"), "Hello world");
+    }
+
+    #[test]
+    fn test_strip_5e_markup_hit() {
+        assert_eq!(strip_5e_markup("{@hit 4}"), "+4");
+    }
+
+    #[test]
+    fn test_strip_5e_markup_dc() {
+        assert_eq!(strip_5e_markup("{@dc 15}"), "DC 15");
+    }
+
+    #[test]
+    fn test_strip_5e_markup_damage() {
+        assert_eq!(strip_5e_markup("{@damage 1d6 + 2}"), "1d6 + 2");
+    }
+
+    #[test]
+    fn test_strip_5e_markup_atk() {
+        assert_eq!(strip_5e_markup("{@atk mw}"), "");
+    }
+
+    #[test]
+    fn test_strip_5e_markup_h() {
+        assert_eq!(strip_5e_markup("{@h}"), "");
+    }
+
+    #[test]
+    fn test_strip_5e_markup_recharge() {
+        assert_eq!(strip_5e_markup("{@recharge 5}"), "(Recharge 5)");
+    }
+
+    #[test]
+    fn test_strip_5e_markup_condition() {
+        assert_eq!(strip_5e_markup("{@condition prone}"), "prone");
+    }
+
+    #[test]
+    fn test_strip_5e_markup_creature_with_pipe() {
+        assert_eq!(strip_5e_markup("{@creature adult red dragon|mm}"), "adult red dragon");
+    }
+
+    #[test]
+    fn test_strip_5e_markup_nested_braces() {
+        // Nested braces: the outer tag should consume the inner ones
+        let input = "{@damage 1d6}";
+        assert_eq!(strip_5e_markup(input), "1d6");
+    }
+
+    #[test]
+    fn test_strip_5e_markup_multiple_tags() {
+        let input = "{@atk mw} {@hit 4} to hit, {@damage 1d6 + 2} damage. DC {@dc 15}.";
+        assert_eq!(strip_5e_markup(input), " +4 to hit, 1d6 + 2 damage. DC DC 15.");
+    }
+
+    // --- cr_to_numeric tests ---
+
+    #[test]
+    fn test_cr_to_numeric() {
+        assert_eq!(cr_to_numeric("0"), 0.0);
+        assert_eq!(cr_to_numeric("1/8"), 0.125);
+        assert_eq!(cr_to_numeric("1/4"), 0.25);
+        assert_eq!(cr_to_numeric("1/2"), 0.5);
+        assert_eq!(cr_to_numeric("5"), 5.0);
+        assert_eq!(cr_to_numeric("30"), 30.0);
+        assert_eq!(cr_to_numeric("invalid"), 0.0);
+    }
+
+    // --- cr_to_xp tests ---
+
+    #[test]
+    fn test_cr_to_xp() {
+        assert_eq!(cr_to_xp("0"), 10);
+        assert_eq!(cr_to_xp("1/4"), 50);
+        assert_eq!(cr_to_xp("1"), 200);
+        assert_eq!(cr_to_xp("5"), 1800);
+        assert_eq!(cr_to_xp("20"), 25000);
+        assert_eq!(cr_to_xp("30"), 155000);
+        assert_eq!(cr_to_xp("invalid"), 0);
+    }
+
+    // --- size_label tests ---
+
+    #[test]
+    fn test_size_label() {
+        assert_eq!(size_label("T"), "Tiny");
+        assert_eq!(size_label("S"), "Small");
+        assert_eq!(size_label("M"), "Medium");
+        assert_eq!(size_label("L"), "Large");
+        assert_eq!(size_label("H"), "Huge");
+        assert_eq!(size_label("G"), "Gargantuan");
+        assert_eq!(size_label("X"), "X");
+    }
+
+    // --- alignment_display tests ---
+
+    #[test]
+    fn test_alignment_display_empty() {
+        assert_eq!(alignment_display(&[]), "unaligned");
+    }
+
+    #[test]
+    fn test_alignment_display_lawful_good() {
+        let align = vec![
+            serde_json::Value::String("L".to_string()),
+            serde_json::Value::String("G".to_string()),
+        ];
+        assert_eq!(alignment_display(&align), "lawful good");
+    }
+
+    #[test]
+    fn test_alignment_display_neutral() {
+        let align = vec![serde_json::Value::String("N".to_string())];
+        assert_eq!(alignment_display(&align), "neutral");
+    }
+
+    #[test]
+    fn test_alignment_display_unaligned() {
+        let align = vec![serde_json::Value::String("U".to_string())];
+        assert_eq!(alignment_display(&align), "unaligned");
+    }
+
+    #[test]
+    fn test_alignment_display_any() {
+        let align = vec![serde_json::Value::String("A".to_string())];
+        assert_eq!(alignment_display(&align), "any alignment");
+    }
+
+    // --- Monster::modifier tests ---
+
+    #[test]
+    fn test_modifier() {
+        assert_eq!(Monster::modifier(10), 0);
+        assert_eq!(Monster::modifier(8), -1);
+        assert_eq!(Monster::modifier(12), 1);
+        assert_eq!(Monster::modifier(1), -4);
+        assert_eq!(Monster::modifier(20), 5);
+        assert_eq!(Monster::modifier(30), 10);
+    }
+
+    // --- Monster::modifier_str tests ---
+
+    #[test]
+    fn test_modifier_str() {
+        assert_eq!(Monster::modifier_str(10), "+0");
+        assert_eq!(Monster::modifier_str(8), "-1");
+        assert_eq!(Monster::modifier_str(12), "+1");
+    }
+
+    // --- MonsterType::display tests ---
+
+    #[test]
+    fn test_monster_type_display_simple() {
+        let t = MonsterType::Simple("beast".to_string());
+        assert_eq!(t.display(), "beast");
+    }
+
+    #[test]
+    fn test_monster_type_display_detailed_no_swarm() {
+        let t = MonsterType::Detailed {
+            type_name: "humanoid".to_string(),
+            tags: Vec::new(),
+            swarm_size: None,
+        };
+        assert_eq!(t.display(), "humanoid");
+    }
+
+    #[test]
+    fn test_monster_type_display_detailed_swarm() {
+        let t = MonsterType::Detailed {
+            type_name: "humanoid".to_string(),
+            tags: Vec::new(),
+            swarm_size: Some("T".to_string()),
+        };
+        assert_eq!(t.display(), "swarm of Tiny humanoids");
+    }
+
+    // --- ArmorClass tests ---
+
+    #[test]
+    fn test_armor_class_value() {
+        assert_eq!(ArmorClass::Simple(15).value(), Some(15));
+        assert_eq!(
+            ArmorClass::Detailed { ac: 18, from: vec!["natural armor".to_string()], condition: None }.value(),
+            Some(18)
+        );
+        assert_eq!(
+            ArmorClass::Special { special: "varies".to_string() }.value(),
+            None
+        );
+    }
+
+    #[test]
+    fn test_armor_class_display() {
+        assert_eq!(ArmorClass::Simple(15).display(), "15");
+        assert_eq!(
+            ArmorClass::Detailed { ac: 18, from: vec!["natural armor".to_string()], condition: None }.display(),
+            "18 (natural armor)"
+        );
+        assert_eq!(
+            ArmorClass::Special { special: "varies".to_string() }.display(),
+            "varies"
+        );
+    }
+
+    // --- HitPoints tests ---
+
+    #[test]
+    fn test_hit_points_display() {
+        assert_eq!(HitPoints::Unknown.display(), "\u{2014}");
+        assert_eq!(
+            HitPoints::Formula { average: 13, formula: "3d8".to_string() }.display(),
+            "13 (3d8)"
+        );
+        assert_eq!(
+            HitPoints::Special { special: "x".to_string() }.display(),
+            "x"
+        );
+    }
+
+    // --- Speed tests ---
+
+    #[test]
+    fn test_speed_display_walk_only() {
+        let speed = Speed {
+            walk: SpeedValue::Simple(30),
+            ..Speed::default()
+        };
+        assert_eq!(speed.display(), "30 ft.");
+    }
+
+    #[test]
+    fn test_speed_display_walk_and_fly() {
+        let speed = Speed {
+            walk: SpeedValue::Simple(30),
+            fly: SpeedValue::Simple(60),
+            ..Speed::default()
+        };
+        assert_eq!(speed.display(), "30 ft., fly 60 ft.");
+    }
+
+    #[test]
+    fn test_speed_display_walk_and_fly_hover() {
+        let speed = Speed {
+            walk: SpeedValue::Simple(30),
+            fly: SpeedValue::Simple(90),
+            can_hover: true,
+            ..Speed::default()
+        };
+        assert_eq!(speed.display(), "30 ft., fly 90 ft. (hover)");
+    }
+
+    #[test]
+    fn test_speed_display_no_speeds() {
+        let speed = Speed::default();
+        assert_eq!(speed.display(), "0 ft.");
+    }
+
+    // --- SpeedValue tests ---
+
+    #[test]
+    fn test_speed_value() {
+        assert_eq!(SpeedValue::None.value(), None);
+        assert_eq!(SpeedValue::Simple(30).value(), Some(30));
+        assert_eq!(SpeedValue::Detailed { number: 90, condition: None }.value(), Some(90));
+    }
+
+    // --- ChallengeRating tests ---
+
+    #[test]
+    fn test_cr_string() {
+        assert_eq!(ChallengeRating::Simple("5".to_string()).cr_string(), "5");
+        assert_eq!(
+            ChallengeRating::Detailed { cr: "10".to_string(), lair: None, coven: None }.cr_string(),
+            "10"
+        );
+    }
+
+    // --- Feature tests ---
+
+    #[test]
+    fn test_feature_entries_text_single_string() {
+        let f = Feature {
+            name: "Test".to_string(),
+            entries: vec![serde_json::Value::String("Hello world".to_string())],
+        };
+        assert_eq!(f.entries_text(), "Hello world");
+    }
+
+    #[test]
+    fn test_feature_entries_text_with_markup() {
+        let f = Feature {
+            name: "Test".to_string(),
+            entries: vec![serde_json::Value::String("{@hit 4} to hit".to_string())],
+        };
+        assert_eq!(f.entries_text(), "+4 to hit");
+    }
+
+    #[test]
+    fn test_feature_entries_text_multiple() {
+        let f = Feature {
+            name: "Test".to_string(),
+            entries: vec![
+                serde_json::Value::String("Line 1".to_string()),
+                serde_json::Value::String("Line 2".to_string()),
+            ],
+        };
+        assert_eq!(f.entries_text(), "Line 1\nLine 2");
+    }
+
+    // --- merge_monsters tests ---
+
+    #[test]
+    fn test_merge_monsters_default_config() {
+        let a = test_monster("Alpha");
+        let mut b = test_monster("Beta");
+        b.str_score = 20;
+        b.dex_score = 8;
+        b.action = vec![Feature { name: "Claw".to_string(), entries: vec![serde_json::Value::String("claw attack".to_string())] }];
+
+        let config = MergeConfig::default();
+        let merged = merge_monsters(&a, &b, &config);
+
+        // Default string is TakeA for name
+        assert_eq!(merged.name, "Alpha");
+        // Default numeric is Max
+        assert_eq!(merged.str_score, 20); // max(10, 20)
+        assert_eq!(merged.dex_score, 10); // max(10, 8)
+        // Default list is ConcatA
+        assert_eq!(merged.action.len(), 2); // A's Bite + B's Claw
+        assert_eq!(merged.action[0].name, "Bite");
+        assert_eq!(merged.action[1].name, "Claw");
+    }
+
+    #[test]
+    fn test_merge_monsters_take_b_all() {
+        let a = test_monster("Alpha");
+        let mut b = test_monster("Beta");
+        b.str_score = 20;
+
+        let mut overrides = HashMap::new();
+        overrides.insert("name".to_string(), MergeStrategy::TakeB);
+        overrides.insert("str_score".to_string(), MergeStrategy::TakeB);
+        overrides.insert("action".to_string(), MergeStrategy::TakeB);
+
+        let config = MergeConfig {
+            default_numeric: MergeStrategy::TakeB,
+            default_list: MergeStrategy::TakeB,
+            default_string: MergeStrategy::TakeB,
+            overrides,
+        };
+        let merged = merge_monsters(&a, &b, &config);
+
+        assert_eq!(merged.name, "Beta");
+        assert_eq!(merged.str_score, 20);
+    }
+
+    #[test]
+    fn test_merge_monsters_exclude() {
+        let a = test_monster("Alpha");
+        let b = test_monster("Beta");
+
+        let mut overrides = HashMap::new();
+        overrides.insert("action".to_string(), MergeStrategy::Exclude);
+
+        let config = MergeConfig {
+            overrides,
+            ..MergeConfig::default()
+        };
+        let merged = merge_monsters(&a, &b, &config);
+
+        assert!(merged.action.is_empty());
+    }
+
+    #[test]
+    fn test_merge_monsters_min_ability_scores() {
+        let a = test_monster("Alpha");
+        let mut b = test_monster("Beta");
+        b.str_score = 20;
+        b.dex_score = 5;
+
+        let config = MergeConfig {
+            default_numeric: MergeStrategy::Min,
+            ..MergeConfig::default()
+        };
+        let merged = merge_monsters(&a, &b, &config);
+
+        assert_eq!(merged.str_score, 10); // min(10, 20)
+        assert_eq!(merged.dex_score, 5);  // min(10, 5)
+    }
+
+    #[test]
+    fn test_merge_monsters_concat_b_actions() {
+        let a = test_monster("Alpha");
+        let mut b = test_monster("Beta");
+        b.action = vec![Feature { name: "Claw".to_string(), entries: vec![serde_json::Value::String("claw".to_string())] }];
+
+        let mut overrides = HashMap::new();
+        overrides.insert("action".to_string(), MergeStrategy::ConcatB);
+
+        let config = MergeConfig {
+            overrides,
+            ..MergeConfig::default()
+        };
+        let merged = merge_monsters(&a, &b, &config);
+
+        assert_eq!(merged.action.len(), 2);
+        assert_eq!(merged.action[0].name, "Claw"); // B first
+        assert_eq!(merged.action[1].name, "Bite");  // A second
+    }
+
+    // --- MergeConfig::strategy_for tests ---
+
+    #[test]
+    fn test_merge_config_strategy_for_override() {
+        let mut overrides = HashMap::new();
+        overrides.insert("str_score".to_string(), MergeStrategy::Min);
+
+        let config = MergeConfig {
+            overrides,
+            ..MergeConfig::default()
+        };
+
+        assert_eq!(*config.strategy_for("str_score", "numeric"), MergeStrategy::Min);
+    }
+
+    #[test]
+    fn test_merge_config_strategy_for_default() {
+        let config = MergeConfig::default();
+        assert_eq!(*config.strategy_for("str_score", "numeric"), MergeStrategy::Max);
+        assert_eq!(*config.strategy_for("action", "list"), MergeStrategy::ConcatA);
+        assert_eq!(*config.strategy_for("name", "string"), MergeStrategy::TakeA);
+    }
+}
+

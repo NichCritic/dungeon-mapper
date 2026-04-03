@@ -166,3 +166,103 @@ impl Default for DungeonGraph {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{Connection, ConnectionType, Room};
+
+    #[test]
+    fn test_dungeon_graph_new() {
+        let graph = DungeonGraph::new();
+        assert!(graph.rooms.is_empty());
+        assert!(graph.connections.is_empty());
+        assert!(graph.groups.is_empty());
+        assert!(graph.graph_positions.is_empty());
+    }
+
+    #[test]
+    fn test_add_room_and_find() {
+        let mut graph = DungeonGraph::new();
+        let room = Room::new("Room A".to_string());
+        let id = room.id.clone();
+        graph.add_room(room);
+
+        assert_eq!(graph.rooms.len(), 1);
+        let found = graph.room_by_id(&id);
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().label, "Room A");
+    }
+
+    #[test]
+    fn test_remove_room() {
+        let mut graph = DungeonGraph::new();
+        let r1 = Room::new("Room A".to_string());
+        let r2 = Room::new("Room B".to_string());
+        let id1 = r1.id.clone();
+        let id2 = r2.id.clone();
+        graph.add_room(r1);
+        graph.add_room(r2);
+        graph.add_connection(id1.clone(), id2.clone(), Connection::new(ConnectionType::Door));
+
+        assert_eq!(graph.rooms.len(), 2);
+        assert_eq!(graph.connections.len(), 1);
+
+        graph.remove_room(&id1);
+
+        assert_eq!(graph.rooms.len(), 1);
+        assert!(graph.room_by_id(&id1).is_none());
+        // Connection should also be removed
+        assert!(graph.connections.is_empty());
+    }
+
+    #[test]
+    fn test_add_and_remove_connection() {
+        let mut graph = DungeonGraph::new();
+        let r1 = Room::new("A".to_string());
+        let r2 = Room::new("B".to_string());
+        let id1 = r1.id.clone();
+        let id2 = r2.id.clone();
+        graph.add_room(r1);
+        graph.add_room(r2);
+        graph.add_connection(id1, id2, Connection::new(ConnectionType::Open));
+
+        assert_eq!(graph.connections.len(), 1);
+        let conn_id = graph.connections[0].connection.id.clone();
+
+        graph.remove_connection(&conn_id);
+        assert!(graph.connections.is_empty());
+    }
+
+    #[test]
+    fn test_build_petgraph_empty() {
+        let graph = DungeonGraph::new();
+        let (pg, node_map) = graph.build_petgraph();
+        assert_eq!(pg.node_count(), 0);
+        assert_eq!(pg.edge_count(), 0);
+        assert!(node_map.is_empty());
+    }
+
+    #[test]
+    fn test_build_petgraph_three_rooms() {
+        let mut graph = DungeonGraph::new();
+        let r1 = Room::new("A".to_string());
+        let r2 = Room::new("B".to_string());
+        let r3 = Room::new("C".to_string());
+        let id1 = r1.id.clone();
+        let id2 = r2.id.clone();
+        let id3 = r3.id.clone();
+        graph.add_room(r1);
+        graph.add_room(r2);
+        graph.add_room(r3);
+        graph.add_connection(id1.clone(), id2.clone(), Connection::new(ConnectionType::Door));
+        graph.add_connection(id2.clone(), id3.clone(), Connection::new(ConnectionType::Open));
+
+        let (pg, node_map) = graph.build_petgraph();
+        assert_eq!(pg.node_count(), 3);
+        assert_eq!(pg.edge_count(), 2);
+        assert!(node_map.contains_key(&id1));
+        assert!(node_map.contains_key(&id2));
+        assert!(node_map.contains_key(&id3));
+    }
+}

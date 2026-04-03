@@ -34,5 +34,27 @@ impl Encounter {
             notes: String::new(),
         }
     }
+}
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_encounter_new() {
+        let enc = Encounter::new("Goblin Ambush".to_string(), "room-123".to_string());
+        assert_eq!(enc.id.len(), 36); // UUID
+        assert_eq!(enc.name, "Goblin Ambush");
+        assert_eq!(enc.home_room_id, "room-123");
+        assert_eq!(enc.encounter_type, EncounterType::Static);
+        assert!(enc.monsters.is_empty());
+        assert!(enc.notes.is_empty());
+    }
+
+    #[test]
+    fn test_encounter_type_equality() {
+        assert_eq!(EncounterType::Static, EncounterType::Static);
+        assert_eq!(EncounterType::Wandering(3), EncounterType::Wandering(3));
+        assert_ne!(EncounterType::Static, EncounterType::Wandering(1));
+    }
 }

@@ -581,6 +581,165 @@ mod tests {
         assert_eq!(amonkhet.cr.cr_string(), base.cr.cr_string());
     }
 
+    fn make_test_monster(name: &str, source: &str, cr: &str, size: &str, mtype: &str) -> Monster {
+        use crate::model::monster::*;
+        use std::collections::HashMap;
+        Monster {
+            name: name.to_string(),
+            source: source.to_string(),
+            page: None,
+            size: vec![size.to_string()],
+            monster_type: MonsterType::Simple(mtype.to_string()),
+            alignment: Vec::new(),
+            str_score: 10,
+            dex_score: 10,
+            con_score: 10,
+            int_score: 10,
+            wis_score: 10,
+            cha_score: 10,
+            ac: vec![ArmorClass::Simple(10)],
+            hp: HitPoints::default(),
+            speed: Speed::default(),
+            cr: ChallengeRating::Simple(cr.to_string()),
+            save: HashMap::new(),
+            skill: HashMap::new(),
+            senses: Vec::new(),
+            passive: None,
+            languages: Vec::new(),
+            immune: Vec::new(),
+            resist: Vec::new(),
+            vulnerable: Vec::new(),
+            condition_immune: Vec::new(),
+            traits: Vec::new(),
+            action: Vec::new(),
+            reaction: Vec::new(),
+            legendary: Vec::new(),
+            mythic: Vec::new(),
+            spellcasting: Vec::new(),
+            environment: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn test_empty_database() {
+        let db = MonsterDatabase::empty();
+        assert_eq!(db.len(), 0);
+        assert!(db.is_empty());
+        assert!(db.find("MM", "Anything").is_none());
+    }
+
+    #[test]
+    fn test_monster_filter_name_case_insensitive() {
+        let m = make_test_monster("Ancient Red Dragon", "MM", "24", "H", "dragon");
+        let filter = MonsterFilter {
+            name_query: "ancient red".to_string(),
+            ..MonsterFilter::default()
+        };
+        assert!(filter.matches(&m));
+
+        let filter_upper = MonsterFilter {
+            name_query: "ANCIENT RED".to_string(),
+            ..MonsterFilter::default()
+        };
+        assert!(filter_upper.matches(&m));
+    }
+
+    #[test]
+    fn test_monster_filter_cr_range() {
+        let m = make_test_monster("Goblin", "MM", "1/4", "S", "humanoid");
+        let filter = MonsterFilter {
+            cr_min: Some(0.0),
+            cr_max: Some(0.5),
+            ..MonsterFilter::default()
+        };
+        assert!(filter.matches(&m)); // 1/4 = 0.25, within range
+
+        let filter_high = MonsterFilter {
+            cr_min: Some(1.0),
+            ..MonsterFilter::default()
+        };
+        assert!(!filter_high.matches(&m));
+    }
+
+    #[test]
+    fn test_monster_filter_size() {
+        let m = make_test_monster("Goblin", "MM", "1/4", "S", "humanoid");
+        let filter = MonsterFilter {
+            size: Some("S".to_string()),
+            ..MonsterFilter::default()
+        };
+        assert!(filter.matches(&m));
+
+        let filter_wrong = MonsterFilter {
+            size: Some("L".to_string()),
+            ..MonsterFilter::default()
+        };
+        assert!(!filter_wrong.matches(&m));
+    }
+
+    #[test]
+    fn test_monster_filter_type() {
+        let m = make_test_monster("Goblin", "MM", "1/4", "S", "humanoid");
+        let filter = MonsterFilter {
+            monster_type: Some("humanoid".to_string()),
+            ..MonsterFilter::default()
+        };
+        assert!(filter.matches(&m));
+
+        let filter_wrong = MonsterFilter {
+            monster_type: Some("dragon".to_string()),
+            ..MonsterFilter::default()
+        };
+        assert!(!filter_wrong.matches(&m));
+    }
+
+    #[test]
+    fn test_monster_filter_source() {
+        let m = make_test_monster("Goblin", "MM", "1/4", "S", "humanoid");
+        let filter = MonsterFilter {
+            source: Some("MM".to_string()),
+            ..MonsterFilter::default()
+        };
+        assert!(filter.matches(&m));
+
+        let filter_wrong = MonsterFilter {
+            source: Some("VGM".to_string()),
+            ..MonsterFilter::default()
+        };
+        assert!(!filter_wrong.matches(&m));
+    }
+
+    #[test]
+    fn test_monster_filter_combined() {
+        let m = make_test_monster("Goblin", "MM", "1/4", "S", "humanoid");
+        let filter = MonsterFilter {
+            name_query: "goblin".to_string(),
+            cr_max: Some(1.0),
+            size: Some("S".to_string()),
+            source: Some("MM".to_string()),
+            ..MonsterFilter::default()
+        };
+        assert!(filter.matches(&m));
+    }
+
+    #[test]
+    fn test_monster_filter_is_active() {
+        let default_filter = MonsterFilter::default();
+        assert!(!default_filter.is_active());
+
+        let name_filter = MonsterFilter {
+            name_query: "dragon".to_string(),
+            ..MonsterFilter::default()
+        };
+        assert!(name_filter.is_active());
+
+        let cr_filter = MonsterFilter {
+            cr_min: Some(1.0),
+            ..MonsterFilter::default()
+        };
+        assert!(cr_filter.is_active());
+    }
+
     #[test]
     fn test_copy_with_replace_txt() {
         let dir = std::path::Path::new("5etools-src/data/bestiary");

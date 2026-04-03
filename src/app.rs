@@ -1,4 +1,5 @@
 use crate::data::MonsterDatabase;
+use crate::model::combat_stats::CombatStatsCache;
 use crate::model::Dungeon;
 use crate::presentation::PresentationState;
 use crate::server::PresentationServer;
@@ -28,6 +29,8 @@ pub struct DungeonApp {
     last_graph_snapshot: u64,
     /// Monster stats database loaded from 5e-Tools data files.
     pub monster_db: MonsterDatabase,
+    /// Lazy cache for parsed combat stats.
+    pub combat_stats_cache: CombatStatsCache,
 
     // Presentation mode
     pub presenting: bool,
@@ -66,6 +69,7 @@ impl Default for DungeonApp {
             styled_state: StyledViewState::default(),
             last_graph_snapshot: 0,
             monster_db,
+            combat_stats_cache: CombatStatsCache::new(),
 
             presenting: false,
             presentation: None,
@@ -506,6 +510,32 @@ impl eframe::App for DungeonApp {
             });
         });
 
+        // Combat log panel (bottom, only during presentation with active combat)
+        if self.presenting {
+            if let Some(presentation) = &self.presentation {
+                if let Some(tracker) = &presentation.combat_tracker {
+                    if !tracker.log.entries.is_empty() {
+                        egui::TopBottomPanel::bottom("combat_log_panel")
+                            .resizable(true)
+                            .default_height(120.0)
+                            .min_height(60.0)
+                            .show(ctx, |ui| {
+                                ui.heading("Combat Log");
+                                egui::ScrollArea::vertical()
+                                    .stick_to_bottom(true)
+                                    .auto_shrink([false, false])
+                                    .show(ui, |ui| {
+                                        for entry in &tracker.log.entries {
+                                            let color = egui::Color32::from_rgb(entry.color[0], entry.color[1], entry.color[2]);
+                                            ui.label(egui::RichText::new(&entry.text).color(color).monospace().size(11.0));
+                                        }
+                                    });
+                            });
+                    }
+                }
+            }
+        }
+
         // Right sidebar
         egui::SidePanel::right("properties")
             .default_width(250.0)
@@ -522,6 +552,8 @@ impl eframe::App for DungeonApp {
                                 &mut self.player_view_state,
                                 &mut self.player_viewport_open,
                                 &mut server_action,
+                                &self.monster_db,
+                                &mut self.combat_stats_cache,
                             );
 
                             // Web server controls (drawn here since sidebar fn can't own server)

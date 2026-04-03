@@ -305,3 +305,80 @@ impl Room {
             .unwrap_or(egui::Color32::from_rgb(200, 200, 200))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_room_new() {
+        let room = Room::new("Test Room".to_string());
+        // Should have a UUID id (36 chars with hyphens)
+        assert_eq!(room.id.len(), 36);
+        assert_eq!(room.label, "Test Room");
+        assert_eq!(room.size_hint, SizeHint::Medium);
+        assert!(room.cave_data.is_none());
+        assert!(room.tags.is_empty());
+        assert!(room.notes.is_empty());
+        assert_eq!(room.grid_width, None);
+        assert_eq!(room.grid_height, None);
+        assert_eq!(room.shape, RoomShape::default());
+        assert!(!room.allow_rotation);
+        assert!(room.decor.is_empty());
+    }
+
+    #[test]
+    fn test_room_grid_size_default() {
+        let room = Room::new("Test".to_string());
+        // Medium default is (4, 4)
+        assert_eq!(room.grid_size(), (4, 4));
+    }
+
+    #[test]
+    fn test_room_grid_size_overrides() {
+        let mut room = Room::new("Test".to_string());
+        room.grid_width = Some(10);
+        room.grid_height = Some(12);
+        assert_eq!(room.grid_size(), (10, 12));
+    }
+
+    #[test]
+    fn test_room_grid_size_partial_override() {
+        let mut room = Room::new("Test".to_string());
+        room.grid_width = Some(10);
+        // height still uses size_hint
+        assert_eq!(room.grid_size(), (10, 4));
+    }
+
+    #[test]
+    fn test_size_hint_grid_size() {
+        assert_eq!(SizeHint::Small.grid_size(), (3, 3));
+        assert_eq!(SizeHint::Medium.grid_size(), (4, 4));
+        assert_eq!(SizeHint::Large.grid_size(), (6, 6));
+        assert_eq!(SizeHint::Huge.grid_size(), (8, 8));
+    }
+
+    #[test]
+    fn test_floor_assignment_visible_on() {
+        let single = FloorAssignment::Single(0);
+        assert!(single.visible_on(0));
+        assert!(!single.visible_on(1));
+
+        let half = FloorAssignment::Half(0, 1);
+        assert!(half.visible_on(0));
+        assert!(half.visible_on(1));
+        assert!(!half.visible_on(2));
+    }
+
+    #[test]
+    fn test_floor_assignment_floors() {
+        assert_eq!(FloorAssignment::Single(0).floors(), vec![0]);
+        assert_eq!(FloorAssignment::Half(0, 1).floors(), vec![0, 1]);
+    }
+
+    #[test]
+    fn test_floor_assignment_label() {
+        assert_eq!(FloorAssignment::Single(0).label(), "Floor 0");
+        assert_eq!(FloorAssignment::Half(0, 1).label(), "Floor 0/1");
+    }
+}

@@ -1,5 +1,9 @@
+use crate::data::MonsterDatabase;
 use crate::model::*;
+use crate::model::combat_stats::CombatStatsCache;
 use crate::presentation::{PresentationState, Visibility, LightSource};
+use crate::presentation::combat_tracker::{CombatTracker, CombatantId, MonsterInstanceId, STANDARD_CONDITIONS};
+use crate::presentation::dice;
 use crate::presentation::fog;
 use crate::render::presentation::render_dm_overlay;
 use crate::render::recording::{RecordingRenderer, RenderCommand, replay_commands};
@@ -322,6 +326,8 @@ pub fn presentation_sidebar(
     player_view_state: &mut crate::ui::player_view::PlayerViewState,
     player_viewport_open: &mut bool,
     _server_action: &mut ServerAction,
+    monster_db: &MonsterDatabase,
+    combat_stats_cache: &mut CombatStatsCache,
 ) {
     ui.heading("Presentation Mode");
     ui.separator();
@@ -430,7 +436,71 @@ pub fn presentation_sidebar(
 
     ui.add_space(8.0);
 
-    // Encounters
+    // Party Management
+    ui.heading("Party");
+    ui.separator();
+
+    // Only allow editing when not in combat
+    let in_combat = presentation.combat_tracker.is_some();
+
+    if !in_combat {
+        if ui.button("Add PC").clicked() {
+            dungeon.party.push(PlayerCharacter::new("New Character".to_string()));
+        }
+    }
+
+    let mut remove_pc_idx = None;
+    for (i, pc) in dungeon.party.iter_mut().enumerate() {
+        ui.push_id(format!("party_pc_{}", pc.id), |ui| {
+            egui::CollapsingHeader::new(&pc.name)
+                .id_salt(format!("pc_header_{}", pc.id))
+                .default_open(false)
+                .show(ui, |ui| {
+                    if in_combat {
+                        // Read-only during combat
+                        ui.label(format!("{} ({})", pc.name, pc.class));
+                        ui.label(format!("AC {} | HP {}/{}", pc.ac, pc.current_hp, pc.max_hp));
+                        ui.label(format!("Init mod: {:+} | PP: {}", pc.initiative_modifier, pc.passive_perception));
+                    } else {
+                        ui.horizontal(|ui| {
+                            ui.label("Name:");
+                            ui.text_edit_singleline(&mut pc.name);
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Class:");
+                            ui.text_edit_singleline(&mut pc.class);
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("AC:");
+                            ui.add(egui::DragValue::new(&mut pc.ac).range(1..=30));
+                            ui.label("HP:");
+                            ui.add(egui::DragValue::new(&mut pc.max_hp).range(1..=999));
+                        });
+                        pc.current_hp = pc.current_hp.min(pc.max_hp);
+                        ui.horizontal(|ui| {
+                            ui.label("Current HP:");
+                            ui.add(egui::DragValue::new(&mut pc.current_hp).range(0..=pc.max_hp));
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Init mod:");
+                            ui.add(egui::DragValue::new(&mut pc.initiative_modifier).range(-10..=10));
+                            ui.label("PP:");
+                            ui.add(egui::DragValue::new(&mut pc.passive_perception).range(1..=30));
+                        });
+                        if ui.small_button("Remove").clicked() {
+                            remove_pc_idx = Some(i);
+                        }
+                    }
+                });
+        });
+    }
+    if let Some(idx) = remove_pc_idx {
+        dungeon.party.remove(idx);
+    }
+
+    ui.add_space(8.0);
+
+    // Encounters & Combat Tracker
     if !dungeon.encounters.is_empty() {
         ui.heading("Encounters");
         ui.separator();
@@ -440,34 +510,347 @@ pub fn presentation_sidebar(
                 presentation.tick_encounters(dungeon);
                 view_state.mark_dirty();
             }
-            if ui.button("Reset All").on_hover_text("Return all encounters to home rooms").clicked() {
+            if ui.button("Reset Pos").on_hover_text("Return all encounters to home rooms").clicked() {
                 presentation.reset_encounter_positions(dungeon);
                 view_state.mark_dirty();
             }
         });
 
-        egui::ScrollArea::vertical().max_height(150.0).id_salt("enc_pres_scroll").show(ui, |ui| {
-            for enc in &dungeon.encounters {
-                let current_room_id = presentation.encounter_room(enc);
-                let current_label = dungeon.graph.room_by_id(current_room_id)
-                    .map(|r| r.label.as_str())
-                    .unwrap_or("?");
-                let home_label = dungeon.graph.room_by_id(&enc.home_room_id)
-                    .map(|r| r.label.as_str())
-                    .unwrap_or("?");
-                let type_marker = match enc.encounter_type {
-                    EncounterType::Static => "S",
-                    EncounterType::Wandering(_) => "W",
-                };
-                let at_home = current_room_id == enc.home_room_id;
-                let location = if at_home {
-                    current_label.to_string()
-                } else {
-                    format!("{} (home: {})", current_label, home_label)
-                };
-                ui.label(format!("[{}] {} - {}", type_marker, enc.name, location));
+        // Combat tracker controls
+        ui.horizontal(|ui| {
+            if presentation.combat_tracker.is_some() {
+                if ui.button("End Combat").clicked() {
+                    presentation.combat_tracker = None;
+                }
+            } else {
+                if ui.button("Start Combat").clicked() {
+                    presentation.combat_tracker = Some(CombatTracker::init_with_party(
+                        &dungeon.encounters,
+                        monster_db,
+                        &dungeon.custom_monsters,
+                        combat_stats_cache,
+                        &dungeon.party,
+                    ));
+                }
             }
         });
+
+        if let Some(tracker) = &mut presentation.combat_tracker {
+            // Round & turn controls
+            ui.horizontal(|ui| {
+                ui.label(format!("Round {}", tracker.round));
+                if ui.small_button("<").on_hover_text("Previous turn").clicked() {
+                    tracker.prev_turn();
+                }
+                if ui.small_button(">").on_hover_text("Next turn").clicked() {
+                    tracker.next_turn();
+                }
+            });
+
+            // Current turn indicator
+            if let Some(current_id) = tracker.current_combatant_id().cloned() {
+                let name = tracker.get_combatant_name(&current_id).to_string();
+                let init = match &current_id {
+                    CombatantId::Monster(mid) => tracker.instances.get(mid).and_then(|i| i.initiative).unwrap_or(0),
+                    CombatantId::Player(pid) => tracker.players.get(pid).and_then(|p| p.initiative).unwrap_or(0),
+                };
+                ui.colored_label(
+                    egui::Color32::from_rgb(100, 255, 100),
+                    format!("Turn: {} (Init {})", name, init),
+                );
+            }
+
+            // Initiative controls
+            ui.horizontal(|ui| {
+                if ui.button("Roll Initiative").clicked() {
+                    tracker.roll_all_initiative();
+                }
+                if ui.button("Sort").on_hover_text("Sort by initiative").clicked() {
+                    tracker.sort_initiative();
+                }
+            });
+
+            ui.separator();
+
+            // Per-encounter collapsible sections
+            let encounter_ids: Vec<_> = dungeon.encounters.iter()
+                .map(|e| (e.id.clone(), e.name.clone()))
+                .collect();
+
+            // Pre-compute current turn ID to avoid borrow conflicts
+            let current_turn_id = tracker.current_combatant_id().cloned();
+
+            // Collect deferred actions using CombatantId
+            let mut damage_actions: Vec<(CombatantId, i32)> = Vec::new();
+            let mut heal_actions: Vec<(CombatantId, i32)> = Vec::new();
+            let mut condition_toggles: Vec<(CombatantId, usize)> = Vec::new();
+            let mut attack_actions: Vec<(String, String, crate::model::combat_stats::ParsedAttack, u8)> = Vec::new(); // (attacker_name, target_desc, attack, target_ac)
+
+            egui::ScrollArea::vertical().max_height(400.0).id_salt("combat_scroll").show(ui, |ui| {
+                // Party section
+                if !tracker.players.is_empty() {
+                    egui::CollapsingHeader::new("Party")
+                        .id_salt("combat_party")
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            let player_ids: Vec<String> = tracker.players.keys().cloned().collect();
+                            for pid in &player_ids {
+                                let Some(pc) = tracker.players.get_mut(pid) else { continue };
+                                let combatant_id = CombatantId::Player(pid.clone());
+                                let is_current = current_turn_id.as_ref() == Some(&combatant_id);
+
+                                ui.push_id(format!("pc_{}", pid), |ui| {
+                                    let frame_color = if is_current {
+                                        egui::Color32::from_rgba_unmultiplied(100, 200, 255, 30)
+                                    } else {
+                                        egui::Color32::TRANSPARENT
+                                    };
+
+                                    egui::Frame::NONE.fill(frame_color).show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.label(egui::RichText::new(&pc.name).strong());
+                                            ui.label(format!("AC {}", pc.ac));
+                                            if let Some(init) = &mut pc.initiative {
+                                                ui.add(egui::DragValue::new(init).prefix("Init: ").range(-10..=40));
+                                            }
+                                        });
+
+                                        // HP bar
+                                        let hp_frac = if pc.max_hp > 0 {
+                                            pc.current_hp as f32 / pc.max_hp as f32
+                                        } else {
+                                            0.0
+                                        };
+                                        let bar_color = if hp_frac > 0.5 {
+                                            egui::Color32::from_rgb(80, 200, 80)
+                                        } else if hp_frac > 0.25 {
+                                            egui::Color32::from_rgb(220, 200, 50)
+                                        } else {
+                                            egui::Color32::from_rgb(220, 60, 60)
+                                        };
+                                        ui.label(format!("{}/{} HP", pc.current_hp, pc.max_hp));
+                                        let bar = egui::ProgressBar::new(hp_frac)
+                                            .fill(bar_color)
+                                            .desired_width(ui.available_width());
+                                        ui.add(bar);
+
+                                        // Damage/Heal
+                                        let dmg_id = egui::Id::new(format!("dmg_pc_{}", pid));
+                                        let mut dmg_val: i32 = ui.ctx().memory(|m| m.data.get_temp(dmg_id).unwrap_or(0));
+                                        ui.horizontal(|ui| {
+                                            ui.add(egui::DragValue::new(&mut dmg_val).range(0..=999).prefix("HP: "));
+                                            if ui.small_button("Dmg").clicked() && dmg_val > 0 {
+                                                damage_actions.push((combatant_id.clone(), dmg_val));
+                                            }
+                                            if ui.small_button("Heal").clicked() && dmg_val > 0 {
+                                                heal_actions.push((combatant_id.clone(), dmg_val));
+                                            }
+                                        });
+                                        ui.ctx().memory_mut(|m| m.data.insert_temp(dmg_id, dmg_val));
+
+                                        // Conditions
+                                        ui.horizontal_wrapped(|ui| {
+                                            for (c_idx, &cond_name) in STANDARD_CONDITIONS.iter().enumerate() {
+                                                let active = pc.conditions.get(c_idx).copied().unwrap_or(false);
+                                                let abbrev = &cond_name[..3.min(cond_name.len())];
+                                                let color = if active {
+                                                    egui::Color32::from_rgb(255, 160, 40)
+                                                } else {
+                                                    egui::Color32::from_rgb(120, 120, 120)
+                                                };
+                                                if ui.add(egui::Button::new(
+                                                    egui::RichText::new(abbrev).size(9.0).color(color)
+                                                ).min_size(egui::vec2(0.0, 16.0))).on_hover_text(cond_name).clicked() {
+                                                    condition_toggles.push((combatant_id.clone(), c_idx));
+                                                }
+                                            }
+                                        });
+                                    });
+                                });
+                                ui.add_space(2.0);
+                            }
+                        });
+                }
+
+                // Per-encounter monster sections
+                for (enc_id, enc_name) in &encounter_ids {
+                    let (alive, dead) = tracker.counts_for_encounter(enc_id);
+                    let header = format!("{} ({} alive, {} dead)", enc_name, alive, dead);
+
+                    egui::CollapsingHeader::new(header)
+                        .id_salt(format!("combat_{}", enc_id))
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            let order: Vec<MonsterInstanceId> = if tracker.initiative_order.is_empty() {
+                                tracker.instances.keys()
+                                    .filter(|id| id.encounter_id == *enc_id)
+                                    .cloned()
+                                    .collect()
+                            } else {
+                                tracker.initiative_order.iter()
+                                    .filter_map(|cid| {
+                                        if let CombatantId::Monster(mid) = cid {
+                                            if mid.encounter_id == *enc_id {
+                                                return Some(mid.clone());
+                                            }
+                                        }
+                                        None
+                                    })
+                                    .collect()
+                            };
+
+                            for inst_id in order {
+                                let Some(inst) = tracker.instances.get_mut(&inst_id) else { continue };
+                                let combatant_id = CombatantId::Monster(inst_id.clone());
+                                let is_current = current_turn_id.as_ref() == Some(&combatant_id);
+
+                                ui.push_id(format!("inst_{}_{}_{}", inst_id.encounter_id, inst_id.monster_index, inst_id.instance), |ui| {
+                                    let frame_color = if is_current {
+                                        egui::Color32::from_rgba_unmultiplied(100, 255, 100, 30)
+                                    } else if inst.is_dead {
+                                        egui::Color32::from_rgba_unmultiplied(100, 100, 100, 20)
+                                    } else {
+                                        egui::Color32::TRANSPARENT
+                                    };
+
+                                    egui::Frame::NONE.fill(frame_color).show(ui, |ui| {
+                                        // Name + initiative
+                                        ui.horizontal(|ui| {
+                                            if inst.is_dead {
+                                                ui.colored_label(egui::Color32::from_rgb(150, 150, 150), &inst.label);
+                                            } else {
+                                                ui.label(&inst.label);
+                                            }
+                                            if let Some(init) = &mut inst.initiative {
+                                                ui.add(egui::DragValue::new(init).prefix("Init: ").range(-10..=40));
+                                            }
+                                        });
+
+                                        // HP bar
+                                        let hp_frac = if inst.max_hp > 0 {
+                                            inst.current_hp as f32 / inst.max_hp as f32
+                                        } else {
+                                            0.0
+                                        };
+                                        let bar_color = if hp_frac > 0.5 {
+                                            egui::Color32::from_rgb(80, 200, 80)
+                                        } else if hp_frac > 0.25 {
+                                            egui::Color32::from_rgb(220, 200, 50)
+                                        } else {
+                                            egui::Color32::from_rgb(220, 60, 60)
+                                        };
+
+                                        ui.horizontal(|ui| {
+                                            let hp_text = format!("{}/{}", inst.current_hp, inst.max_hp);
+                                            if inst.temp_hp > 0 {
+                                                ui.label(format!("{} (+{} temp)", hp_text, inst.temp_hp));
+                                            } else {
+                                                ui.label(&hp_text);
+                                            }
+                                        });
+
+                                        // HP progress bar
+                                        let bar = egui::ProgressBar::new(hp_frac)
+                                            .fill(bar_color)
+                                            .desired_width(ui.available_width());
+                                        ui.add(bar);
+
+                                        // Damage/Heal controls
+                                        let dmg_id = egui::Id::new(format!("dmg_{}_{}_{}", inst_id.encounter_id, inst_id.monster_index, inst_id.instance));
+                                        let mut dmg_val: i32 = ui.ctx().memory(|m| m.data.get_temp(dmg_id).unwrap_or(0));
+
+                                        ui.horizontal(|ui| {
+                                            ui.add(egui::DragValue::new(&mut dmg_val).range(0..=999).prefix("HP: "));
+                                            if ui.small_button("Dmg").clicked() && dmg_val > 0 {
+                                                damage_actions.push((combatant_id.clone(), dmg_val));
+                                            }
+                                            if ui.small_button("Heal").clicked() && dmg_val > 0 {
+                                                heal_actions.push((combatant_id.clone(), dmg_val));
+                                            }
+                                        });
+                                        ui.ctx().memory_mut(|m| m.data.insert_temp(dmg_id, dmg_val));
+
+                                        // Conditions (compact toggles)
+                                        ui.horizontal_wrapped(|ui| {
+                                            for (c_idx, &cond_name) in STANDARD_CONDITIONS.iter().enumerate() {
+                                                let active = inst.conditions.get(c_idx).copied().unwrap_or(false);
+                                                let abbrev = &cond_name[..3.min(cond_name.len())];
+                                                let color = if active {
+                                                    egui::Color32::from_rgb(255, 160, 40)
+                                                } else {
+                                                    egui::Color32::from_rgb(120, 120, 120)
+                                                };
+                                                if ui.add(egui::Button::new(
+                                                    egui::RichText::new(abbrev).size(9.0).color(color)
+                                                ).min_size(egui::vec2(0.0, 16.0))).on_hover_text(cond_name).clicked() {
+                                                    condition_toggles.push((combatant_id.clone(), c_idx));
+                                                }
+                                            }
+                                        });
+
+                                        // Attacks section
+                                        if !inst.attacks.is_empty() {
+                                            let attacks_snapshot: Vec<_> = inst.attacks.clone();
+                                            let attacker_name = inst.label.clone();
+                                            egui::CollapsingHeader::new("Attacks")
+                                                .id_salt(format!("attacks_{}_{}_{}", inst_id.encounter_id, inst_id.monster_index, inst_id.instance))
+                                                .default_open(false)
+                                                .show(ui, |ui| {
+                                                    for atk in &attacks_snapshot {
+                                                        let ac_id = egui::Id::new(format!("ac_{}_{}_{}_{}", inst_id.encounter_id, inst_id.monster_index, inst_id.instance, atk.name));
+                                                        let mut target_ac: u8 = ui.ctx().memory(|m| m.data.get_temp(ac_id).unwrap_or(10u8));
+                                                        ui.horizontal(|ui| {
+                                                            let btn_text = format!("{} (+{})", atk.name, atk.to_hit);
+                                                            if ui.button(&btn_text).clicked() {
+                                                                attack_actions.push((attacker_name.clone(), format!("AC {}", target_ac), atk.clone(), target_ac));
+                                                            }
+                                                            ui.label("vs AC");
+                                                            ui.add(egui::DragValue::new(&mut target_ac).range(1..=30));
+                                                        });
+                                                        ui.ctx().memory_mut(|m| m.data.insert_temp(ac_id, target_ac));
+                                                    }
+                                                });
+                                        }
+                                    });
+                                });
+
+                                ui.add_space(2.0);
+                            }
+                        });
+                }
+            });
+
+            // Apply deferred actions
+            for (id, dmg) in damage_actions {
+                tracker.apply_damage_to(&id, dmg);
+            }
+            for (id, amt) in heal_actions {
+                tracker.heal_combatant(&id, amt);
+            }
+            for (id, c_idx) in condition_toggles {
+                tracker.toggle_combatant_condition(&id, c_idx);
+            }
+            // Process attack rolls
+            for (attacker_name, target_desc, attack, target_ac) in attack_actions {
+                let result = dice::roll_attack(&attack, target_ac);
+                tracker.log.log_attack(&attacker_name, &target_desc, &attack.name, &result);
+            }
+        } else {
+            // No combat active — just show encounter locations
+            egui::ScrollArea::vertical().max_height(150.0).id_salt("enc_pres_scroll").show(ui, |ui| {
+                for enc in &dungeon.encounters {
+                    let current_room_id = presentation.encounter_room(enc);
+                    let current_label = dungeon.graph.room_by_id(current_room_id)
+                        .map(|r| r.label.as_str())
+                        .unwrap_or("?");
+                    let type_marker = match enc.encounter_type {
+                        EncounterType::Static => "S",
+                        EncounterType::Wandering(_) => "W",
+                    };
+                    ui.label(format!("[{}] {} - {}", type_marker, enc.name, current_label));
+                }
+            });
+        }
     }
 
     ui.add_space(8.0);
