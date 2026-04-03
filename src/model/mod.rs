@@ -1,3 +1,4 @@
+pub mod annotation;
 pub mod room;
 pub mod combat_stats;
 pub mod connection;
@@ -9,6 +10,7 @@ pub mod spatial;
 pub mod theme;
 pub mod dungeon;
 
+pub use annotation::*;
 pub use room::*;
 pub use connection::*;
 pub use encounter::*;

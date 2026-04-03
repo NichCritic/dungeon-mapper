@@ -3,6 +3,7 @@ use crate::model::combat_stats::CombatStatsCache;
 use crate::model::Dungeon;
 use crate::presentation::PresentationState;
 use crate::server::PresentationServer;
+use crate::ui::annotations::{self, AnnotationModeState};
 use crate::ui::encounters_view::{self, EncountersViewState};
 use crate::ui::graph_editor::{self, GraphEditorState};
 use crate::ui::spatial_view::{self, SpatialViewState};
@@ -43,6 +44,10 @@ pub struct DungeonApp {
     /// Hash of the last PNG pushed to the server, to avoid redundant updates.
     last_server_push_hash: u64,
 
+    // Annotation mode
+    pub annotation_mode: bool,
+    pub annotation_state: AnnotationModeState,
+
     /// Pending async file operation (save/load/export).
     pending_file_op: Option<std::sync::mpsc::Receiver<crate::io::save_load::FileOpResult>>,
 }
@@ -79,6 +84,8 @@ impl Default for DungeonApp {
             server: None,
             server_port: 8080,
             last_server_push_hash: 0,
+            annotation_mode: false,
+            annotation_state: AnnotationModeState::default(),
             pending_file_op: None,
         }
     }
@@ -339,6 +346,81 @@ impl DungeonApp {
         h.finish()
     }
 
+    /// Get the name of the currently active view for annotation metadata.
+    fn current_view_name(&self) -> String {
+        if self.presenting {
+            "Presentation".to_string()
+        } else {
+            match self.active_tab {
+                Tab::Graph => "Graph".to_string(),
+                Tab::Spatial => "Spatial".to_string(),
+                Tab::Encounters => "Encounters".to_string(),
+                Tab::Styled => "Styled".to_string(),
+            }
+        }
+    }
+
+    /// Get the current view's pan/zoom state.
+    fn current_view_state(&self) -> &crate::ui::canvas_common::ViewState {
+        if self.presenting {
+            &self.presentation_view_state.view
+        } else {
+            match self.active_tab {
+                Tab::Graph => &self.graph_state.view,
+                Tab::Spatial => &self.spatial_state.view,
+                Tab::Encounters => &self.encounters_state.view,
+                Tab::Styled => &self.styled_state.view,
+            }
+        }
+    }
+
+    /// Find the nearest room to a world position (for annotation metadata).
+    fn nearest_room_at_world(&self, pos: Option<(f32, f32)>) -> Option<String> {
+        let (wx, wy) = pos?;
+
+        // For graph view, check room positions
+        if !self.presenting && self.active_tab == Tab::Graph {
+            let mut best: Option<(f32, &str)> = None;
+            for room in &self.dungeon.graph.rooms {
+                if let Some(screen_pos) = self.graph_state.room_positions.get(&room.id) {
+                    let dx = screen_pos.x - wx;
+                    let dy = screen_pos.y - wy;
+                    let dist = (dx * dx + dy * dy).sqrt();
+                    if best.is_none() || dist < best.unwrap().0 {
+                        best = Some((dist, &room.id));
+                    }
+                }
+            }
+            return best.filter(|(d, _)| *d < 200.0).map(|(_, id)| id.to_string());
+        }
+
+        // For spatial/styled/presentation views, check layout
+        let layout = self.dungeon.layout.as_ref()?;
+        let gx = (wx / crate::util::GRID_PX).floor() as i32;
+        let gy = (wy / crate::util::GRID_PX).floor() as i32;
+
+        // Direct hit
+        for rl in &layout.rooms {
+            if gx >= rl.x && gx < rl.x + rl.width as i32
+                && gy >= rl.y && gy < rl.y + rl.height as i32
+            {
+                return Some(rl.room_id.clone());
+            }
+        }
+
+        // Nearest room within reasonable range
+        let mut best: Option<(f32, &str)> = None;
+        for rl in &layout.rooms {
+            let cx = (rl.x as f32 + rl.width as f32 / 2.0) * crate::util::GRID_PX;
+            let cy = (rl.y as f32 + rl.height as f32 / 2.0) * crate::util::GRID_PX;
+            let dist = ((cx - wx).powi(2) + (cy - wy).powi(2)).sqrt();
+            if best.is_none() || dist < best.unwrap().0 {
+                best = Some((dist, &rl.room_id));
+            }
+        }
+        best.filter(|(d, _)| *d < 200.0).map(|(_, id)| id.to_string())
+    }
+
     fn push_server_update_if_changed(&mut self) {
         let hash = self.presentation_hash();
         if hash == self.last_server_push_hash {
@@ -375,6 +457,14 @@ impl eframe::App for DungeonApp {
                 }
                 self.pending_file_op = None;
             }
+        }
+
+        // Global key: F7 toggles annotation mode
+        let f7_pressed = ctx.input(|i| i.key_pressed(egui::Key::F7));
+        if f7_pressed {
+            self.annotation_mode = !self.annotation_mode;
+            self.annotation_state.composing = None;
+            self.annotation_state.viewing = None;
         }
 
         // Top menu bar
@@ -438,6 +528,10 @@ impl eframe::App for DungeonApp {
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if self.annotation_mode {
+                        annotations::annotation_mode_indicator(ui);
+                        ui.separator();
+                    }
                     if self.presenting {
                         ui.colored_label(egui::Color32::from_rgb(255, 100, 100), "PRESENTING");
                         ui.separator();
@@ -542,7 +636,21 @@ impl eframe::App for DungeonApp {
             .default_width(250.0)
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    if self.presenting {
+                    if self.annotation_mode {
+                        let prev_count = self.dungeon.annotations.len();
+                        let prev_resolved = self.dungeon.annotations.iter().filter(|a| a.resolved).count();
+                        annotations::annotation_sidebar(
+                            ui,
+                            &mut self.dungeon.annotations,
+                            &mut self.annotation_state,
+                        );
+                        // Dump annotations file if anything changed
+                        let new_count = self.dungeon.annotations.len();
+                        let new_resolved = self.dungeon.annotations.iter().filter(|a| a.resolved).count();
+                        if new_count != prev_count || new_resolved != prev_resolved {
+                            dump_annotations_file(&self.dungeon.annotations, &self.dungeon);
+                        }
+                    } else if self.presenting {
                         if let Some(presentation) = &mut self.presentation {
                             let mut server_action = ServerAction::None;
                             presentation_view::presentation_sidebar(
@@ -635,7 +743,7 @@ impl eframe::App for DungeonApp {
             });
 
         // Main canvas
-        egui::CentralPanel::default().show(ctx, |ui| {
+        let central_response = egui::CentralPanel::default().show(ctx, |ui| {
             if self.presenting {
                 if let Some(presentation) = &mut self.presentation {
                     presentation_view::presentation_view(
@@ -663,6 +771,77 @@ impl eframe::App for DungeonApp {
             }
         });
 
+        // Annotation overlay (drawn on top of the central panel)
+        if self.annotation_mode {
+            let canvas_rect = central_response.response.rect;
+            let current_view = self.current_view_name();
+            let view_state = self.current_view_state();
+            let transform = crate::util::ViewTransform::new(
+                view_state.offset, view_state.zoom, canvas_rect,
+            );
+
+            // Draw annotation overlay using a foreground Area
+            let mut new_annotation: Option<crate::model::Annotation> = None;
+            egui::Area::new(egui::Id::new("annotation_overlay"))
+                .fixed_pos(canvas_rect.min)
+                .order(egui::Order::Foreground)
+                .interactable(true)
+                .show(ctx, |ui| {
+                    // Allocate the full canvas area for interaction
+                    let (response, painter) = ui.allocate_painter(
+                        canvas_rect.size(),
+                        egui::Sense::click(),
+                    );
+
+                    // Draw existing annotation pins
+                    let click_consumed = annotations::draw_annotations(
+                        ui,
+                        &painter,
+                        &transform,
+                        &self.dungeon.annotations,
+                        &mut self.annotation_state,
+                        &current_view,
+                    );
+
+                    // Draw compose popup if composing
+                    let nearest_room = self.nearest_room_at_world(
+                        self.annotation_state.composing.as_ref().map(|c| (c.world_x, c.world_y)),
+                    );
+                    new_annotation = annotations::draw_compose_popup(
+                        ui,
+                        &painter,
+                        &transform,
+                        &mut self.annotation_state,
+                        &current_view,
+                        nearest_room,
+                    );
+
+                    // Click to place a new annotation (if not consumed by existing pin)
+                    if !click_consumed && response.clicked() {
+                        if self.annotation_state.composing.is_some() {
+                            // Cancel composing if clicking elsewhere
+                            self.annotation_state.composing = None;
+                        } else if let Some(pos) = response.interact_pointer_pos() {
+                            let world = transform.screen_to_world(pos);
+                            self.annotation_state.composing = Some(
+                                annotations::ComposingAnnotation {
+                                    world_x: world.x,
+                                    world_y: world.y,
+                                    text: String::new(),
+                                },
+                            );
+                            self.annotation_state.viewing = None;
+                        }
+                    }
+                });
+
+            // Add the new annotation if created
+            if let Some(ann) = new_annotation {
+                self.dungeon.annotations.push(ann);
+                dump_annotations_file(&self.dungeon.annotations, &self.dungeon);
+            }
+        }
+
         // Push server update only when presentation state has changed
         if self.presenting && self.server.is_some() {
             self.push_server_update_if_changed();
@@ -687,6 +866,45 @@ impl eframe::App for DungeonApp {
                 );
             }
         }
+    }
+}
+
+/// Dump unresolved annotations to a text file for external tools (e.g. Claude) to read.
+/// Written to `annotations.md` in the current working directory.
+fn dump_annotations_file(annotations: &[crate::model::Annotation], dungeon: &Dungeon) {
+    use std::io::Write;
+    let path = std::path::Path::new("annotations.md");
+    let unresolved: Vec<_> = annotations.iter().filter(|a| !a.resolved).collect();
+
+    let mut contents = String::new();
+    contents.push_str("# Dungeon Drafter - Open Issues\n\n");
+    contents.push_str(&format!("Dungeon: {}\n\n", dungeon.name));
+    if unresolved.is_empty() {
+        contents.push_str("No open issues.\n");
+    } else {
+        contents.push_str(&format!("{} open issue(s):\n\n", unresolved.len()));
+        for (i, ann) in unresolved.iter().enumerate() {
+            contents.push_str(&format!("## Issue {}\n\n", i + 1));
+            contents.push_str(&format!("- **ID:** {}\n", ann.id));
+            contents.push_str(&format!("- **Description:** {}\n", ann.text));
+            contents.push_str(&format!("- **View:** {}\n", ann.view));
+            contents.push_str(&format!("- **World position:** ({:.1}, {:.1})\n", ann.world_x, ann.world_y));
+            if let Some(room_id) = &ann.room_id {
+                let room_label = dungeon.graph.room_by_id(room_id)
+                    .map(|r| r.label.as_str())
+                    .unwrap_or("(unknown)");
+                contents.push_str(&format!("- **Near room:** {} ({})\n", room_label, room_id));
+            }
+            contents.push_str(&format!("- **Created:** {}\n", ann.created_at));
+            contents.push('\n');
+        }
+    }
+
+    match std::fs::File::create(path) {
+        Ok(mut f) => {
+            let _ = f.write_all(contents.as_bytes());
+        }
+        Err(e) => eprintln!("Failed to write annotations.md: {}", e),
     }
 }
 

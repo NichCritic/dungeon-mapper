@@ -1,3 +1,4 @@
+pub mod annotations;
 pub mod canvas_common;
 pub mod encounters_view;
 pub mod graph_editor;

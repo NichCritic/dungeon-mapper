@@ -203,6 +203,7 @@ mod tests {
             encounters: vec![enc],
             custom_monsters: Vec::new(),
             party: Vec::new(),
+            annotations: Vec::new(),
         }
     }
 
