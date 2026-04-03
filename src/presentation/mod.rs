@@ -1,4 +1,5 @@
 pub mod combat_log;
+pub mod combat_sim;
 pub mod combat_tracker;
 pub mod dice;
 pub mod fog;
@@ -40,6 +41,8 @@ pub struct PresentationState {
     pub encounter_positions: HashMap<String, String>,
     /// Combat tracker, activated by the DM during a session.
     pub combat_tracker: Option<combat_tracker::CombatTracker>,
+    /// Which room the party token is in (None = not shown).
+    pub party_room: Option<String>,
 }
 
 impl PresentationState {
@@ -60,6 +63,7 @@ impl PresentationState {
             show_labels_player: false,
             encounter_positions,
             combat_tracker: None,
+            party_room: None,
         }
     }
 

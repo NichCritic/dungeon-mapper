@@ -512,6 +512,38 @@ pub fn render_dm_overlay(
         }
     }
 
+    // Party token
+    if let Some(party_room_id) = &presentation.party_room {
+        if let Some(rl) = layout.room_by_id(party_room_id) {
+            let cx = (rl.x as f32 + rl.width as f32 / 2.0) * GRID_PX;
+            let cy = (rl.y as f32 + rl.height as f32 / 2.0) * GRID_PX;
+            let screen = transform.world_to_screen(egui::pos2(cx, cy));
+            // Offset above encounter markers
+            let pos = screen + egui::vec2(0.0, -16.0 * transform.zoom);
+
+            let text_size = 8.0 * transform.zoom;
+            let display = "Party";
+            let color = egui::Color32::from_rgb(80, 160, 255);
+
+            let galley = painter.layout_no_wrap(
+                display.to_string(),
+                egui::FontId::monospace(text_size),
+                color,
+            );
+            let pill_size = galley.size() + egui::vec2(6.0, 2.0);
+            let pill_rect = egui::Rect::from_center_size(pos, pill_size);
+            painter.rect_filled(pill_rect, 3.0, egui::Color32::from_rgba_unmultiplied(0, 0, 60, 200));
+
+            painter.text(
+                pos,
+                egui::Align2::CENTER_CENTER,
+                display,
+                egui::FontId::monospace(text_size),
+                color,
+            );
+        }
+    }
+
     // Light source indicators
     for light in &presentation.light_sources {
         let Some(rl) = layout.room_by_id(&light.room_id) else { continue };

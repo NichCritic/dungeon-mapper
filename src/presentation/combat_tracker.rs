@@ -664,6 +664,8 @@ mod tests {
             initiative_modifier: 2,
             passive_perception: 14,
             notes: String::new(),
+            attack_bonus: 5,
+            damage_dice: "1d8 + 3".into(),
         };
 
         let db = MonsterDatabase::empty();

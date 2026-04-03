@@ -1,11 +1,16 @@
 use crate::data::MonsterDatabase;
 use crate::model::*;
+use crate::model::combat_stats::CombatStatsCache;
 use crate::model::monster::{
     size_label, alignment_display, damage_list_display,
     MonsterRef, CustomMonster, EncounterMonster, Monster, Feature,
     MergeStrategy, MergeConfig, merge_monsters,
     MERGE_NUMERIC_FIELDS, MERGE_LIST_FIELDS, MERGE_STRING_FIELDS,
     MonsterType, HitPoints, ChallengeRating, SpeedValue, ArmorClass,
+};
+use crate::presentation::combat_sim::{
+    self, build_combatants_from_encounter, build_combatants_from_party,
+    run_combat, run_monte_carlo, MonteCarloResult, SimResult,
 };
 use crate::render::recording::{RecordingRenderer, RenderCommand, replay_commands};
 use crate::render::themed::RenderOptions;
@@ -20,9 +25,41 @@ struct RenderCache {
     input_hash: u64,
 }
 
+/// Which side selector in the combat simulator.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SimSide {
+    Party,
+    Encounter(usize), // index into dungeon.encounters
+}
+
+impl Default for SimSide {
+    fn default() -> Self { SimSide::Party }
+}
+
+pub struct SimulationState {
+    pub side_a: SimSide,
+    pub side_b: SimSide,
+    pub monte_carlo_n: u32,
+    pub last_single: Option<SimResult>,
+    pub last_monte_carlo: Option<MonteCarloResult>,
+}
+
+impl Default for SimulationState {
+    fn default() -> Self {
+        Self {
+            side_a: SimSide::Party,
+            side_b: SimSide::default(),
+            monte_carlo_n: 100,
+            last_single: None,
+            last_monte_carlo: None,
+        }
+    }
+}
+
 pub struct EncountersViewState {
     pub view: ViewState,
     render_cache: Option<RenderCache>,
+    pub sim_state: SimulationState,
 }
 
 impl Default for EncountersViewState {
@@ -30,6 +67,7 @@ impl Default for EncountersViewState {
         Self {
             view: ViewState::default(),
             render_cache: None,
+            sim_state: SimulationState::default(),
         }
     }
 }
@@ -196,6 +234,8 @@ pub fn encounters_sidebar(
     ui: &mut egui::Ui,
     dungeon: &mut Dungeon,
     monster_db: &MonsterDatabase,
+    combat_stats_cache: &mut CombatStatsCache,
+    sim_state: &mut SimulationState,
 ) {
     ui.heading("Encounters");
     ui.separator();
@@ -390,6 +430,163 @@ pub fn encounters_sidebar(
     custom_monster_editor_window(ui.ctx(), dungeon);
     // Monster merge window
     monster_merge_window(ui.ctx(), dungeon, monster_db);
+
+    // --- Combat Simulator ---
+    ui.add_space(12.0);
+    ui.heading("Combat Simulator");
+    ui.separator();
+
+    let enc_names: Vec<(usize, String)> = dungeon.encounters.iter().enumerate()
+        .map(|(i, e)| (i, e.name.clone()))
+        .collect();
+
+    // Side A selector
+    ui.horizontal(|ui| {
+        ui.label("Side A:");
+        egui::ComboBox::from_id_salt("sim_side_a")
+            .selected_text(match &sim_state.side_a {
+                SimSide::Party => "Party".to_string(),
+                SimSide::Encounter(idx) => enc_names.iter()
+                    .find(|(i, _)| i == idx)
+                    .map(|(_, n)| n.clone())
+                    .unwrap_or_else(|| "?".to_string()),
+            })
+            .width(140.0)
+            .show_ui(ui, |ui| {
+                if ui.selectable_label(sim_state.side_a == SimSide::Party, "Party").clicked() {
+                    sim_state.side_a = SimSide::Party;
+                }
+                for (i, name) in &enc_names {
+                    if ui.selectable_label(sim_state.side_a == SimSide::Encounter(*i), name).clicked() {
+                        sim_state.side_a = SimSide::Encounter(*i);
+                    }
+                }
+            });
+    });
+
+    // Side B selector
+    ui.horizontal(|ui| {
+        ui.label("Side B:");
+        egui::ComboBox::from_id_salt("sim_side_b")
+            .selected_text(match &sim_state.side_b {
+                SimSide::Party => "Party".to_string(),
+                SimSide::Encounter(idx) => enc_names.iter()
+                    .find(|(i, _)| i == idx)
+                    .map(|(_, n)| n.clone())
+                    .unwrap_or_else(|| "?".to_string()),
+            })
+            .width(140.0)
+            .show_ui(ui, |ui| {
+                if ui.selectable_label(sim_state.side_b == SimSide::Party, "Party").clicked() {
+                    sim_state.side_b = SimSide::Party;
+                }
+                for (i, name) in &enc_names {
+                    if ui.selectable_label(sim_state.side_b == SimSide::Encounter(*i), name).clicked() {
+                        sim_state.side_b = SimSide::Encounter(*i);
+                    }
+                }
+            });
+    });
+
+    ui.add_space(4.0);
+
+    // Build combatants helper
+    let build_side = |side: &SimSide, side_idx: usize, cache: &mut CombatStatsCache| -> (Vec<combat_sim::SimCombatant>, String) {
+        match side {
+            SimSide::Party => {
+                (build_combatants_from_party(&dungeon.party, side_idx), "Party".to_string())
+            }
+            SimSide::Encounter(enc_idx) => {
+                if let Some(enc) = dungeon.encounters.get(*enc_idx) {
+                    let label = enc.name.clone();
+                    let combatants = build_combatants_from_encounter(enc, monster_db, &dungeon.custom_monsters, cache, side_idx);
+                    (combatants, label)
+                } else {
+                    (Vec::new(), "?".to_string())
+                }
+            }
+        }
+    };
+
+    ui.horizontal(|ui| {
+        if ui.button("Run Single").clicked() {
+            let (side_a, _label_a) = build_side(&sim_state.side_a, 0, combat_stats_cache);
+            let (side_b, _label_b) = build_side(&sim_state.side_b, 1, combat_stats_cache);
+            if !side_a.is_empty() && !side_b.is_empty() {
+                sim_state.last_single = Some(run_combat(&side_a, &side_b));
+                sim_state.last_monte_carlo = None;
+            }
+        }
+    });
+
+    ui.horizontal(|ui| {
+        ui.label("N:");
+        ui.add(egui::DragValue::new(&mut sim_state.monte_carlo_n).range(10..=10000));
+        if ui.button("Run Monte Carlo").clicked() {
+            let (side_a, label_a) = build_side(&sim_state.side_a, 0, combat_stats_cache);
+            let (side_b, label_b) = build_side(&sim_state.side_b, 1, combat_stats_cache);
+            if !side_a.is_empty() && !side_b.is_empty() {
+                sim_state.last_monte_carlo = Some(run_monte_carlo(
+                    &side_a, &side_b, sim_state.monte_carlo_n,
+                    label_a, label_b,
+                ));
+                sim_state.last_single = None;
+            }
+        }
+    });
+
+    // Display results
+    if let Some(result) = &sim_state.last_single {
+        ui.add_space(4.0);
+        ui.group(|ui| {
+            ui.label("Single Combat Result");
+            let winner_text = match result.winner {
+                Some(0) => "Side A wins",
+                Some(1) => "Side B wins",
+                _ => "Draw (timeout)",
+            };
+            ui.label(format!("{} in {} rounds", winner_text, result.rounds));
+
+            // Show all combatants grouped by side
+            for side in 0..=1 {
+                let side_combatants: Vec<_> = result.combatants.iter()
+                    .filter(|c| c.side == side)
+                    .collect();
+                if side_combatants.is_empty() { continue; }
+                ui.label(if side == 0 { "Side A:" } else { "Side B:" });
+                for c in &side_combatants {
+                    let status = if c.current_hp <= 0 { "DEAD" } else { "alive" };
+                    let hp_display = if c.current_hp <= 0 {
+                        format!("0/{}", c.max_hp)
+                    } else {
+                        format!("{}/{}", c.current_hp, c.max_hp)
+                    };
+                    let color = if c.current_hp <= 0 {
+                        egui::Color32::from_rgb(255, 100, 100)
+                    } else {
+                        egui::Color32::from_rgb(100, 255, 100)
+                    };
+                    ui.colored_label(color, format!("  {} ({}) - {}", c.name, hp_display, status));
+                }
+            }
+        });
+    }
+
+    if let Some(mc) = &sim_state.last_monte_carlo {
+        ui.add_space(4.0);
+        ui.group(|ui| {
+            ui.label(format!("Monte Carlo ({} sims)", mc.num_sims));
+            let a_pct = mc.side_a_wins as f32 / mc.num_sims as f32 * 100.0;
+            let b_pct = mc.side_b_wins as f32 / mc.num_sims as f32 * 100.0;
+            let d_pct = mc.draws as f32 / mc.num_sims as f32 * 100.0;
+            ui.label(format!("{}: {:.1}% ({} wins)", mc.side_a_label, a_pct, mc.side_a_wins));
+            ui.label(format!("{}: {:.1}% ({} wins)", mc.side_b_label, b_pct, mc.side_b_wins));
+            if mc.draws > 0 {
+                ui.label(format!("Draws: {:.1}% ({})", d_pct, mc.draws));
+            }
+            ui.label(format!("Avg rounds: {:.1}", mc.avg_rounds));
+        });
+    }
 }
 
 /// Floating monster browser window.

@@ -2,6 +2,7 @@ use crate::data::MonsterDatabase;
 use crate::model::*;
 use crate::model::combat_stats::CombatStatsCache;
 use crate::presentation::{PresentationState, Visibility, LightSource};
+use crate::presentation::combat_sim::{self, SimCombatant};
 use crate::presentation::combat_tracker::{CombatTracker, CombatantId, MonsterInstanceId, STANDARD_CONDITIONS};
 use crate::presentation::dice;
 use crate::presentation::fog;
@@ -91,6 +92,7 @@ fn presentation_input_hash(
         eid.hash(&mut h);
         rid.hash(&mut h);
     }
+    presentation.party_room.hash(&mut h);
     h.finish()
 }
 
@@ -297,6 +299,12 @@ pub fn presentation_view(
                     view_state.mark_dirty();
                     ui.close_menu();
                 }
+                ui.separator();
+                if ui.button("Move Party Here").clicked() {
+                    presentation.party_room = Some(room_id.clone());
+                    view_state.mark_dirty();
+                    ui.close_menu();
+                }
             } else {
                 ui.label("(no room or corridor here)");
             }
@@ -440,6 +448,38 @@ pub fn presentation_sidebar(
     ui.heading("Party");
     ui.separator();
 
+    // Party room selector
+    {
+        let rooms_list: Vec<_> = dungeon.graph.rooms.iter()
+            .map(|r| (r.id.clone(), r.label.clone()))
+            .collect();
+        let selected_label = presentation.party_room.as_ref()
+            .and_then(|rid| dungeon.graph.room_by_id(rid))
+            .map(|r| r.label.as_str())
+            .unwrap_or("(none)");
+        ui.horizontal(|ui| {
+            ui.label("Party room:");
+            egui::ComboBox::from_id_salt("party_room_combo")
+                .selected_text(selected_label)
+                .width(120.0)
+                .show_ui(ui, |ui| {
+                    if ui.selectable_label(presentation.party_room.is_none(), "(none)").clicked() {
+                        presentation.party_room = None;
+                        view_state.mark_dirty();
+                    }
+                    for (rid, rlabel) in &rooms_list {
+                        let selected = presentation.party_room.as_ref() == Some(rid);
+                        if ui.selectable_label(selected, rlabel).clicked() {
+                            presentation.party_room = Some(rid.clone());
+                            view_state.mark_dirty();
+                        }
+                    }
+                });
+        });
+    }
+
+    ui.add_space(4.0);
+
     // Only allow editing when not in combat
     let in_combat = presentation.combat_tracker.is_some();
 
@@ -486,6 +526,12 @@ pub fn presentation_sidebar(
                             ui.add(egui::DragValue::new(&mut pc.initiative_modifier).range(-10..=10));
                             ui.label("PP:");
                             ui.add(egui::DragValue::new(&mut pc.passive_perception).range(1..=30));
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Atk:");
+                            ui.add(egui::DragValue::new(&mut pc.attack_bonus).range(-5..=20).prefix("+"));
+                            ui.label("Dmg:");
+                            ui.add(egui::TextEdit::singleline(&mut pc.damage_dice).desired_width(80.0));
                         });
                         if ui.small_button("Remove").clicked() {
                             remove_pc_idx = Some(i);
@@ -569,6 +615,106 @@ pub fn presentation_sidebar(
                     tracker.sort_initiative();
                 }
             });
+
+            // Simulate combat button — runs a full sim and writes results back
+            if ui.button("Simulate Combat").on_hover_text("Run combat to completion, updating all HP").clicked() {
+                // Build SimCombatants from tracker's current monster instances (side 0)
+                // and player instances (side 1) — monsters attack players
+                let mut side_monsters: Vec<SimCombatant> = Vec::new();
+                let mut monster_ids: Vec<MonsterInstanceId> = Vec::new();
+                for (mid, inst) in &tracker.instances {
+                    if inst.current_hp <= 0 { continue; }
+                    side_monsters.push(SimCombatant {
+                        name: inst.label.clone(),
+                        max_hp: inst.max_hp,
+                        current_hp: inst.current_hp,
+                        ac: 10, // monsters don't store AC on instance; use 10 as fallback
+                        initiative_mod: inst.dex_mod,
+                        attacks: inst.attacks.clone(),
+                        multiattack_count: if inst.attacks.is_empty() { 1 } else {
+                            // estimate from count of attacks, default 1
+                            1
+                        },
+                        side: 0,
+                    });
+                    monster_ids.push(mid.clone());
+                }
+
+                let mut side_players: Vec<SimCombatant> = Vec::new();
+                let mut player_ids: Vec<String> = Vec::new();
+                for (pid, pc) in &tracker.players {
+                    if pc.current_hp <= 0 { continue; }
+                    // Find the PC's attack stats from dungeon.party
+                    let party_pc = dungeon.party.iter().find(|p| p.id == *pid);
+                    let (atk_bonus, dmg_dice) = party_pc
+                        .map(|p| (p.attack_bonus, p.damage_dice.clone()))
+                        .unwrap_or((5, "1d8 + 3".to_string()));
+                    let attack = crate::model::combat_stats::ParsedAttack {
+                        name: format!("{}'s Attack", pc.name),
+                        attack_type: "mw".to_string(),
+                        to_hit: atk_bonus,
+                        reach: Some(5),
+                        range: None,
+                        damage_dice: dmg_dice.clone(),
+                        damage_avg: combat_sim::estimate_dice_avg_pub(&dmg_dice),
+                        damage_type: "weapon".to_string(),
+                        extra_damage: Vec::new(),
+                    };
+                    side_players.push(SimCombatant {
+                        name: pc.name.clone(),
+                        max_hp: pc.max_hp,
+                        current_hp: pc.current_hp,
+                        ac: pc.ac,
+                        initiative_mod: pc.initiative_modifier,
+                        attacks: vec![attack],
+                        multiattack_count: 1,
+                        side: 1,
+                    });
+                    player_ids.push(pid.clone());
+                }
+
+                if !side_monsters.is_empty() && !side_players.is_empty() {
+                    let result = combat_sim::run_combat(&side_monsters, &side_players);
+
+                    // Write monster results back to tracker
+                    for (i, mid) in monster_ids.iter().enumerate() {
+                        if let Some(inst) = tracker.instances.get_mut(mid) {
+                            if let Some(final_state) = result.combatants.get(i) {
+                                inst.current_hp = final_state.current_hp.max(0);
+                                inst.is_dead = inst.current_hp <= 0;
+                            }
+                        }
+                    }
+
+                    // Write player results back to tracker
+                    for (i, pid) in player_ids.iter().enumerate() {
+                        if let Some(pc) = tracker.players.get_mut(pid) {
+                            let combatant_idx = side_monsters.len() + i;
+                            if let Some(final_state) = result.combatants.get(combatant_idx) {
+                                pc.current_hp = final_state.current_hp.max(0);
+                            }
+                        }
+                    }
+
+                    // Log the result
+                    let winner_text = match result.winner {
+                        Some(0) => "Monsters win",
+                        Some(1) => "Party wins",
+                        _ => "Draw",
+                    };
+                    tracker.log.log(
+                        format!("-- Simulation complete: {} in {} rounds --", winner_text, result.rounds),
+                        [255, 215, 0],
+                    );
+                    for c in &result.combatants {
+                        let status = if c.current_hp <= 0 { "dead" } else { "alive" };
+                        tracker.log.log(
+                            format!("  {} ({}/{}) {}", c.name, c.current_hp.max(0), c.max_hp, status),
+                            if c.current_hp <= 0 { [255, 100, 100] } else { [100, 255, 100] },
+                        );
+                    }
+                }
+            }
 
             ui.separator();
 

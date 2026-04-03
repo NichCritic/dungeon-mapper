@@ -335,6 +335,7 @@ impl DungeonApp {
             eid.hash(&mut h);
             rid.hash(&mut h);
         }
+        presentation.party_room.hash(&mut h);
         h.finish()
     }
 
@@ -609,6 +610,8 @@ impl eframe::App for DungeonApp {
                                     ui,
                                     &mut self.dungeon,
                                     &self.monster_db,
+                                    &mut self.combat_stats_cache,
+                                    &mut self.encounters_state.sim_state,
                                 );
                             }
                             Tab::Styled => {

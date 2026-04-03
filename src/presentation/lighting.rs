@@ -60,6 +60,7 @@ mod tests {
             show_labels_player: false,
             encounter_positions: HashMap::new(),
             combat_tracker: None,
+            party_room: None,
         }
     }
 
