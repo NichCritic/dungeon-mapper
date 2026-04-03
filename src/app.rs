@@ -4,6 +4,7 @@ use crate::model::Dungeon;
 use crate::presentation::PresentationState;
 use crate::server::PresentationServer;
 use crate::ui::annotations::{self, AnnotationModeState};
+use crate::ui::decor_view::{self, DecorViewState};
 use crate::ui::encounters_view::{self, EncountersViewState};
 use crate::ui::graph_editor::{self, GraphEditorState};
 use crate::ui::spatial_view::{self, SpatialViewState};
@@ -15,6 +16,7 @@ use crate::ui::player_view::{self, PlayerViewState};
 pub enum Tab {
     Graph,
     Spatial,
+    Decor,
     Encounters,
     Styled,
 }
@@ -24,6 +26,7 @@ pub struct DungeonApp {
     pub active_tab: Tab,
     pub graph_state: GraphEditorState,
     pub spatial_state: SpatialViewState,
+    pub decor_state: DecorViewState,
     pub encounters_state: EncountersViewState,
     pub styled_state: StyledViewState,
     /// Snapshot of graph state to detect when a re-solve is needed
@@ -70,6 +73,7 @@ impl Default for DungeonApp {
             active_tab: Tab::Graph,
             graph_state: GraphEditorState::default(),
             spatial_state: SpatialViewState::default(),
+            decor_state: DecorViewState::default(),
             encounters_state: EncountersViewState::default(),
             styled_state: StyledViewState::default(),
             last_graph_snapshot: 0,
@@ -354,6 +358,7 @@ impl DungeonApp {
             match self.active_tab {
                 Tab::Graph => "Graph".to_string(),
                 Tab::Spatial => "Spatial".to_string(),
+                Tab::Decor => "Decor".to_string(),
                 Tab::Encounters => "Encounters".to_string(),
                 Tab::Styled => "Styled".to_string(),
             }
@@ -368,6 +373,7 @@ impl DungeonApp {
             match self.active_tab {
                 Tab::Graph => &self.graph_state.view,
                 Tab::Spatial => &self.spatial_state.view,
+                Tab::Decor => &self.decor_state.view,
                 Tab::Encounters => &self.encounters_state.view,
                 Tab::Styled => &self.styled_state.view,
             }
@@ -431,6 +437,7 @@ impl eframe::App for DungeonApp {
                         self.dungeon = Dungeon::default();
                         self.graph_state = GraphEditorState::default();
                         self.spatial_state = SpatialViewState::default();
+                        self.decor_state = DecorViewState::default();
                         self.styled_state = StyledViewState::default();
                         self.presenting = false;
                         self.presentation = None;
@@ -466,6 +473,7 @@ impl eframe::App for DungeonApp {
                     // Normal tab buttons
                     ui.selectable_value(&mut self.active_tab, Tab::Graph, "Graph");
                     ui.selectable_value(&mut self.active_tab, Tab::Spatial, "Spatial");
+                    ui.selectable_value(&mut self.active_tab, Tab::Decor, "Decor");
                     ui.selectable_value(&mut self.active_tab, Tab::Encounters, "Encounters");
                     ui.selectable_value(&mut self.active_tab, Tab::Styled, "Styled");
 
@@ -520,7 +528,7 @@ impl eframe::App for DungeonApp {
         // Auto-solve layout when graph topology changes or first entering spatial/styled
         if !self.presenting {
             let current_hash = self.graph_hash();
-            let needs_layout = matches!(self.active_tab, Tab::Spatial | Tab::Encounters | Tab::Styled);
+            let needs_layout = matches!(self.active_tab, Tab::Spatial | Tab::Decor | Tab::Encounters | Tab::Styled);
             if needs_layout
                 && (current_hash != self.last_graph_snapshot
                     || self.dungeon.layout.is_none()
@@ -539,6 +547,7 @@ impl eframe::App for DungeonApp {
                 match self.active_tab {
                     Tab::Graph => self.graph_state.view.zoom,
                     Tab::Spatial => self.spatial_state.view.zoom,
+                    Tab::Decor => self.decor_state.view.zoom,
                     Tab::Encounters => self.encounters_state.view.zoom,
                     Tab::Styled => self.styled_state.view.zoom,
                 }
@@ -653,6 +662,13 @@ impl eframe::App for DungeonApp {
                                     &mut self.spatial_state,
                                 );
                             }
+                            Tab::Decor => {
+                                decor_view::decor_sidebar(
+                                    ui,
+                                    &mut self.dungeon,
+                                    &mut self.decor_state,
+                                );
+                            }
                             Tab::Encounters => {
                                 encounters_view::encounters_sidebar(
                                     ui,
@@ -701,6 +717,9 @@ impl eframe::App for DungeonApp {
                     }
                     Tab::Spatial => {
                         spatial_view::spatial_view(ui, &mut self.dungeon, &mut self.spatial_state);
+                    }
+                    Tab::Decor => {
+                        decor_view::decor_view(ui, &mut self.dungeon, &mut self.decor_state);
                     }
                     Tab::Encounters => {
                         encounters_view::encounters_view(ui, &self.dungeon, &mut self.encounters_state);

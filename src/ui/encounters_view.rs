@@ -87,6 +87,14 @@ fn render_input_hash(layout: &SpatialLayout, graph: &DungeonGraph, theme: &Theme
             if let Some(cave) = &room.cave_data {
                 cave.generation.hash(&mut h);
             }
+            room.sections.len().hash(&mut h);
+            for s in &room.sections {
+                s.x.to_bits().hash(&mut h);
+                s.y.to_bits().hash(&mut h);
+                s.width.to_bits().hash(&mut h);
+                s.height.to_bits().hash(&mut h);
+                std::mem::discriminant(&s.elevation).hash(&mut h);
+            }
         }
     }
     layout.corridors.len().hash(&mut h);

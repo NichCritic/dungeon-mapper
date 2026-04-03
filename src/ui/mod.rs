@@ -1,5 +1,6 @@
 pub mod annotations;
 pub mod canvas_common;
+pub mod decor_view;
 pub mod encounters_view;
 pub mod graph_editor;
 pub mod spatial_view;

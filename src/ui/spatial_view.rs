@@ -27,6 +27,8 @@ pub struct SpatialViewState {
     pub selected_corridor: Option<usize>,
     pub selected_waypoint: Option<usize>,
     pub selected_group: Option<usize>,
+    /// Selected elevation section within a room (room_id, section index).
+    pub selected_section: Option<(String, usize)>,
     drag_target: DragTarget,
     drag_accum: egui::Vec2,
     pub density_gap: u32,
@@ -46,6 +48,7 @@ impl Default for SpatialViewState {
             selected_corridor: None,
             selected_waypoint: None,
             selected_group: None,
+            selected_section: None,
             drag_target: DragTarget::None,
             drag_accum: egui::Vec2::ZERO,
             density_gap: 0,
@@ -1174,6 +1177,154 @@ fn draw_rooms(
                 egui::FontId::monospace(11.0 * transform.zoom),
                 label_color,
             );
+
+            // Draw elevation sections
+            let room_px_x = rl.x as f32 * GRID_PX;
+            let room_px_y = rl.y as f32 * GRID_PX;
+            for (si, section) in room.sections.iter().enumerate() {
+                let sec_min = transform.world_to_screen(egui::pos2(
+                    room_px_x + section.x * GRID_PX,
+                    room_px_y + section.y * GRID_PX,
+                ));
+                let sec_max = transform.world_to_screen(egui::pos2(
+                    room_px_x + (section.x + section.width) * GRID_PX,
+                    room_px_y + (section.y + section.height) * GRID_PX,
+                ));
+                let sec_rect = egui::Rect::from_min_max(sec_min, sec_max);
+
+                // Fill based on elevation type
+                let (fill_alpha, tick_dir) = match section.elevation {
+                    ElevationType::Raised => (30u8, 1.0f32),  // ticks outward
+                    ElevationType::Lowered => (50, -1.0),       // ticks inward
+                    ElevationType::Steps | ElevationType::Slope => (20, 0.0),
+                    ElevationType::BottomlessPit => (160, 0.0),
+                    ElevationType::Hole => (90, 0.0),
+                };
+                let section_fill = egui::Color32::from_rgba_unmultiplied(60, 60, 60, fill_alpha);
+                painter.rect_filled(sec_rect, 0.0, section_fill);
+
+                // Border
+                let is_sel_section = state.selected_section.as_ref()
+                    .is_some_and(|(rid, idx)| rid == &rl.room_id && *idx == si);
+                let sec_stroke = if is_sel_section {
+                    egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 200, 50))
+                } else {
+                    egui::Stroke::new(1.5, egui::Color32::from_rgb(80, 80, 80))
+                };
+                painter.rect_stroke(sec_rect, 0.0, sec_stroke, egui::StrokeKind::Middle);
+
+                // Tick marks for raised/lowered
+                if tick_dir != 0.0 {
+                    let tick_len = 3.0 * transform.zoom;
+                    let spacing = 8.0 * transform.zoom;
+                    let tick_color = egui::Color32::from_rgb(80, 80, 80);
+                    let tick_stroke = egui::Stroke::new(1.0, tick_color);
+
+                    // Top/bottom ticks
+                    let mut tx = sec_rect.min.x + spacing;
+                    while tx < sec_rect.max.x - spacing * 0.5 {
+                        // Top edge
+                        painter.line_segment(
+                            [egui::pos2(tx, sec_rect.min.y), egui::pos2(tx, sec_rect.min.y - tick_len * tick_dir)],
+                            tick_stroke,
+                        );
+                        // Bottom edge
+                        painter.line_segment(
+                            [egui::pos2(tx, sec_rect.max.y), egui::pos2(tx, sec_rect.max.y + tick_len * tick_dir)],
+                            tick_stroke,
+                        );
+                        tx += spacing;
+                    }
+                    // Left/right ticks
+                    let mut ty = sec_rect.min.y + spacing;
+                    while ty < sec_rect.max.y - spacing * 0.5 {
+                        painter.line_segment(
+                            [egui::pos2(sec_rect.min.x, ty), egui::pos2(sec_rect.min.x - tick_len * tick_dir, ty)],
+                            tick_stroke,
+                        );
+                        painter.line_segment(
+                            [egui::pos2(sec_rect.max.x, ty), egui::pos2(sec_rect.max.x + tick_len * tick_dir, ty)],
+                            tick_stroke,
+                        );
+                        ty += spacing;
+                    }
+                }
+
+                // Steps: draw parallel lines
+                if section.elevation == ElevationType::Steps {
+                    let step_count = 4;
+                    let step_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(80, 80, 80));
+                    if sec_rect.width() >= sec_rect.height() {
+                        for i in 1..step_count {
+                            let lx = sec_rect.min.x + (i as f32 / step_count as f32) * sec_rect.width();
+                            painter.line_segment(
+                                [egui::pos2(lx, sec_rect.min.y), egui::pos2(lx, sec_rect.max.y)],
+                                step_stroke,
+                            );
+                        }
+                    } else {
+                        for i in 1..step_count {
+                            let ly = sec_rect.min.y + (i as f32 / step_count as f32) * sec_rect.height();
+                            painter.line_segment(
+                                [egui::pos2(sec_rect.min.x, ly), egui::pos2(sec_rect.max.x, ly)],
+                                step_stroke,
+                            );
+                        }
+                    }
+                }
+
+                // Bottomless Pit: inset border for depth
+                if section.elevation == ElevationType::BottomlessPit {
+                    let inset = 3.0 * transform.zoom;
+                    let inset_rect = sec_rect.shrink(inset);
+                    painter.rect_stroke(inset_rect, 0.0, egui::Stroke::new(1.0, egui::Color32::from_rgb(80, 80, 80)), egui::StrokeKind::Middle);
+                }
+
+                // Hole: diagonal cross
+                if section.elevation == ElevationType::Hole {
+                    let cross_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(80, 80, 80));
+                    painter.line_segment([sec_rect.left_top(), sec_rect.right_bottom()], cross_stroke);
+                    painter.line_segment([sec_rect.right_top(), sec_rect.left_bottom()], cross_stroke);
+                }
+
+                // Slope: gradient strips along the longer axis
+                if section.elevation == ElevationType::Slope {
+                    let strips = 8;
+                    if sec_rect.width() >= sec_rect.height() {
+                        let strip_w = sec_rect.width() / strips as f32;
+                        for i in 0..strips {
+                            let alpha = ((i as f32 + 1.0) / strips as f32 * 60.0) as u8;
+                            let strip_fill = egui::Color32::from_rgba_unmultiplied(60, 60, 60, alpha);
+                            let strip_rect = egui::Rect::from_min_size(
+                                egui::pos2(sec_rect.min.x + i as f32 * strip_w, sec_rect.min.y),
+                                egui::vec2(strip_w, sec_rect.height()),
+                            );
+                            painter.rect_filled(strip_rect, 0.0, strip_fill);
+                        }
+                    } else {
+                        let strip_h = sec_rect.height() / strips as f32;
+                        for i in 0..strips {
+                            let alpha = ((i as f32 + 1.0) / strips as f32 * 60.0) as u8;
+                            let strip_fill = egui::Color32::from_rgba_unmultiplied(60, 60, 60, alpha);
+                            let strip_rect = egui::Rect::from_min_size(
+                                egui::pos2(sec_rect.min.x, sec_rect.min.y + i as f32 * strip_h),
+                                egui::vec2(sec_rect.width(), strip_h),
+                            );
+                            painter.rect_filled(strip_rect, 0.0, strip_fill);
+                        }
+                    }
+                }
+
+                // Label
+                let elev_label = section.elevation.label();
+                painter.text(
+                    sec_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    elev_label,
+                    egui::FontId::monospace((8.0 * transform.zoom).max(6.0)),
+                    egui::Color32::from_rgb(100, 100, 100),
+                );
+            }
         }
     }
 }
@@ -1525,6 +1676,91 @@ pub fn spatial_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Spa
                 ui.add_space(4.0);
                 ui.label("Notes:");
                 ui.label(&room.notes);
+            }
+        }
+
+        // Elevation sections
+        ui.add_space(12.0);
+        ui.separator();
+        ui.label("Elevation Sections:");
+
+        let (room_w, room_h) = dungeon.graph.room_by_id(&room_id)
+            .map(|r| r.grid_size()).unwrap_or((4, 4));
+
+        // Add section button
+        if ui.button("Add Section").clicked() {
+            if let Some(room) = dungeon.graph.room_by_id_mut(&room_id) {
+                let w = (room_w as f32 * 0.5).max(1.0);
+                let h = (room_h as f32 * 0.5).max(1.0);
+                let x = (room_w as f32 - w) / 2.0;
+                let y = (room_h as f32 - h) / 2.0;
+                room.sections.push(ElevationSection::new(ElevationType::Raised, x, y, w, h));
+            }
+        }
+
+        // List sections
+        let mut remove_section = None;
+        {
+            let section_info: Vec<(usize, String, ElevationType)> = dungeon.graph.room_by_id(&room_id)
+                .map(|r| r.sections.iter().enumerate()
+                    .map(|(i, s)| (i, s.id.clone(), s.elevation))
+                    .collect())
+                .unwrap_or_default();
+
+            for (si, _id, elev) in &section_info {
+                let is_sel = state.selected_section.as_ref()
+                    .is_some_and(|(rid, idx)| rid == &room_id && *idx == *si);
+                ui.horizontal(|ui| {
+                    if ui.selectable_label(is_sel, elev.label()).clicked() {
+                        state.selected_section = Some((room_id.clone(), *si));
+                    }
+                    if ui.small_button("X").clicked() {
+                        remove_section = Some(*si);
+                    }
+                });
+            }
+        }
+
+        if let Some(idx) = remove_section {
+            if let Some(room) = dungeon.graph.room_by_id_mut(&room_id) {
+                room.sections.remove(idx);
+            }
+            if state.selected_section.as_ref().is_some_and(|(rid, si)| rid == &room_id && *si == idx) {
+                state.selected_section = None;
+            }
+        }
+
+        // Edit selected section
+        if let Some((ref sel_rid, sel_idx)) = state.selected_section.clone() {
+            if sel_rid == &room_id {
+                if let Some(room) = dungeon.graph.room_by_id_mut(&room_id) {
+                    if sel_idx < room.sections.len() {
+                        ui.add_space(8.0);
+                        let section = &mut room.sections[sel_idx];
+                        ui.horizontal(|ui| {
+                            ui.label("Type:");
+                            egui::ComboBox::from_id_salt("section_elev_type")
+                                .selected_text(section.elevation.label())
+                                .show_ui(ui, |ui| {
+                                    for et in ElevationType::ALL {
+                                        ui.selectable_value(&mut section.elevation, et, et.label());
+                                    }
+                                });
+                        });
+                        ui.horizontal(|ui| {
+                            ui.add(egui::DragValue::new(&mut section.x)
+                                .range(0.0..=room_w as f32).speed(0.1).prefix("x: "));
+                            ui.add(egui::DragValue::new(&mut section.y)
+                                .range(0.0..=room_h as f32).speed(0.1).prefix("y: "));
+                        });
+                        ui.horizontal(|ui| {
+                            ui.add(egui::DragValue::new(&mut section.width)
+                                .range(0.5..=room_w as f32).speed(0.1).prefix("w: "));
+                            ui.add(egui::DragValue::new(&mut section.height)
+                                .range(0.5..=room_h as f32).speed(0.1).prefix("h: "));
+                        });
+                    }
+                }
             }
         }
     }

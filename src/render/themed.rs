@@ -45,9 +45,10 @@ pub fn render_themed(
     if options.show_grid {
         render_grid(renderer, &floor);
     }
-    // Render room decor (after floors/grid, before walls)
+    // Render room decor and elevation sections (after floors/grid, before walls)
     for rl in &layout.rooms {
         render_decor(renderer, rl, graph, theme);
+        render_elevation_sections(renderer, rl, graph, theme);
     }
     for rl in &layout.rooms {
         // Cave rooms use baked marching squares contour segments
@@ -596,6 +597,164 @@ pub fn render_decor(
                 for &(dx, dy) in &[(0.0, 0.0), (-0.4, -0.3), (0.3, -0.2), (-0.2, 0.4), (0.4, 0.3)] {
                     renderer.fill_circle(cx + dx * s, cy + dy * s, s * 0.15, color);
                 }
+            }
+        }
+    }
+}
+
+/// Render elevation sections (raised/lowered areas) inside rooms.
+pub fn render_elevation_sections(
+    renderer: &mut dyn MapRenderer,
+    rl: &RoomLayout,
+    graph: &DungeonGraph,
+    theme: &Theme,
+) {
+    let Some(room) = graph.room_by_id(&rl.room_id) else { return };
+    if room.sections.is_empty() {
+        return;
+    }
+
+    let room_px_x = rl.x as f32 * GRID_PX;
+    let room_px_y = rl.y as f32 * GRID_PX;
+    let wall_color = theme.wall_color;
+
+    for section in &room.sections {
+        let sx = room_px_x + section.x * GRID_PX;
+        let sy = room_px_y + section.y * GRID_PX;
+        let sw = section.width * GRID_PX;
+        let sh = section.height * GRID_PX;
+
+        match section.elevation {
+            ElevationType::Raised => {
+                // Light shading fill + solid border with tick marks pointing outward
+                let fill = [wall_color[0], wall_color[1], wall_color[2], 25];
+                renderer.fill_rect(sx, sy, sw, sh, fill);
+                renderer.stroke_rect(sx, sy, sw, sh, 1.5, wall_color);
+
+                // Tick marks along edges (pointing outward = raised)
+                let tick = GRID_PX * 0.15;
+                let spacing = GRID_PX * 0.5;
+                // Top edge: ticks pointing up
+                let mut tx = sx + spacing;
+                while tx < sx + sw - spacing * 0.5 {
+                    renderer.draw_line(tx, sy, tx, sy - tick, 1.0, wall_color);
+                    tx += spacing;
+                }
+                // Bottom edge: ticks pointing down
+                tx = sx + spacing;
+                while tx < sx + sw - spacing * 0.5 {
+                    renderer.draw_line(tx, sy + sh, tx, sy + sh + tick, 1.0, wall_color);
+                    tx += spacing;
+                }
+                // Left edge: ticks pointing left
+                let mut ty = sy + spacing;
+                while ty < sy + sh - spacing * 0.5 {
+                    renderer.draw_line(sx, ty, sx - tick, ty, 1.0, wall_color);
+                    ty += spacing;
+                }
+                // Right edge: ticks pointing right
+                ty = sy + spacing;
+                while ty < sy + sh - spacing * 0.5 {
+                    renderer.draw_line(sx + sw, ty, sx + sw + tick, ty, 1.0, wall_color);
+                    ty += spacing;
+                }
+            }
+            ElevationType::Lowered => {
+                // Darker shading fill + dashed border with tick marks pointing inward
+                let fill = [wall_color[0], wall_color[1], wall_color[2], 40];
+                renderer.fill_rect(sx, sy, sw, sh, fill);
+                renderer.stroke_rect(sx, sy, sw, sh, 1.5, wall_color);
+
+                // Tick marks along edges (pointing inward = lowered)
+                let tick = GRID_PX * 0.15;
+                let spacing = GRID_PX * 0.5;
+                // Top edge: ticks pointing down (inward)
+                let mut tx = sx + spacing;
+                while tx < sx + sw - spacing * 0.5 {
+                    renderer.draw_line(tx, sy, tx, sy + tick, 1.0, wall_color);
+                    tx += spacing;
+                }
+                // Bottom edge: ticks pointing up (inward)
+                tx = sx + spacing;
+                while tx < sx + sw - spacing * 0.5 {
+                    renderer.draw_line(tx, sy + sh, tx, sy + sh - tick, 1.0, wall_color);
+                    tx += spacing;
+                }
+                // Left edge: ticks pointing right (inward)
+                let mut ty = sy + spacing;
+                while ty < sy + sh - spacing * 0.5 {
+                    renderer.draw_line(sx, ty, sx + tick, ty, 1.0, wall_color);
+                    ty += spacing;
+                }
+                // Right edge: ticks pointing left (inward)
+                ty = sy + spacing;
+                while ty < sy + sh - spacing * 0.5 {
+                    renderer.draw_line(sx + sw, ty, sx + sw - tick, ty, 1.0, wall_color);
+                    ty += spacing;
+                }
+            }
+            ElevationType::Steps => {
+                // Parallel lines across the shorter dimension
+                let fill = [wall_color[0], wall_color[1], wall_color[2], 15];
+                renderer.fill_rect(sx, sy, sw, sh, fill);
+                renderer.stroke_rect(sx, sy, sw, sh, 1.0, wall_color);
+
+                let step_count = 4;
+                if sw >= sh {
+                    // Horizontal steps (lines vertical)
+                    for i in 1..step_count {
+                        let lx = sx + (i as f32 / step_count as f32) * sw;
+                        renderer.draw_line(lx, sy, lx, sy + sh, 1.0, wall_color);
+                    }
+                } else {
+                    // Vertical steps (lines horizontal)
+                    for i in 1..step_count {
+                        let ly = sy + (i as f32 / step_count as f32) * sh;
+                        renderer.draw_line(sx, ly, sx + sw, ly, 1.0, wall_color);
+                    }
+                }
+            }
+            ElevationType::Slope => {
+                // Gradient: strips of increasing opacity along the longer axis
+                // High end is light, low end is dark — direction is inherent
+                renderer.stroke_rect(sx, sy, sw, sh, 1.0, wall_color);
+
+                let strips = 8;
+                if sw >= sh {
+                    let strip_w = sw / strips as f32;
+                    for i in 0..strips {
+                        let alpha = ((i as f32 + 1.0) / strips as f32 * 50.0) as u8;
+                        let fill = [wall_color[0], wall_color[1], wall_color[2], alpha];
+                        renderer.fill_rect(sx + i as f32 * strip_w, sy, strip_w, sh, fill);
+                    }
+                } else {
+                    let strip_h = sh / strips as f32;
+                    for i in 0..strips {
+                        let alpha = ((i as f32 + 1.0) / strips as f32 * 50.0) as u8;
+                        let fill = [wall_color[0], wall_color[1], wall_color[2], alpha];
+                        renderer.fill_rect(sx, sy + i as f32 * strip_h, sw, strip_h, fill);
+                    }
+                }
+            }
+            ElevationType::BottomlessPit => {
+                // Solid dark fill with heavy border — void
+                let fill = [wall_color[0], wall_color[1], wall_color[2], 180];
+                renderer.fill_rect(sx, sy, sw, sh, fill);
+                renderer.stroke_rect(sx, sy, sw, sh, 2.0, wall_color);
+
+                // Inset border for depth effect
+                let inset = GRID_PX * 0.12;
+                renderer.stroke_rect(sx + inset, sy + inset, sw - inset * 2.0, sh - inset * 2.0, 1.0, wall_color);
+            }
+            ElevationType::Hole => {
+                // Dark fill (lighter than bottomless) with border and diagonal cross
+                let fill = [wall_color[0], wall_color[1], wall_color[2], 100];
+                renderer.fill_rect(sx, sy, sw, sh, fill);
+                renderer.stroke_rect(sx, sy, sw, sh, 1.5, wall_color);
+
+                // Diagonal cross indicating passage through floor
+                renderer.draw_line(sx, sy, sx + sw, sy + sh, 1.0, wall_color);
+                renderer.draw_line(sx + sw, sy, sx, sy + sh, 1.0, wall_color);
             }
         }
     }

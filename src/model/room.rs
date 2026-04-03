@@ -68,6 +68,9 @@ pub struct Room {
     /// Which floor(s) this room belongs to
     #[serde(default)]
     pub floor: FloorAssignment,
+    /// Raised/lowered sub-regions within this room.
+    #[serde(default)]
+    pub sections: Vec<ElevationSection>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -172,6 +175,68 @@ impl RoomDecor {
             x,
             y,
             rotation: 0.0,
+        }
+    }
+}
+
+/// A raised or lowered sub-region within a room.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ElevationSection {
+    pub id: String,
+    /// Position relative to room top-left, in grid units.
+    pub x: f32,
+    pub y: f32,
+    /// Size in grid units.
+    pub width: f32,
+    pub height: f32,
+    /// Elevation type.
+    pub elevation: ElevationType,
+}
+
+impl ElevationSection {
+    pub fn new(elevation: ElevationType, x: f32, y: f32, width: f32, height: f32) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            x, y, width, height,
+            elevation,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
+pub enum ElevationType {
+    /// Raised platform (e.g. dais, stage)
+    Raised,
+    /// Lowered pit (e.g. sunken area, pool)
+    Lowered,
+    /// Steps connecting levels
+    Steps,
+    /// Gradual slope (like steps but smooth/flat)
+    Slope,
+    /// Bottomless pit (no floor)
+    BottomlessPit,
+    /// Hole down to the floor below
+    Hole,
+}
+
+impl ElevationType {
+    pub const ALL: [ElevationType; 6] = [
+        ElevationType::Raised,
+        ElevationType::Lowered,
+        ElevationType::Steps,
+        ElevationType::Slope,
+        ElevationType::BottomlessPit,
+        ElevationType::Hole,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ElevationType::Raised => "Raised",
+            ElevationType::Lowered => "Lowered",
+            ElevationType::Steps => "Steps",
+            ElevationType::Slope => "Slope",
+            ElevationType::BottomlessPit => "Bottomless Pit",
+            ElevationType::Hole => "Hole",
         }
     }
 }
@@ -286,6 +351,7 @@ impl Room {
             decor: Vec::new(),
             cave_data: None,
             floor: FloorAssignment::default(),
+            sections: Vec::new(),
         }
     }
 
