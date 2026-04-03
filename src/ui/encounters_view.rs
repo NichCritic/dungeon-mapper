@@ -1,11 +1,11 @@
 use crate::data::MonsterDatabase;
 use crate::model::*;
 use crate::model::monster::{
-    self, size_label, alignment_display, damage_list_display,
+    size_label, alignment_display, damage_list_display,
     MonsterRef, CustomMonster, EncounterMonster, Monster, Feature,
     MergeStrategy, MergeConfig, merge_monsters,
     MERGE_NUMERIC_FIELDS, MERGE_LIST_FIELDS, MERGE_STRING_FIELDS,
-    MonsterType, HitPoints, ChallengeRating, Speed, SpeedValue, ArmorClass,
+    MonsterType, HitPoints, ChallengeRating, SpeedValue, ArmorClass,
 };
 use crate::render::recording::{RecordingRenderer, RenderCommand, replay_commands};
 use crate::render::themed::RenderOptions;
@@ -23,8 +23,6 @@ struct RenderCache {
 pub struct EncountersViewState {
     pub view: ViewState,
     render_cache: Option<RenderCache>,
-    /// Monster browser state
-    pub browser: MonsterBrowserState,
 }
 
 impl Default for EncountersViewState {
@@ -32,32 +30,6 @@ impl Default for EncountersViewState {
         Self {
             view: ViewState::default(),
             render_cache: None,
-            browser: MonsterBrowserState::default(),
-        }
-    }
-}
-
-pub struct MonsterBrowserState {
-    pub open: bool,
-    pub search: String,
-    pub cr_min: String,
-    pub cr_max: String,
-    pub type_filter: String,
-    pub selected: Option<(String, String)>, // (source, name)
-    /// Encounter index to add monsters to.
-    pub target_encounter_idx: Option<usize>,
-}
-
-impl Default for MonsterBrowserState {
-    fn default() -> Self {
-        Self {
-            open: false,
-            search: String::new(),
-            cr_min: String::new(),
-            cr_max: String::new(),
-            type_filter: String::new(),
-            selected: None,
-            target_encounter_idx: None,
         }
     }
 }
@@ -603,7 +575,7 @@ fn draw_stat_block(ui: &mut egui::Ui, m: &Monster, monster_db: &MonsterDatabase)
         ui.add(
             egui::Image::from_uri(uri)
                 .fit_to_exact_size(egui::vec2(80.0, 80.0))
-                .rounding(4.0),
+                .corner_radius(4.0),
         );
         ui.add_space(4.0);
     }

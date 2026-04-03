@@ -593,13 +593,6 @@ pub fn damage_list_display(entries: &[serde_json::Value]) -> String {
 }
 
 impl Monster {
-    /// One-line summary: "name (CR X, Size Type)"
-    pub fn summary_line(&self) -> String {
-        let size = self.size.first().map(|s| size_label(s)).unwrap_or("?");
-        let type_str = self.monster_type.display();
-        format!("{} (CR {}, {} {})", self.name, self.cr.cr_string(), size, type_str)
-    }
-
     /// Ability score modifier.
     pub fn modifier(score: u8) -> i8 {
         (score as i8 - 10) / 2
@@ -1009,9 +1002,3 @@ pub fn merge_monsters(a: &Monster, b: &Monster, config: &MergeConfig) -> Monster
     }
 }
 
-/// Top-level wrapper for deserializing a bestiary JSON file.
-#[derive(Debug, Deserialize)]
-pub struct BestiaryFile {
-    #[serde(default)]
-    pub monster: Vec<Monster>,
-}

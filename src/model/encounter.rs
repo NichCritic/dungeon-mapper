@@ -35,10 +35,4 @@ impl Encounter {
         }
     }
 
-    /// Total XP for this encounter.
-    pub fn total_xp(&self, resolve: impl Fn(&super::monster::MonsterRef) -> Option<u32>) -> u32 {
-        self.monsters.iter().map(|em| {
-            resolve(&em.monster_ref).unwrap_or(0) * em.count
-        }).sum()
-    }
 }

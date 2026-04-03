@@ -9,8 +9,6 @@ use crate::model::monster::Monster;
 pub struct MonsterDatabase {
     /// All monsters, sorted by name.
     monsters: Vec<Monster>,
-    /// Path to the bestiary directory (for reloading / diagnostics).
-    pub bestiary_path: Option<PathBuf>,
     /// Base image directory (e.g. `5etools-src/img/`).
     /// Token images live at `{img_dir}/bestiary/tokens/{source}/{name}.webp`.
     pub img_dir: Option<PathBuf>,
@@ -21,7 +19,6 @@ impl MonsterDatabase {
     pub fn empty() -> Self {
         Self {
             monsters: Vec::new(),
-            bestiary_path: None,
             img_dir: None,
         }
     }
@@ -30,14 +27,10 @@ impl MonsterDatabase {
     /// Resolves `_copy` inheritance and `_mod` operations at the JSON level
     /// before deserializing into typed `Monster` structs.
     pub fn load_from_directory(dir: &Path) -> Self {
-        let mut bestiary_path = None;
-
         if !dir.is_dir() {
             eprintln!("Warning: bestiary directory not found: {}", dir.display());
             return Self::empty();
         }
-
-        bestiary_path = Some(dir.to_path_buf());
 
         // Phase 1: Load all files as raw JSON
         let mut raw_monsters: Vec<Value> = Vec::new();
@@ -176,15 +169,13 @@ impl MonsterDatabase {
 
         // Compute image directory: bestiary dir is e.g. 5etools-src/data/bestiary
         // img dir is 5etools-src/img/
-        let img_dir = bestiary_path.as_ref()
-            .and_then(|bp| bp.parent())  // data/
-            .and_then(|p| p.parent())     // 5etools-src/
+        let img_dir = dir.parent()   // data/
+            .and_then(|p| p.parent()) // 5etools-src/
             .map(|p| p.join("img"))
             .filter(|p| p.is_dir());
 
         Self {
             monsters,
-            bestiary_path,
             img_dir,
         }
     }
@@ -222,15 +213,6 @@ impl MonsterDatabase {
         } else {
             None
         }
-    }
-
-    /// Search monsters by name substring (case-insensitive).
-    pub fn search_by_name(&self, query: &str) -> Vec<&Monster> {
-        let query_lower = query.to_lowercase();
-        self.monsters
-            .iter()
-            .filter(|m| m.name.to_lowercase().contains(&query_lower))
-            .collect()
     }
 
     /// Filter monsters by criteria.
