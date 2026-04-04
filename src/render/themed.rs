@@ -1059,6 +1059,67 @@ pub fn render_elevation_sections(
     }
 }
 
+/// Compute door rectangle in grid coordinates given an exit position or waypoint fallback.
+/// Returns (x1, y1, x2, y2) in grid coords for the door rectangle.
+pub fn door_rect(
+    rl: &RoomLayout,
+    wp: &GridPos,
+    exit: Option<&ExitPos>,
+    dw: f32,
+    door_depth: f32,
+) -> (f32, f32, f32, f32) {
+    let dw_half = dw / 2.0;
+
+    if let Some(exit) = exit {
+        // Use stored exit to determine face and position
+        let rw = rl.width as f32;
+        let rh = rl.height as f32;
+        let rx = rl.x as f32;
+        let ry = rl.y as f32;
+        let ex = exit.x;
+        let ey = exit.y;
+        let eps = 0.01;
+        if (ex - (rx + rw)).abs() < eps {
+            // Right wall
+            let wall_x = rx + rw;
+            (wall_x - door_depth / 2.0, ey - dw_half, wall_x + door_depth / 2.0, ey + dw_half)
+        } else if (ex - rx).abs() < eps {
+            // Left wall
+            (rx - door_depth / 2.0, ey - dw_half, rx + door_depth / 2.0, ey + dw_half)
+        } else if (ey - (ry + rh)).abs() < eps {
+            // Bottom wall
+            let wall_y = ry + rh;
+            (ex - dw_half, wall_y - door_depth / 2.0, ex + dw_half, wall_y + door_depth / 2.0)
+        } else {
+            // Top wall
+            (ex - dw_half, ry - door_depth / 2.0, ex + dw_half, ry + door_depth / 2.0)
+        }
+    } else {
+        // Fallback: nearest-wall heuristic from waypoint
+        let wp_cx = wp.x as f32;
+        let wp_cy = wp.y as f32;
+        let dist_right = (wp_cx - (rl.x + rl.width as i32) as f32).abs();
+        let dist_left = (wp_cx - rl.x as f32).abs();
+        let dist_bottom = (wp_cy - (rl.y + rl.height as i32) as f32).abs();
+        let dist_top = (wp_cy - rl.y as f32).abs();
+        let min_dist = dist_right.min(dist_left).min(dist_bottom).min(dist_top);
+
+        if min_dist == dist_right {
+            let wall_x = (rl.x + rl.width as i32) as f32;
+            (wall_x - door_depth / 2.0, wp_cy - dw_half, wall_x + door_depth / 2.0, wp_cy + dw_half)
+        } else if min_dist == dist_left {
+            let wall_x = rl.x as f32;
+            (wall_x - door_depth / 2.0, wp_cy - dw_half, wall_x + door_depth / 2.0, wp_cy + dw_half)
+        } else if min_dist == dist_bottom {
+            let wall_y = (rl.y + rl.height as i32) as f32;
+            (wp_cx - dw_half, wall_y - door_depth / 2.0, wp_cx + dw_half, wall_y + door_depth / 2.0)
+        } else {
+            let wall_y = rl.y as f32;
+            (wp_cx - dw_half, wall_y - door_depth / 2.0, wp_cx + dw_half, wall_y + door_depth / 2.0)
+        }
+    }
+}
+
 /// Render door symbols on corridors.
 pub fn render_doors(
     renderer: &mut dyn MapRenderer,
@@ -1084,35 +1145,16 @@ pub fn render_doors(
         let room_ids = [&edge.source_room_id, &edge.target_room_id];
         let wp_ends = [&corridor.waypoints[0], corridor.waypoints.last().unwrap()];
 
-        for (room_id, wp) in room_ids.iter().zip(wp_ends.iter()) {
+        let exits = [edge.source_exit.as_ref(), edge.target_exit.as_ref()];
+
+        for ((room_id, wp), exit) in room_ids.iter().zip(wp_ends.iter()).zip(exits.iter()) {
             // Skip drawing door on cave room walls — caves have irregular boundaries
             let is_cave = graph.room_by_id(room_id)
                 .is_some_and(|r| r.shape == RoomShape::Cave);
             if is_cave { continue; }
             let Some(rl) = layout.room_by_id(room_id) else { continue };
 
-            let wp_cx = wp.x as f32;
-            let wp_cy = wp.y as f32;
-            let dist_right = (wp_cx - (rl.x + rl.width as i32) as f32).abs();
-            let dist_left = (wp_cx - rl.x as f32).abs();
-            let dist_bottom = (wp_cy - (rl.y + rl.height as i32) as f32).abs();
-            let dist_top = (wp_cy - rl.y as f32).abs();
-            let min_dist = dist_right.min(dist_left).min(dist_bottom).min(dist_top);
-            let dw_half = dw / 2.0;
-
-            let (dx1, dy1, dx2, dy2) = if min_dist == dist_right {
-                let wall_x = (rl.x + rl.width as i32) as f32;
-                (wall_x - door_depth / 2.0, wp_cy - dw_half, wall_x + door_depth / 2.0, wp_cy + dw_half)
-            } else if min_dist == dist_left {
-                let wall_x = rl.x as f32;
-                (wall_x - door_depth / 2.0, wp_cy - dw_half, wall_x + door_depth / 2.0, wp_cy + dw_half)
-            } else if min_dist == dist_bottom {
-                let wall_y = (rl.y + rl.height as i32) as f32;
-                (wp_cx - dw_half, wall_y - door_depth / 2.0, wp_cx + dw_half, wall_y + door_depth / 2.0)
-            } else {
-                let wall_y = rl.y as f32;
-                (wp_cx - dw_half, wall_y - door_depth / 2.0, wp_cx + dw_half, wall_y + door_depth / 2.0)
-            };
+            let (dx1, dy1, dx2, dy2) = door_rect(rl, wp, *exit, dw, door_depth);
 
             let px = dx1 * GRID_PX;
             let py = dy1 * GRID_PX;

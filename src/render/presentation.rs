@@ -289,8 +289,9 @@ fn render_doors_filtered(
         let wp_ends = [&corridor.waypoints[0], corridor.waypoints.last().unwrap()];
 
         let corr_vis = corridor_visibility(&edge.connection.id, presentation, graph);
+        let exits = [edge.source_exit.as_ref(), edge.target_exit.as_ref()];
 
-        for (room_id, wp) in room_ids.iter().zip(wp_ends.iter()) {
+        for ((room_id, wp), exit) in room_ids.iter().zip(wp_ends.iter()).zip(exits.iter()) {
             // Skip drawing door on cave room walls
             let is_cave = graph.room_by_id(room_id)
                 .is_some_and(|r| r.shape == RoomShape::Cave);
@@ -304,28 +305,7 @@ fn render_doors_filtered(
             if !room_shown && !corridor_shown { continue; }
             let Some(rl) = layout.room_by_id(room_id) else { continue };
 
-            let wp_cx = wp.x as f32;
-            let wp_cy = wp.y as f32;
-            let dist_right = (wp_cx - (rl.x + rl.width as i32) as f32).abs();
-            let dist_left = (wp_cx - rl.x as f32).abs();
-            let dist_bottom = (wp_cy - (rl.y + rl.height as i32) as f32).abs();
-            let dist_top = (wp_cy - rl.y as f32).abs();
-            let min_dist = dist_right.min(dist_left).min(dist_bottom).min(dist_top);
-            let dw_half = dw / 2.0;
-
-            let (dx1, dy1, dx2, dy2) = if min_dist == dist_right {
-                let wall_x = (rl.x + rl.width as i32) as f32;
-                (wall_x - door_depth / 2.0, wp_cy - dw_half, wall_x + door_depth / 2.0, wp_cy + dw_half)
-            } else if min_dist == dist_left {
-                let wall_x = rl.x as f32;
-                (wall_x - door_depth / 2.0, wp_cy - dw_half, wall_x + door_depth / 2.0, wp_cy + dw_half)
-            } else if min_dist == dist_bottom {
-                let wall_y = (rl.y + rl.height as i32) as f32;
-                (wp_cx - dw_half, wall_y - door_depth / 2.0, wp_cx + dw_half, wall_y + door_depth / 2.0)
-            } else {
-                let wall_y = rl.y as f32;
-                (wp_cx - dw_half, wall_y - door_depth / 2.0, wp_cx + dw_half, wall_y + door_depth / 2.0)
-            };
+            let (dx1, dy1, dx2, dy2) = crate::render::themed::door_rect(rl, wp, *exit, dw, door_depth);
 
             let px = dx1 * GRID_PX;
             let py = dy1 * GRID_PX;

@@ -92,6 +92,12 @@ pub struct StoredEdge {
     pub source_room_id: String,
     pub target_room_id: String,
     pub connection: Connection,
+    /// User-pinned exit position on source room wall (corridor center-line at wall edge).
+    #[serde(default)]
+    pub source_exit: Option<super::spatial::ExitPos>,
+    /// User-pinned exit position on target room wall (corridor center-line at wall edge).
+    #[serde(default)]
+    pub target_exit: Option<super::spatial::ExitPos>,
 }
 
 impl DungeonGraph {
@@ -119,6 +125,8 @@ impl DungeonGraph {
             source_room_id: source_id,
             target_room_id: target_id,
             connection,
+            source_exit: None,
+            target_exit: None,
         });
     }
 

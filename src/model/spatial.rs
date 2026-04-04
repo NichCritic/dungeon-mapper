@@ -32,6 +32,14 @@ pub struct GridPos {
     pub y: i32,
 }
 
+/// Exit position on a room wall, in grid coordinates with half-grid precision.
+/// Allows placement on grid lines (integer) and cell centers (half-integer).
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ExitPos {
+    pub x: f32,
+    pub y: f32,
+}
+
 /// A first-class bounds rectangle that can be placed on the map.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BoundsRect {

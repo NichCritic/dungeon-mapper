@@ -19,6 +19,8 @@ enum DragTarget {
     Group(usize),
     /// Dragging an elevation section: (room_id, section index)
     Section(String, usize),
+    /// Dragging a corridor exit handle: (connection_id, is_source_exit)
+    Exit(String, bool),
 }
 
 pub struct SpatialViewState {
@@ -136,6 +138,48 @@ const LOWER_FLOOR_DIM: f32 = 0.35;
 const HANDLE_RADIUS: f32 = 5.0;
 /// Hit radius in screen pixels (fixed, does not scale with zoom).
 const HANDLE_HIT_RADIUS: f32 = 12.0;
+/// Size of exit handle diamond (multiplied by zoom at draw time).
+const EXIT_HANDLE_SIZE: f32 = 4.0;
+
+/// Test if a screen-space point is inside an exit handle diamond.
+/// Returns Some((connection_id, is_source)) if hit, None otherwise.
+fn hit_test_exit_handles(
+    pos: egui::Pos2,
+    selected_room_id: &str,
+    layout: &SpatialLayout,
+    graph: &DungeonGraph,
+    transform: &ViewTransform,
+    zoom: f32,
+) -> Option<(String, bool)> {
+    let room_rl = layout.room_by_id(selected_room_id)?;
+    let diamond_size = EXIT_HANDLE_SIZE * zoom;
+
+    for edge in &graph.connections {
+        let (is_source, other_room_id) = if edge.source_room_id == selected_room_id {
+            (true, &edge.target_room_id)
+        } else if edge.target_room_id == selected_room_id {
+            (false, &edge.source_room_id)
+        } else {
+            continue;
+        };
+        let exit_opt = if is_source { &edge.source_exit } else { &edge.target_exit };
+        let other_rl = layout.room_by_id(other_room_id)?;
+        let exit_pos = match exit_opt {
+            Some(p) => *p,
+            None => default_exit_pos(room_rl, other_rl, edge.connection.corridor_width),
+        };
+        let center = transform.world_to_screen(
+            egui::pos2(exit_pos.x * GRID_PX, exit_pos.y * GRID_PX),
+        );
+        // Diamond hit = Manhattan distance <= size
+        let dx = (pos.x - center.x).abs();
+        let dy = (pos.y - center.y).abs();
+        if dx + dy <= diamond_size {
+            return Some((edge.connection.id.clone(), is_source));
+        }
+    }
+    None
+}
 
 pub fn spatial_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut SpatialViewState) {
     let (response, painter) = ui.allocate_painter(
@@ -157,6 +201,7 @@ pub fn spatial_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Spatia
         draw_rooms(&painter, &transform, layout, &dungeon.graph, state);
         draw_doors(&painter, &transform, layout, &dungeon.graph, state);
         draw_waypoint_handles(&painter, &transform, layout, state);
+        draw_exit_handles(&painter, &transform, layout, &dungeon.graph, state);
     } else if !dungeon.graph.rooms.is_empty() {
         painter.text(
             rect.center(),
@@ -208,6 +253,19 @@ fn handle_spatial_interactions(
                                 return;
                             }
                         }
+                    }
+                }
+            }
+
+            // Check exit handles (when a room is selected)
+            if let Some(ref selected_room_id) = state.selected_room {
+                if let Some(layout) = &dungeon.layout {
+                    if let Some((conn_id, is_source)) = hit_test_exit_handles(
+                        pos, selected_room_id, layout, &dungeon.graph, &transform, state.view.zoom,
+                    ) {
+                        state.drag_target = DragTarget::Exit(conn_id, is_source);
+                        state.drag_accum = egui::Vec2::ZERO;
+                        return;
                     }
                 }
             }
@@ -280,10 +338,16 @@ fn handle_spatial_interactions(
                         }
                     }
 
-                    if gx >= rl.x
-                        && gx < rl.x + rl.width as i32
-                        && gy >= rl.y
-                        && gy < rl.y + rl.height as i32
+                    // Use world-coordinate hit test with a small margin for narrow rooms
+                    let margin = GRID_PX * 0.4; // ~8px at 1x zoom
+                    let room_x1 = rl.x as f32 * GRID_PX - margin;
+                    let room_y1 = rl.y as f32 * GRID_PX - margin;
+                    let room_x2 = (rl.x + rl.width as i32) as f32 * GRID_PX + margin;
+                    let room_y2 = (rl.y + rl.height as i32) as f32 * GRID_PX + margin;
+                    if world.x >= room_x1
+                        && world.x <= room_x2
+                        && world.y >= room_y1
+                        && world.y <= room_y2
                     {
                         // If this is a cave room that's already selected, toggle the clicked cell
                         if state.selected_room.as_deref() == Some(&rl.room_id) {
@@ -404,6 +468,18 @@ fn handle_spatial_interactions(
                 }
             }
 
+            // Check exit handles (when room is selected)
+            if let Some(ref selected_room_id) = state.selected_room {
+                if let Some(layout) = &dungeon.layout {
+                    if hit_test_exit_handles(
+                        pos, selected_room_id, layout, &dungeon.graph, &transform, state.view.zoom,
+                    ).is_some() {
+                        // Click on exit handle — keep room selected, don't change selection
+                        return;
+                    }
+                }
+            }
+
             // Check corridor segment hit
             if let Some(layout) = &dungeon.layout {
                 let mut hit_corridor = None;
@@ -429,15 +505,18 @@ fn handle_spatial_interactions(
                     state.selected_room = None;
                     state.selected_group = None;
                 } else {
-                    // Check room hit
-                    let gx = world_to_grid(world.x);
-                    let gy = world_to_grid(world.y);
+                    // Check room hit (with margin for narrow rooms)
                     let mut hit_room = false;
                     for rl in &layout.rooms {
-                        if gx >= rl.x
-                            && gx < rl.x + rl.width as i32
-                            && gy >= rl.y
-                            && gy < rl.y + rl.height as i32
+                        let margin = GRID_PX * 0.4;
+                        let room_x1 = rl.x as f32 * GRID_PX - margin;
+                        let room_y1 = rl.y as f32 * GRID_PX - margin;
+                        let room_x2 = (rl.x + rl.width as i32) as f32 * GRID_PX + margin;
+                        let room_y2 = (rl.y + rl.height as i32) as f32 * GRID_PX + margin;
+                        if world.x >= room_x1
+                            && world.x <= room_x2
+                            && world.y >= room_y1
+                            && world.y <= room_y2
                         {
                             // Check if click is on an elevation section
                             let room_px_x = rl.x as f32 * GRID_PX;
@@ -469,6 +548,8 @@ fn handle_spatial_interactions(
                     }
                     if !hit_room {
                         // Check group hit
+                        let gx = world_to_grid(world.x);
+                        let gy = world_to_grid(world.y);
                         let mut hit_group = false;
                         for (gi, group) in dungeon.graph.groups.iter().enumerate() {
                             if group.max_width.is_none() && group.max_height.is_none() {
@@ -533,6 +614,38 @@ fn handle_spatial_interactions(
 
     // === DRAGGING ===
     if response.dragged_by(egui::PointerButton::Primary) {
+        // Exit drag uses absolute cursor position — handle before grid-step accumulation
+        if let DragTarget::Exit(ref conn_id, is_source) = state.drag_target {
+            let conn_id = conn_id.clone();
+            if let Some(ptr_pos) = response.interact_pointer_pos() {
+                let world = transform.screen_to_world(ptr_pos);
+                let room_id = dungeon.graph.connections.iter()
+                    .find(|e| e.connection.id == conn_id)
+                    .map(|e| if is_source { &e.source_room_id } else { &e.target_room_id })
+                    .cloned();
+                let cw = dungeon.graph.connections.iter()
+                    .find(|e| e.connection.id == conn_id)
+                    .map(|e| e.connection.corridor_width)
+                    .unwrap_or(2);
+                if let Some(room_id) = room_id {
+                    if let Some(layout) = &dungeon.layout {
+                        if let Some(room_rl) = layout.room_by_id(&room_id) {
+                            let new_exit = snap_to_perimeter(world, room_rl, cw);
+                            if let Some(edge) = dungeon.graph.connections.iter_mut()
+                                .find(|e| e.connection.id == conn_id)
+                            {
+                                if is_source {
+                                    edge.source_exit = Some(new_exit);
+                                } else {
+                                    edge.target_exit = Some(new_exit);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         state.drag_accum += response.drag_delta() / state.view.zoom;
 
         let grid_steps_x = (state.drag_accum.x / GRID_PX).round() as i32;
@@ -581,6 +694,26 @@ fn handle_spatial_interactions(
                                         corridor.pinned_waypoints.last_mut().unwrap().x += grid_steps_x;
                                         corridor.pinned_waypoints.last_mut().unwrap().y += grid_steps_y;
                                     }
+                                }
+                            }
+                        }
+                    }
+
+                    // Shift exit positions for connected edges
+                    for (conn_id, is_src, is_tgt) in &connected_ids {
+                        if let Some(edge) = dungeon.graph.connections.iter_mut()
+                            .find(|e| e.connection.id == *conn_id)
+                        {
+                            if *is_src {
+                                if let Some(ref mut exit) = edge.source_exit {
+                                    exit.x += grid_steps_x as f32;
+                                    exit.y += grid_steps_y as f32;
+                                }
+                            }
+                            if *is_tgt {
+                                if let Some(ref mut exit) = edge.target_exit {
+                                    exit.x += grid_steps_x as f32;
+                                    exit.y += grid_steps_y as f32;
                                 }
                             }
                         }
@@ -719,6 +852,22 @@ fn handle_spatial_interactions(
                                 }
                             }
                         }
+
+                        // Shift exit positions for connections touching group rooms
+                        for edge in &mut dungeon.graph.connections {
+                            if room_id_set.contains(&edge.source_room_id) {
+                                if let Some(ref mut exit) = edge.source_exit {
+                                    exit.x += grid_steps_x as f32;
+                                    exit.y += grid_steps_y as f32;
+                                }
+                            }
+                            if room_id_set.contains(&edge.target_room_id) {
+                                if let Some(ref mut exit) = edge.target_exit {
+                                    exit.x += grid_steps_x as f32;
+                                    exit.y += grid_steps_y as f32;
+                                }
+                            }
+                        }
                     }
                 }
                 DragTarget::Section(room_id, sec_idx) => {
@@ -742,6 +891,7 @@ fn handle_spatial_interactions(
                         }
                     }
                 }
+                DragTarget::Exit(_, _) => {} // handled above, before grid-step check
                 DragTarget::None => {}
             }
             state.drag_accum.x -= grid_steps_x as f32 * GRID_PX;
@@ -795,6 +945,23 @@ fn handle_spatial_interactions(
                 }
             }
             DragTarget::Section(_, _) => {} // position already updated during drag
+            DragTarget::Exit(conn_id, _) => {
+                // Re-route the corridor for this connection
+                let conn_id = conn_id.clone();
+                if let Some(edge) = dungeon.graph.connections.iter().find(|e| e.connection.id == conn_id) {
+                    let affected = std::collections::HashSet::from([
+                        edge.source_room_id.clone(),
+                        edge.target_room_id.clone(),
+                    ]);
+                    if let Some(layout) = &mut dungeon.layout {
+                        layout.corridors =
+                            crate::solver::corridor::route_corridors_for_rooms(
+                                &dungeon.graph, layout, &affected,
+                            );
+                        layout.recheck_corridor_overlaps();
+                    }
+                }
+            }
             DragTarget::None => {}
         }
         state.drag_target = DragTarget::None;
@@ -1084,6 +1251,149 @@ fn draw_waypoint_handles(
             // Circle for mid-waypoints
             painter.circle(screen, handle_r, fill, egui::Stroke::new(1.5, stroke_color));
         }
+    }
+}
+
+/// Compute the default exit position for a room/connection when no exit is stored.
+/// Returns the corridor center-line position on the room wall.
+fn default_exit_pos(room_rl: &RoomLayout, other_rl: &RoomLayout, _corridor_width: u32) -> ExitPos {
+    let rcx = room_rl.x as f32 + room_rl.width as f32 / 2.0;
+    let rcy = room_rl.y as f32 + room_rl.height as f32 / 2.0;
+    let ocx = other_rl.x as f32 + other_rl.width as f32 / 2.0;
+    let ocy = other_rl.y as f32 + other_rl.height as f32 / 2.0;
+    let dx = ocx - rcx;
+    let dy = ocy - rcy;
+
+    if dx.abs() >= dy.abs() {
+        if dx >= 0.0 {
+            ExitPos { x: room_rl.x as f32 + room_rl.width as f32, y: rcy }
+        } else {
+            ExitPos { x: room_rl.x as f32, y: rcy }
+        }
+    } else {
+        if dy >= 0.0 {
+            ExitPos { x: rcx, y: room_rl.y as f32 + room_rl.height as f32 }
+        } else {
+            ExitPos { x: rcx, y: room_rl.y as f32 }
+        }
+    }
+}
+
+/// Project a world-space point onto the room perimeter and snap to integer grid coords.
+/// Returns the snapped exit position on the room wall.
+/// Round to nearest half-grid unit (0.0, 0.5, 1.0, 1.5, ...).
+fn snap_half_grid(v: f32) -> f32 {
+    (v * 2.0).round() / 2.0
+}
+
+fn snap_to_perimeter(world: egui::Pos2, room_rl: &RoomLayout, corridor_width: u32) -> ExitPos {
+    let half = corridor_width as f32 / 2.0;
+    let rw = room_rl.width as f32;
+    let rh = room_rl.height as f32;
+    let rx = room_rl.x as f32;
+    let ry = room_rl.y as f32;
+    // Room edges in world pixels
+    let rx_px = rx * GRID_PX;
+    let ry_px = ry * GRID_PX;
+    let rx2_px = (rx + rw) * GRID_PX;
+    let ry2_px = (ry + rh) * GRID_PX;
+
+    // Convert cursor to grid coords, snap to half-grid
+    let grid_y = snap_half_grid(world.y / GRID_PX);
+    let grid_x = snap_half_grid(world.x / GRID_PX);
+
+    // Clamp so corridor fits within the wall (need half corridor width margin)
+    let y_min = ry + half;
+    let y_max = ry + rh - half;
+    let x_min = rx + half;
+    let x_max = rx + rw - half;
+    let y_clamped = grid_y.clamp(y_min, y_max);
+    let x_clamped = grid_x.clamp(x_min, x_max);
+
+    let faces: [(f32, ExitPos); 4] = [
+        // Right face
+        (world.distance(egui::pos2(rx2_px, y_clamped * GRID_PX)),
+         ExitPos { x: rx + rw, y: y_clamped }),
+        // Left face
+        (world.distance(egui::pos2(rx_px, y_clamped * GRID_PX)),
+         ExitPos { x: rx, y: y_clamped }),
+        // Bottom face
+        (world.distance(egui::pos2(x_clamped * GRID_PX, ry2_px)),
+         ExitPos { x: x_clamped, y: ry + rh }),
+        // Top face
+        (world.distance(egui::pos2(x_clamped * GRID_PX, ry_px)),
+         ExitPos { x: x_clamped, y: ry }),
+    ];
+
+    faces.iter()
+        .min_by(|a, b| a.0.partial_cmp(&b.0).unwrap())
+        .unwrap()
+        .1
+}
+
+/// Draw exit handles for each connection touching the selected room.
+fn draw_exit_handles(
+    painter: &egui::Painter,
+    transform: &ViewTransform,
+    layout: &SpatialLayout,
+    graph: &DungeonGraph,
+    state: &SpatialViewState,
+) {
+    let Some(ref selected_room_id) = state.selected_room else { return };
+    let Some(room_rl) = layout.room_by_id(selected_room_id) else { return };
+
+    let handle_size = EXIT_HANDLE_SIZE * state.view.zoom;
+
+    for edge in &graph.connections {
+        let (is_source, other_room_id) = if edge.source_room_id == *selected_room_id {
+            (true, &edge.target_room_id)
+        } else if edge.target_room_id == *selected_room_id {
+            (false, &edge.source_room_id)
+        } else {
+            continue;
+        };
+
+        let exit_opt = if is_source { &edge.source_exit } else { &edge.target_exit };
+        let Some(other_rl) = layout.room_by_id(other_room_id) else { continue };
+
+        let (exit_pos, is_set) = match exit_opt {
+            Some(pos) => (*pos, true),
+            None => (default_exit_pos(room_rl, other_rl, edge.connection.corridor_width), false),
+        };
+
+        let screen = transform.world_to_screen(
+            egui::pos2(exit_pos.x * GRID_PX, exit_pos.y * GRID_PX),
+        );
+
+        let is_dragging = matches!(&state.drag_target, DragTarget::Exit(cid, src) if *cid == edge.connection.id && *src == is_source);
+
+        let fill = if is_dragging {
+            egui::Color32::from_rgb(255, 200, 50)
+        } else if is_set {
+            egui::Color32::from_rgb(240, 160, 40)
+        } else {
+            egui::Color32::from_rgba_unmultiplied(180, 140, 80, 120)
+        };
+
+        let stroke_color = if is_set {
+            egui::Color32::WHITE
+        } else {
+            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 100)
+        };
+
+        // Draw as a small square rotated 45° (diamond)
+        let s = handle_size;
+        let points = vec![
+            egui::pos2(screen.x, screen.y - s),
+            egui::pos2(screen.x + s, screen.y),
+            egui::pos2(screen.x, screen.y + s),
+            egui::pos2(screen.x - s, screen.y),
+        ];
+        painter.add(egui::Shape::convex_polygon(
+            points,
+            fill,
+            egui::Stroke::new(1.5, stroke_color),
+        ));
     }
 }
 
@@ -1459,58 +1769,14 @@ fn draw_doors(
             corridor.waypoints.last().unwrap(),
         ];
 
-        for (room_id, wp) in room_ids.iter().zip(wp_ends.iter()) {
+        let exits = [edge.source_exit.as_ref(), edge.target_exit.as_ref()];
+
+        for ((room_id, wp), exit) in room_ids.iter().zip(wp_ends.iter()).zip(exits.iter()) {
             let Some(rl) = layout.room_by_id(room_id) else { continue };
 
-            let wp_cx = wp.x as f32;
-            let wp_cy = wp.y as f32;
-
-            let dist_right = (wp_cx - (rl.x + rl.width as i32) as f32).abs();
-            let dist_left = (wp_cx - rl.x as f32).abs();
-            let dist_bottom = (wp_cy - (rl.y + rl.height as i32) as f32).abs();
-            let dist_top = (wp_cy - rl.y as f32).abs();
-
-            let min_dist = dist_right.min(dist_left).min(dist_bottom).min(dist_top);
-
-            // Door rectangle in grid coordinates:
-            // - On the wall (thin in the wall-normal direction)
-            // - Door width (1 or 2 squares) centered on the waypoint
             let door_depth = 0.3_f32;
-            let (door_x1, door_y1, door_x2, door_y2) = if min_dist == dist_right {
-                // Right wall
-                let wall_x = (rl.x + rl.width as i32) as f32;
-                (
-                    wall_x - door_depth / 2.0,
-                    wp_cy - dw_half,
-                    wall_x + door_depth / 2.0,
-                    wp_cy + dw_half,
-                )
-            } else if min_dist == dist_left {
-                let wall_x = rl.x as f32;
-                (
-                    wall_x - door_depth / 2.0,
-                    wp_cy - dw_half,
-                    wall_x + door_depth / 2.0,
-                    wp_cy + dw_half,
-                )
-            } else if min_dist == dist_bottom {
-                let wall_y = (rl.y + rl.height as i32) as f32;
-                (
-                    wp_cx - dw_half,
-                    wall_y - door_depth / 2.0,
-                    wp_cx + dw_half,
-                    wall_y + door_depth / 2.0,
-                )
-            } else {
-                // Top wall
-                let wall_y = rl.y as f32;
-                (
-                    wp_cx - dw_half,
-                    wall_y - door_depth / 2.0,
-                    wp_cx + dw_half,
-                    wall_y + door_depth / 2.0,
-                )
-            };
+            let (door_x1, door_y1, door_x2, door_y2) =
+                crate::render::themed::door_rect(rl, wp, *exit, dw_half * 2.0, door_depth);
 
             let screen_min = transform.world_to_screen(egui::pos2(
                 door_x1 * GRID_PX,
@@ -1552,10 +1818,10 @@ fn draw_doors(
                     let horizontal = door_rect.width() < door_rect.height();
                     let arrow_sz = door_rect.width().min(door_rect.height()) * 0.3;
                     let dir = if horizontal {
-                        let toward_room = if wp_cx > (rl.x + rl.width as i32 / 2) as f32 { -1.0 } else { 1.0 };
+                        let toward_room = if (wp.x as f32) > (rl.x + rl.width as i32 / 2) as f32 { -1.0 } else { 1.0 };
                         egui::vec2(toward_room, 0.0)
                     } else {
-                        let toward_room = if wp_cy > (rl.y + rl.height as i32 / 2) as f32 { -1.0 } else { 1.0 };
+                        let toward_room = if (wp.y as f32) > (rl.y + rl.height as i32 / 2) as f32 { -1.0 } else { 1.0 };
                         egui::vec2(0.0, toward_room)
                     };
                     let c = door_rect.center();
@@ -1845,11 +2111,75 @@ pub fn spatial_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Spa
     if let Some(ci) = state.selected_corridor {
         ui.add_space(16.0);
         ui.separator();
+        let conn_id = dungeon.layout.as_ref()
+            .and_then(|l| l.corridors.get(ci))
+            .map(|c| c.connection_id.clone());
         if let Some(layout) = &dungeon.layout {
             if let Some(corridor) = layout.corridors.get(ci) {
                 ui.label(format!("Corridor: {} waypoints", corridor.waypoints.len()));
                 if corridor.invalid {
                     ui.colored_label(egui::Color32::from_rgb(220, 50, 50), "Invalid (overlapping)");
+                }
+            }
+        }
+        if let Some(conn_id) = conn_id {
+            if let Some(edge) = dungeon.graph.connection_by_id_mut(&conn_id) {
+                ui.add_space(8.0);
+
+                // Connection type
+                egui::ComboBox::from_id_salt("spatial_conn_type")
+                    .selected_text(edge.connection.connection_type.label())
+                    .show_ui(ui, |ui| {
+                        for ct in ConnectionType::ALL {
+                            ui.selectable_value(&mut edge.connection.connection_type, ct, ct.label());
+                        }
+                    });
+
+                // Corridor width
+                ui.add_space(4.0);
+                let old_width = edge.connection.corridor_width;
+                ui.horizontal(|ui| {
+                    ui.label("Width:");
+                    crate::ui::canvas_common::num_input_u32(ui, &mut edge.connection.corridor_width, 40.0);
+                    ui.label("sq");
+                });
+                if edge.connection.corridor_width < 1 {
+                    edge.connection.corridor_width = 1;
+                }
+                if edge.connection.corridor_width != old_width {
+                    // Re-route this corridor
+                    let affected: std::collections::HashSet<String> = std::collections::HashSet::from([
+                        edge.source_room_id.clone(),
+                        edge.target_room_id.clone(),
+                    ]);
+                    if let Some(layout) = &mut dungeon.layout {
+                        layout.corridors =
+                            crate::solver::corridor::route_corridors_for_rooms(
+                                &dungeon.graph, layout, &affected,
+                            );
+                        layout.recheck_corridor_overlaps();
+                    }
+                }
+
+                // Double door
+                ui.checkbox(&mut dungeon.graph.connection_by_id_mut(&conn_id).unwrap().connection.double_door, "Double door");
+
+                // Exit placement
+                let edge = dungeon.graph.connection_by_id_mut(&conn_id).unwrap();
+                if edge.source_exit.is_some() || edge.target_exit.is_some() {
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        if edge.source_exit.is_some() {
+                            if ui.button("Clear src exit").clicked() {
+                                edge.source_exit = None;
+                            }
+                        }
+                        if edge.target_exit.is_some() {
+                            if ui.button("Clear tgt exit").clicked() {
+                                edge.target_exit = None;
+                            }
+                        }
+                    });
                 }
             }
         }

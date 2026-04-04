@@ -112,6 +112,7 @@ impl DungeonApp {
             e.source_room_id.hash(&mut h);
             e.target_room_id.hash(&mut h);
             e.connection.id.hash(&mut h);
+            e.connection.corridor_width.hash(&mut h);
             e.connection.min_length.hash(&mut h);
             e.connection.max_length.hash(&mut h);
         }

@@ -254,15 +254,18 @@ fn multi_connection_properties(ui: &mut egui::Ui, dungeon: &mut Dungeon, ids: &[
     let mut w = snaps[0].width;
     ui.horizontal(|ui| {
         ui.label("Corridor Width:");
-        if ui.add(egui::Slider::new(&mut w, 1..=4).suffix(" sq")).changed() {
-            for id in ids {
-                if let Some(edge) = dungeon.graph.connection_by_id_mut(id) {
-                    edge.connection.corridor_width = w;
-                }
-            }
-        }
+        crate::ui::canvas_common::num_input_u32(ui, &mut w, 40.0);
+        ui.label("sq");
         mixed_label(ui, all_same_width);
     });
+    if w < 1 { w = 1; }
+    if w != snaps[0].width {
+        for id in ids {
+            if let Some(edge) = dungeon.graph.connection_by_id_mut(id) {
+                edge.connection.corridor_width = w;
+            }
+        }
+    }
 
     // Double door
     ui.add_space(8.0);
@@ -645,8 +648,14 @@ fn connection_properties(ui: &mut egui::Ui, edge: &mut StoredEdge) {
         });
 
     ui.add_space(8.0);
-    ui.label("Corridor Width:");
-    ui.add(egui::Slider::new(&mut edge.connection.corridor_width, 1..=4).suffix(" sq"));
+    ui.horizontal(|ui| {
+        ui.label("Corridor Width:");
+        crate::ui::canvas_common::num_input_u32(ui, &mut edge.connection.corridor_width, 40.0);
+        ui.label("sq");
+    });
+    if edge.connection.corridor_width < 1 {
+        edge.connection.corridor_width = 1;
+    }
 
     ui.add_space(8.0);
     ui.checkbox(&mut edge.connection.double_door, "Double door");
@@ -674,5 +683,23 @@ fn connection_properties(ui: &mut egui::Ui, edge: &mut StoredEdge) {
     let mut label = edge.connection.label.clone().unwrap_or_default();
     if ui.text_edit_singleline(&mut label).changed() {
         edge.connection.label = if label.is_empty() { None } else { Some(label) };
+    }
+
+    // Exit placement controls
+    if edge.source_exit.is_some() || edge.target_exit.is_some() {
+        ui.add_space(8.0);
+        ui.label("Exit Placement:");
+        ui.horizontal(|ui| {
+            if edge.source_exit.is_some() {
+                if ui.button("Clear source exit").clicked() {
+                    edge.source_exit = None;
+                }
+            }
+            if edge.target_exit.is_some() {
+                if ui.button("Clear target exit").clicked() {
+                    edge.target_exit = None;
+                }
+            }
+        });
     }
 }

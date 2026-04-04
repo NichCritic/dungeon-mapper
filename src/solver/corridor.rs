@@ -59,11 +59,27 @@ pub fn route_corridors(
         let w = cw as i32;
         let half = w / 2;
 
+        let has_src_exit = edge.source_exit.is_some();
+        let has_tgt_exit = edge.target_exit.is_some();
+
         let result = if pinned.len() >= 2 {
             let pinned_tl: Vec<GridPos> = pinned.iter()
                 .map(|p| GridPos { x: p.x - half, y: p.y - half })
                 .collect();
             route_through_pinned(&pinned_tl, w, &forbidden)
+        } else if has_src_exit || has_tgt_exit {
+            // User-specified exits: use fixed positions
+            let src_exits = if let Some(exit) = edge.source_exit {
+                vec![exit_to_tl(exit, src_rl, w)]
+            } else {
+                edge_exits(src_rl, tgt_rl, w)
+            };
+            let tgt_exits = if let Some(exit) = edge.target_exit {
+                vec![exit_to_tl(exit, tgt_rl, w)]
+            } else {
+                edge_exits(tgt_rl, src_rl, w)
+            };
+            find_best_route(&src_exits, &tgt_exits, w, &forbidden)
         } else if let Some(wall_path) = try_shared_wall(src_rl, tgt_rl, w) {
             Some(wall_path)
         } else if let Some(close_path) = try_close_rooms(src_rl, tgt_rl, w) {
@@ -87,12 +103,37 @@ pub fn route_corridors(
             invalid,
         };
 
+        // Helper to fix up corridor endpoints to match user-set exits exactly
+        let fix_endpoints = |wps: &mut Vec<GridPos>| {
+            if let Some(exit) = edge.source_exit {
+                if let Some(first) = wps.first_mut() {
+                    *first = exit_to_center(exit, src_rl, w);
+                }
+            }
+            if let Some(exit) = edge.target_exit {
+                if let Some(last) = wps.last_mut() {
+                    *last = exit_to_center(exit, tgt_rl, w);
+                }
+            }
+        };
+
         if let Some(waypoints) = result {
             stamp_corridor(&waypoints, w, &mut forbidden);
-            corridors.push(mk(to_center(waypoints), false));
+            let mut centered = to_center(waypoints);
+            fix_endpoints(&mut centered);
+            corridors.push(mk(centered, false));
         } else {
-            let src_exits = edge_exits(src_rl, tgt_rl, w);
-            let tgt_exits = edge_exits(tgt_rl, src_rl, w);
+            // Fallback: L-shaped corridor
+            let src_exits = if let Some(exit) = edge.source_exit {
+                vec![exit_to_tl(exit, src_rl, w)]
+            } else {
+                edge_exits(src_rl, tgt_rl, w)
+            };
+            let tgt_exits = if let Some(exit) = edge.target_exit {
+                vec![exit_to_tl(exit, tgt_rl, w)]
+            } else {
+                edge_exits(tgt_rl, src_rl, w)
+            };
             if let (Some(&(sx, sy)), Some(&(tx, ty))) =
                 (src_exits.first(), tgt_exits.first())
             {
@@ -102,7 +143,9 @@ pub fn route_corridors(
                     GridPos { x: tx, y: ty },
                 ];
                 stamp_corridor(&waypoints, w, &mut forbidden);
-                corridors.push(mk(to_center(waypoints), true));
+                let mut centered = to_center(waypoints);
+                fix_endpoints(&mut centered);
+                corridors.push(mk(centered, true));
             }
         }
     }
@@ -195,11 +238,26 @@ pub fn route_corridors_for_rooms(
         let w = cw as i32;
         let half = w / 2;
 
+        let has_src_exit = edge.source_exit.is_some();
+        let has_tgt_exit = edge.target_exit.is_some();
+
         let result = if pinned.len() >= 2 {
             let pinned_tl: Vec<GridPos> = pinned.iter()
                 .map(|p| GridPos { x: p.x - half, y: p.y - half })
                 .collect();
             route_through_pinned(&pinned_tl, w, &forbidden)
+        } else if has_src_exit || has_tgt_exit {
+            let src_exits = if let Some(exit) = edge.source_exit {
+                vec![exit_to_tl(exit, src_rl, w)]
+            } else {
+                edge_exits(src_rl, tgt_rl, w)
+            };
+            let tgt_exits = if let Some(exit) = edge.target_exit {
+                vec![exit_to_tl(exit, tgt_rl, w)]
+            } else {
+                edge_exits(tgt_rl, src_rl, w)
+            };
+            find_best_route(&src_exits, &tgt_exits, w, &forbidden)
         } else if let Some(wall_path) = try_shared_wall(src_rl, tgt_rl, w) {
             Some(wall_path)
         } else if let Some(close_path) = try_close_rooms(src_rl, tgt_rl, w) {
@@ -222,12 +280,35 @@ pub fn route_corridors_for_rooms(
             invalid,
         };
 
+        let fix_endpoints = |wps: &mut Vec<GridPos>| {
+            if let Some(exit) = edge.source_exit {
+                if let Some(first) = wps.first_mut() {
+                    *first = exit_to_center(exit, src_rl, w);
+                }
+            }
+            if let Some(exit) = edge.target_exit {
+                if let Some(last) = wps.last_mut() {
+                    *last = exit_to_center(exit, tgt_rl, w);
+                }
+            }
+        };
+
         if let Some(waypoints) = result {
             stamp_corridor(&waypoints, w, &mut forbidden);
-            new_corridors.push(mk(to_center(waypoints), false));
+            let mut centered = to_center(waypoints);
+            fix_endpoints(&mut centered);
+            new_corridors.push(mk(centered, false));
         } else {
-            let src_exits = edge_exits(src_rl, tgt_rl, w);
-            let tgt_exits = edge_exits(tgt_rl, src_rl, w);
+            let src_exits = if let Some(exit) = edge.source_exit {
+                vec![exit_to_tl(exit, src_rl, w)]
+            } else {
+                edge_exits(src_rl, tgt_rl, w)
+            };
+            let tgt_exits = if let Some(exit) = edge.target_exit {
+                vec![exit_to_tl(exit, tgt_rl, w)]
+            } else {
+                edge_exits(tgt_rl, src_rl, w)
+            };
             if let (Some(&(sx, sy)), Some(&(tx, ty))) =
                 (src_exits.first(), tgt_exits.first())
             {
@@ -237,7 +318,9 @@ pub fn route_corridors_for_rooms(
                     GridPos { x: tx, y: ty },
                 ];
                 stamp_corridor(&waypoints, w, &mut forbidden);
-                new_corridors.push(mk(to_center(waypoints), true));
+                let mut centered = to_center(waypoints);
+                fix_endpoints(&mut centered);
+                new_corridors.push(mk(centered, true));
             }
         }
     }
@@ -614,6 +697,44 @@ enum Face {
     Left,
     Bottom,
     Top,
+}
+
+/// Determine which face of the room an exit point lies on.
+fn exit_face_f(exit: ExitPos, room: &RoomLayout) -> Face {
+    let rw = room.width as f32;
+    let rh = room.height as f32;
+    let rx = room.x as f32;
+    let ry = room.y as f32;
+    // Pick face by which wall coordinate matches (within epsilon)
+    let eps = 0.01;
+    if (exit.x - (rx + rw)).abs() < eps { Face::Right }
+    else if (exit.x - rx).abs() < eps { Face::Left }
+    else if (exit.y - (ry + rh)).abs() < eps { Face::Bottom }
+    else { Face::Top }
+}
+
+/// Convert a wall exit position (corridor center-line at wall) to a top-left
+/// corridor block position just outside the room. Rounds to integer grid for A*.
+///
+/// The corridor spans [tl, tl+w) in the free axis. We pick tl so that the exit
+/// point falls inside (or on the edge of) that range: tl = floor(exit - w/2.0).
+fn exit_to_tl(exit: ExitPos, room: &RoomLayout, w: i32) -> (i32, i32) {
+    let half_f = w as f32 / 2.0;
+    let snap_tl = |v: f32| -> i32 { (v - half_f).floor() as i32 };
+    match exit_face_f(exit, room) {
+        Face::Right => (room.x + room.width as i32, snap_tl(exit.y)),
+        Face::Left => (room.x - w, snap_tl(exit.y)),
+        Face::Bottom => (snap_tl(exit.x), room.y + room.height as i32),
+        Face::Top => (snap_tl(exit.x), room.y - w),
+    }
+}
+
+/// Compute the corridor center waypoint that should correspond to a wall exit.
+/// Uses integer half (w/2) since waypoints are GridPos (i32).
+fn exit_to_center(exit: ExitPos, room: &RoomLayout, w: i32) -> GridPos {
+    let half = w / 2;
+    let tl = exit_to_tl(exit, room, w);
+    GridPos { x: tl.0 + half, y: tl.1 + half }
 }
 
 fn facing_face(room: &RoomLayout, other: &RoomLayout) -> Face {
