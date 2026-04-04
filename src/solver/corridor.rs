@@ -110,6 +110,143 @@ pub fn route_corridors(
     corridors
 }
 
+/// Re-route only corridors connected to a specific set of rooms.
+/// Unaffected corridors are kept as-is and stamped into the forbidden set first.
+pub fn route_corridors_for_rooms(
+    graph: &DungeonGraph,
+    layout: &SpatialLayout,
+    affected_room_ids: &HashSet<String>,
+) -> Vec<CorridorSegment> {
+    // Collect pinned waypoints
+    let mut pinned_map: HashMap<String, Vec<GridPos>> = HashMap::new();
+    for c in &layout.corridors {
+        if !c.pinned_waypoints.is_empty() {
+            pinned_map.insert(c.connection_id.clone(), c.pinned_waypoints.clone());
+        }
+    }
+
+    // Initialize forbidden cells with room interiors
+    let mut forbidden = HashSet::new();
+    for rl in &layout.rooms {
+        for y in rl.y..(rl.y + rl.height as i32) {
+            for x in rl.x..(rl.x + rl.width as i32) {
+                forbidden.insert((x, y));
+            }
+        }
+    }
+
+    // Partition edges into affected vs unaffected
+    let mut affected_edges: Vec<&StoredEdge> = Vec::new();
+    let mut unaffected_corridors: Vec<CorridorSegment> = Vec::new();
+
+    let affected_conn_ids: HashSet<String> = graph.connections.iter()
+        .filter(|e| {
+            affected_room_ids.contains(&e.source_room_id)
+                || affected_room_ids.contains(&e.target_room_id)
+        })
+        .map(|e| e.connection.id.clone())
+        .collect();
+
+    for edge in &graph.connections {
+        if affected_conn_ids.contains(&edge.connection.id) {
+            affected_edges.push(edge);
+        }
+    }
+
+    // Keep unaffected corridors and stamp them into forbidden
+    for c in &layout.corridors {
+        if !affected_conn_ids.contains(&c.connection_id) {
+            let w = c.width as i32;
+            let half = w / 2;
+            let tl_waypoints: Vec<GridPos> = c.waypoints.iter()
+                .map(|p| GridPos { x: p.x - half, y: p.y - half })
+                .collect();
+            stamp_corridor(&tl_waypoints, w, &mut forbidden);
+            unaffected_corridors.push(c.clone());
+        }
+    }
+
+    // Sort affected edges by distance (shorter first)
+    affected_edges.sort_by_key(|edge| {
+        let src = layout.room_by_id(&edge.source_room_id);
+        let tgt = layout.room_by_id(&edge.target_room_id);
+        match (src, tgt) {
+            (Some(s), Some(t)) => {
+                let dx = (s.x + s.width as i32 / 2) - (t.x + t.width as i32 / 2);
+                let dy = (s.y + s.height as i32 / 2) - (t.y + t.height as i32 / 2);
+                dx.abs() + dy.abs()
+            }
+            _ => i32::MAX,
+        }
+    });
+
+    // Route affected corridors
+    let mut new_corridors = Vec::new();
+    for edge in &affected_edges {
+        let src_rl = layout.room_by_id(&edge.source_room_id);
+        let tgt_rl = layout.room_by_id(&edge.target_room_id);
+
+        let Some((src_rl, tgt_rl)) = src_rl.zip(tgt_rl) else {
+            continue;
+        };
+
+        let pinned = pinned_map.get(&edge.connection.id).cloned().unwrap_or_default();
+        let cw = edge.connection.corridor_width;
+        let w = cw as i32;
+        let half = w / 2;
+
+        let result = if pinned.len() >= 2 {
+            let pinned_tl: Vec<GridPos> = pinned.iter()
+                .map(|p| GridPos { x: p.x - half, y: p.y - half })
+                .collect();
+            route_through_pinned(&pinned_tl, w, &forbidden)
+        } else if let Some(wall_path) = try_shared_wall(src_rl, tgt_rl, w) {
+            Some(wall_path)
+        } else if let Some(close_path) = try_close_rooms(src_rl, tgt_rl, w) {
+            Some(close_path)
+        } else {
+            let src_exits = edge_exits(src_rl, tgt_rl, w);
+            let tgt_exits = edge_exits(tgt_rl, src_rl, w);
+            find_best_route(&src_exits, &tgt_exits, w, &forbidden)
+        };
+
+        let to_center = |wps: Vec<GridPos>| -> Vec<GridPos> {
+            wps.iter().map(|p| GridPos { x: p.x + half, y: p.y + half }).collect()
+        };
+
+        let mk = |waypoints: Vec<GridPos>, invalid: bool| CorridorSegment {
+            pinned_waypoints: pinned.clone(),
+            connection_id: edge.connection.id.clone(),
+            waypoints,
+            width: cw,
+            invalid,
+        };
+
+        if let Some(waypoints) = result {
+            stamp_corridor(&waypoints, w, &mut forbidden);
+            new_corridors.push(mk(to_center(waypoints), false));
+        } else {
+            let src_exits = edge_exits(src_rl, tgt_rl, w);
+            let tgt_exits = edge_exits(tgt_rl, src_rl, w);
+            if let (Some(&(sx, sy)), Some(&(tx, ty))) =
+                (src_exits.first(), tgt_exits.first())
+            {
+                let waypoints = vec![
+                    GridPos { x: sx, y: sy },
+                    GridPos { x: tx, y: sy },
+                    GridPos { x: tx, y: ty },
+                ];
+                stamp_corridor(&waypoints, w, &mut forbidden);
+                new_corridors.push(mk(to_center(waypoints), true));
+            }
+        }
+    }
+
+    // Combine: unaffected first, then newly routed
+    unaffected_corridors.extend(new_corridors);
+    unaffected_corridors
+}
+
 /// Mark all grid cells occupied by a corridor as forbidden.
 /// For each segment, fills the w-wide rect between waypoints,
 /// plus a 1-cell border around the entire corridor to prevent adjacency.
@@ -275,6 +412,7 @@ fn block_clear(x: i32, y: i32, w: i32, forbidden: &HashSet<(i32, i32)>) -> bool 
 
 /// A* pathfinding moving a w×w block through the grid.
 /// Position is the top-left corner of the block.
+/// Iteration budget scales with manhattan distance so failures are cheap.
 fn astar_path(
     sx: i32,
     sy: i32,
@@ -290,9 +428,13 @@ fn astar_path(
     let goal = (tx, ty);
 
     if start == goal {
-        // Two identical points so windows(2) produces a segment for rendering
         return Some(vec![GridPos { x: sx, y: sy }, GridPos { x: sx, y: sy }]);
     }
+
+    let manhattan = (sx - tx).abs() + (sy - ty).abs();
+    // Budget: proportional to distance. A valid path through obstacles rarely
+    // needs more than ~8x the manhattan distance in explored cells.
+    let max_iterations = (manhattan * 8).clamp(200, 50_000) as usize;
 
     let heuristic = |x: i32, y: i32| -> i32 {
         (x - tx).abs() + (y - ty).abs()
@@ -307,7 +449,6 @@ fn astar_path(
     open.push(Reverse((heuristic(sx, sy), start)));
 
     let directions = [(1, 0), (-1, 0), (0, 1), (0, -1)];
-    let max_iterations = 100_000;
     let mut iterations = 0;
 
     while let Some(Reverse((_, (cx, cy)))) = open.pop() {
@@ -377,7 +518,8 @@ fn simplify_path(path: &[GridPos]) -> Vec<GridPos> {
     result
 }
 
-/// Try all start/end candidate pairs, return the shortest valid path.
+/// Try start/end candidate pairs, return the shortest valid path.
+/// Stops early once a good-enough path is found (within 2x manhattan distance).
 fn find_best_route(
     src_exits: &[(i32, i32)],
     tgt_exits: &[(i32, i32)],
@@ -387,7 +529,26 @@ fn find_best_route(
     let mut best: Option<Vec<GridPos>> = None;
     let mut best_len = i32::MAX;
 
-    for &(sx, sy) in src_exits {
+    // Compute overall manhattan between room centers for "good enough" threshold
+    let (avg_sx, avg_sy) = if src_exits.is_empty() {
+        (0, 0)
+    } else {
+        let n = src_exits.len() as i32;
+        (src_exits.iter().map(|e| e.0).sum::<i32>() / n,
+         src_exits.iter().map(|e| e.1).sum::<i32>() / n)
+    };
+    let (avg_tx, avg_ty) = if tgt_exits.is_empty() {
+        (0, 0)
+    } else {
+        let n = tgt_exits.len() as i32;
+        (tgt_exits.iter().map(|e| e.0).sum::<i32>() / n,
+         tgt_exits.iter().map(|e| e.1).sum::<i32>() / n)
+    };
+    let overall_manhattan = (avg_sx - avg_tx).abs() + (avg_sy - avg_ty).abs();
+    // A path within 2x manhattan distance is good enough — stop searching
+    let good_enough = overall_manhattan * 2;
+
+    'outer: for &(sx, sy) in src_exits {
         if !block_clear(sx, sy, w, forbidden) {
             continue;
         }
@@ -408,6 +569,9 @@ fn find_best_route(
                 if len < best_len {
                     best_len = len;
                     best = Some(simplified);
+                    if best_len <= good_enough {
+                        break 'outer;
+                    }
                 }
             }
         }

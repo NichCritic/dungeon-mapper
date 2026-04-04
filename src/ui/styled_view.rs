@@ -69,8 +69,18 @@ fn render_input_hash(layout: &SpatialLayout, graph: &DungeonGraph, theme: &Theme
                 s.x.to_bits().hash(&mut h);
                 s.y.to_bits().hash(&mut h);
                 s.width.to_bits().hash(&mut h);
+                s.length.to_bits().hash(&mut h);
                 s.height.to_bits().hash(&mut h);
                 std::mem::discriminant(&s.elevation).hash(&mut h);
+            }
+            // Hash decor so changes invalidate cache
+            room.decor.len().hash(&mut h);
+            for d in &room.decor {
+                d.x.to_bits().hash(&mut h);
+                d.y.to_bits().hash(&mut h);
+                d.rotation.to_bits().hash(&mut h);
+                d.scale.to_bits().hash(&mut h);
+                std::mem::discriminant(&d.decor_type).hash(&mut h);
             }
         }
     }
@@ -151,6 +161,7 @@ pub fn styled_view(ui: &mut egui::Ui, dungeon: &Dungeon, state: &mut StyledViewS
                 show_labels: true,
                 show_notes: true,
                 show_secrets: true,
+                show_decor: true,
             };
             crate::render::themed::render_themed(
                 &mut recorder,

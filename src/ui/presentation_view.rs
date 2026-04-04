@@ -44,6 +44,8 @@ pub struct PresentationViewState {
     pub single_combat: SingleCombatState,
     /// Currently selected room in the presentation view.
     pub selected_room: Option<String>,
+    /// True while the DM is dragging the player viewport rectangle.
+    dragging_player_viewport: bool,
 }
 
 impl Default for PresentationViewState {
@@ -55,6 +57,7 @@ impl Default for PresentationViewState {
             canvas_size: egui::Vec2::ZERO,
             single_combat: SingleCombatState::default(),
             selected_room: None,
+            dragging_player_viewport: false,
         }
     }
 }
@@ -155,6 +158,7 @@ pub fn presentation_view(
     dungeon: &Dungeon,
     presentation: &mut PresentationState,
     view_state: &mut PresentationViewState,
+    player_view_state: &mut crate::ui::player_view::PlayerViewState,
 ) {
     let (response, painter) = ui.allocate_painter(
         ui.available_size(),
@@ -192,6 +196,7 @@ pub fn presentation_view(
             show_labels: true,
             show_notes: true,
             show_secrets: true,
+            show_decor: true,
         };
         crate::render::themed::render_themed(
             &mut recorder,
@@ -231,7 +236,63 @@ pub fn presentation_view(
     // DM overlay (fog of war + door state indicators)
     render_dm_overlay(&painter, &transform, layout, dungeon, presentation);
 
-    // Left-click: select room
+    // --- Player viewport rectangle ---
+    // Compute the world-space rect the player currently sees from their view state.
+    let pv_zoom = player_view_state.view.zoom;
+    let pv_offset = player_view_state.view.offset;
+    let pv_canvas = player_view_state.canvas_size;
+    if pv_canvas.x > 0.0 && pv_canvas.y > 0.0 && pv_zoom > 0.0 {
+        // Player view corners in world coords
+        let pv_world_min_x = -pv_offset.x / pv_zoom;
+        let pv_world_min_y = -pv_offset.y / pv_zoom;
+        let pv_world_max_x = (pv_canvas.x - pv_offset.x) / pv_zoom;
+        let pv_world_max_y = (pv_canvas.y - pv_offset.y) / pv_zoom;
+
+        // Convert to DM screen coords
+        let screen_min = transform.world_to_screen(egui::pos2(pv_world_min_x, pv_world_min_y));
+        let screen_max = transform.world_to_screen(egui::pos2(pv_world_max_x, pv_world_max_y));
+        let vp_rect = egui::Rect::from_min_max(screen_min, screen_max);
+
+        // Draw the viewport rectangle
+        painter.rect_stroke(
+            vp_rect, 0.0,
+            egui::Stroke::new(2.0, egui::Color32::from_rgb(50, 255, 50)),
+            egui::StrokeKind::Outside,
+        );
+        // Subtle fill so it's visible over dark areas
+        painter.rect_filled(
+            vp_rect, 0.0,
+            egui::Color32::from_rgba_unmultiplied(50, 255, 50, 10),
+        );
+
+        // Drag handling: start drag when left-click lands on the viewport rect border/interior
+        let edge_margin = 8.0; // px - hit area for edges
+        let inner = vp_rect.shrink(edge_margin);
+        if response.drag_started_by(egui::PointerButton::Primary) {
+            if let Some(pos) = response.interact_pointer_pos() {
+                // Hit if on the border band (inside rect but outside inner) or if rect is small
+                if vp_rect.contains(pos) && (!inner.contains(pos) || vp_rect.width() < edge_margin * 3.0 || vp_rect.height() < edge_margin * 3.0) {
+                    view_state.dragging_player_viewport = true;
+                }
+            }
+        }
+
+        if view_state.dragging_player_viewport && response.dragged_by(egui::PointerButton::Primary) {
+            let delta_screen = response.drag_delta();
+            // Convert screen delta to world delta
+            let world_dx = delta_screen.x / transform.zoom;
+            let world_dy = delta_screen.y / transform.zoom;
+            // Shift the player view offset (world shift -> player screen shift)
+            player_view_state.view.offset.x -= world_dx * pv_zoom;
+            player_view_state.view.offset.y -= world_dy * pv_zoom;
+        }
+
+        if response.drag_stopped_by(egui::PointerButton::Primary) {
+            view_state.dragging_player_viewport = false;
+        }
+    }
+
+    // Left-click: select room (only if not dragging viewport)
     if response.clicked() {
         if let Some(pos) = response.interact_pointer_pos() {
             let world = transform.screen_to_world(pos);
@@ -657,24 +718,30 @@ pub fn presentation_sidebar(
                         });
                         ui.horizontal(|ui| {
                             ui.label("AC:");
-                            ui.add(egui::DragValue::new(&mut pc.ac).range(1..=30));
+                            let mut ac_val = pc.ac as i32;
+                            if crate::ui::canvas_common::num_input_i32(ui, &mut ac_val, 35.0) { pc.ac = ac_val as u8; }
                             ui.label("HP:");
-                            ui.add(egui::DragValue::new(&mut pc.max_hp).range(1..=999));
+                            crate::ui::canvas_common::num_input_i32(ui, &mut pc.max_hp, 40.0);
                         });
                         pc.current_hp = pc.current_hp.min(pc.max_hp);
                         ui.horizontal(|ui| {
                             ui.label("Current HP:");
-                            ui.add(egui::DragValue::new(&mut pc.current_hp).range(0..=pc.max_hp));
+                            crate::ui::canvas_common::num_input_i32(ui, &mut pc.current_hp, 40.0);
                         });
                         ui.horizontal(|ui| {
                             ui.label("Init mod:");
-                            ui.add(egui::DragValue::new(&mut pc.initiative_modifier).range(-10..=10));
+                            let mut init_mod = pc.initiative_modifier as i32;
+                            crate::ui::canvas_common::num_input_i32(ui, &mut init_mod, 35.0);
+                            pc.initiative_modifier = init_mod as i8;
                             ui.label("PP:");
-                            ui.add(egui::DragValue::new(&mut pc.passive_perception).range(1..=30));
+                            let mut pp_val = pc.passive_perception as i32;
+                            if crate::ui::canvas_common::num_input_i32(ui, &mut pp_val, 35.0) { pc.passive_perception = pp_val as u8; }
                         });
                         ui.horizontal(|ui| {
                             ui.label("Atk:");
-                            ui.add(egui::DragValue::new(&mut pc.attack_bonus).range(-5..=20).prefix("+"));
+                            ui.label("+");
+                            let mut atk_val = pc.attack_bonus as i32;
+                            if crate::ui::canvas_common::num_input_i32(ui, &mut atk_val, 35.0) { pc.attack_bonus = atk_val as i8; }
                             ui.label("Dmg:");
                             ui.add(egui::TextEdit::singleline(&mut pc.damage_dice).desired_width(80.0));
                         });
@@ -902,7 +969,7 @@ pub fn presentation_sidebar(
                                             ui.label(egui::RichText::new(&pc.name).strong());
                                             ui.label(format!("AC {}", pc.ac));
                                             if let Some(init) = &mut pc.initiative {
-                                                ui.add(egui::DragValue::new(init).prefix("Init: ").range(-10..=40));
+                                                ui.label("Init:"); crate::ui::canvas_common::num_input_i32(ui, init, 35.0);
                                             }
                                         });
 
@@ -929,7 +996,7 @@ pub fn presentation_sidebar(
                                         let dmg_id = egui::Id::new(format!("dmg_pc_{}", pid));
                                         let mut dmg_val: i32 = ui.ctx().memory(|m| m.data.get_temp(dmg_id).unwrap_or(0));
                                         ui.horizontal(|ui| {
-                                            ui.add(egui::DragValue::new(&mut dmg_val).range(0..=999).prefix("HP: "));
+                                            ui.label("HP:"); crate::ui::canvas_common::num_input_i32(ui, &mut dmg_val, 40.0);
                                             if ui.small_button("Dmg").clicked() && dmg_val > 0 {
                                                 damage_actions.push((combatant_id.clone(), dmg_val));
                                             }
@@ -1013,7 +1080,7 @@ pub fn presentation_sidebar(
                                                 ui.label(&inst.label);
                                             }
                                             if let Some(init) = &mut inst.initiative {
-                                                ui.add(egui::DragValue::new(init).prefix("Init: ").range(-10..=40));
+                                                ui.label("Init:"); crate::ui::canvas_common::num_input_i32(ui, init, 35.0);
                                             }
                                         });
 
@@ -1051,7 +1118,7 @@ pub fn presentation_sidebar(
                                         let mut dmg_val: i32 = ui.ctx().memory(|m| m.data.get_temp(dmg_id).unwrap_or(0));
 
                                         ui.horizontal(|ui| {
-                                            ui.add(egui::DragValue::new(&mut dmg_val).range(0..=999).prefix("HP: "));
+                                            ui.label("HP:"); crate::ui::canvas_common::num_input_i32(ui, &mut dmg_val, 40.0);
                                             if ui.small_button("Dmg").clicked() && dmg_val > 0 {
                                                 damage_actions.push((combatant_id.clone(), dmg_val));
                                             }
@@ -1096,7 +1163,8 @@ pub fn presentation_sidebar(
                                                                 attack_actions.push((attacker_name.clone(), format!("AC {}", target_ac), atk.clone(), target_ac));
                                                             }
                                                             ui.label("vs AC");
-                                                            ui.add(egui::DragValue::new(&mut target_ac).range(1..=30));
+                                                            let mut tac = target_ac as i32;
+                                                            if crate::ui::canvas_common::num_input_i32(ui, &mut tac, 35.0) { target_ac = tac as u8; }
                                                         });
                                                         ui.ctx().memory_mut(|m| m.data.insert_temp(ac_id, target_ac));
                                                     }

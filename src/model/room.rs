@@ -117,40 +117,71 @@ pub struct CaveData {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
 pub enum DecorType {
     Table,
+    Chair,
+    Bench,
     Chest,
+    Barrel,
+    Crate,
     Pillar,
     StairsUp,
     StairsDown,
+    Ladder,
     Altar,
     Fountain,
+    Well,
+    Brazier,
+    Fireplace,
+    Statue,
+    Throne,
+    Bed,
+    Bookshelf,
     Trap,
     Rubble,
+    Bones,
+    Web,
+    Door,
+    Gate,
 }
 
 impl DecorType {
-    pub const ALL: [DecorType; 9] = [
-        DecorType::Table,
-        DecorType::Chest,
-        DecorType::Pillar,
-        DecorType::StairsUp,
-        DecorType::StairsDown,
-        DecorType::Altar,
-        DecorType::Fountain,
-        DecorType::Trap,
-        DecorType::Rubble,
+    pub const ALL: [DecorType; 25] = [
+        DecorType::Table, DecorType::Chair, DecorType::Bench,
+        DecorType::Chest, DecorType::Barrel, DecorType::Crate,
+        DecorType::Pillar, DecorType::StairsUp, DecorType::StairsDown,
+        DecorType::Ladder, DecorType::Altar, DecorType::Fountain,
+        DecorType::Well, DecorType::Brazier, DecorType::Fireplace,
+        DecorType::Statue, DecorType::Throne, DecorType::Bed,
+        DecorType::Bookshelf, DecorType::Trap, DecorType::Rubble,
+        DecorType::Bones, DecorType::Web, DecorType::Door, DecorType::Gate,
     ];
 
     pub fn label(self) -> &'static str {
         match self {
             DecorType::Table => "Table",
+            DecorType::Chair => "Chair",
+            DecorType::Bench => "Bench",
             DecorType::Chest => "Chest",
+            DecorType::Barrel => "Barrel",
+            DecorType::Crate => "Crate",
             DecorType::Pillar => "Pillar",
             DecorType::StairsUp => "Stairs Up",
             DecorType::StairsDown => "Stairs Down",
+            DecorType::Ladder => "Ladder",
             DecorType::Altar => "Altar",
             DecorType::Fountain => "Fountain",
+            DecorType::Well => "Well",
+            DecorType::Brazier => "Brazier",
+            DecorType::Fireplace => "Fireplace",
+            DecorType::Statue => "Statue",
+            DecorType::Throne => "Throne",
+            DecorType::Bed => "Bed",
+            DecorType::Bookshelf => "Bookshelf",
             DecorType::Trap => "Trap",
             DecorType::Rubble => "Rubble",
+            DecorType::Bones => "Bones",
+            DecorType::Web => "Web",
+            DecorType::Door => "Door",
+            DecorType::Gate => "Gate",
         }
     }
 }
@@ -165,7 +196,12 @@ pub struct RoomDecor {
     /// Rotation in degrees
     #[serde(default)]
     pub rotation: f32,
+    /// Scale multiplier (1.0 = default size)
+    #[serde(default = "default_decor_scale")]
+    pub scale: f32,
 }
+
+fn default_decor_scale() -> f32 { 1.0 }
 
 impl RoomDecor {
     pub fn new(decor_type: DecorType, x: f32, y: f32) -> Self {
@@ -175,6 +211,7 @@ impl RoomDecor {
             x,
             y,
             rotation: 0.0,
+            scale: 1.0,
         }
     }
 }
@@ -186,19 +223,26 @@ pub struct ElevationSection {
     /// Position relative to room top-left, in grid units.
     pub x: f32,
     pub y: f32,
-    /// Size in grid units.
+    /// Width in grid units (east-west).
     pub width: f32,
-    pub height: f32,
+    /// Length in grid units (north-south).
+    pub length: f32,
     /// Elevation type.
     pub elevation: ElevationType,
+    /// Height of the elevation change in feet (e.g. 5ft raised platform, 10ft pit).
+    #[serde(default = "default_section_height")]
+    pub height: f32,
 }
 
+fn default_section_height() -> f32 { 5.0 }
+
 impl ElevationSection {
-    pub fn new(elevation: ElevationType, x: f32, y: f32, width: f32, height: f32) -> Self {
+    pub fn new(elevation: ElevationType, x: f32, y: f32, width: f32, length: f32) -> Self {
         Self {
             id: uuid::Uuid::new_v4().to_string(),
-            x, y, width, height,
+            x, y, width, length,
             elevation,
+            height: 5.0,
         }
     }
 }
@@ -217,16 +261,19 @@ pub enum ElevationType {
     BottomlessPit,
     /// Hole down to the floor below
     Hole,
+    /// Water (pool, stream, flooded area)
+    Water,
 }
 
 impl ElevationType {
-    pub const ALL: [ElevationType; 6] = [
+    pub const ALL: [ElevationType; 7] = [
         ElevationType::Raised,
         ElevationType::Lowered,
         ElevationType::Steps,
         ElevationType::Slope,
         ElevationType::BottomlessPit,
         ElevationType::Hole,
+        ElevationType::Water,
     ];
 
     pub fn label(self) -> &'static str {
@@ -237,6 +284,7 @@ impl ElevationType {
             ElevationType::Slope => "Slope",
             ElevationType::BottomlessPit => "Bottomless Pit",
             ElevationType::Hole => "Hole",
+            ElevationType::Water => "Water",
         }
     }
 }

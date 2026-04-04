@@ -295,6 +295,7 @@ impl DungeonApp {
             show_labels: true,
             show_notes: false,
             show_secrets: false,
+            show_decor: true,
         };
         crate::render::presentation::render_player_view(
             &mut renderer,
@@ -406,6 +407,8 @@ impl eframe::App for DungeonApp {
                         self.graph_state = GraphEditorState::default();
                         self.presenting = false;
                         self.presentation = None;
+                        // Sync snapshot so auto-solve doesn't re-route saved corridors
+                        self.last_graph_snapshot = self.graph_hash();
                     }
                     FileOpResult::Loaded(Err(e)) => eprintln!("Load error: {}", e),
                     FileOpResult::Saved(Ok(_path)) => {}
@@ -632,7 +635,7 @@ impl eframe::App for DungeonApp {
                             } else {
                                 ui.horizontal(|ui| {
                                     ui.label("Port:");
-                                    ui.add(egui::DragValue::new(&mut self.server_port).range(1024..=65535));
+                                    crate::ui::canvas_common::num_input_u16(ui, &mut self.server_port, 60.0);
                                 });
                                 if ui.button("Start Server").clicked() {
                                     match PresentationServer::start(self.server_port) {
@@ -708,6 +711,7 @@ impl eframe::App for DungeonApp {
                         &self.dungeon,
                         presentation,
                         &mut self.presentation_view_state,
+                        &mut self.player_view_state,
                     );
                 }
             } else {

@@ -26,6 +26,8 @@ pub struct DecorViewState {
     pub place_mode: bool,
     /// Selected decor item within the selected room (index).
     pub selected_decor: Option<usize>,
+    /// Search filter for decor type dropdowns.
+    pub decor_search: String,
 }
 
 impl Default for DecorViewState {
@@ -39,6 +41,7 @@ impl Default for DecorViewState {
             place_type: DecorType::Table,
             place_mode: false,
             selected_decor: None,
+            decor_search: String::new(),
         }
     }
 }
@@ -62,9 +65,13 @@ fn render_input_hash(layout: &SpatialLayout, graph: &DungeonGraph, theme: &Theme
                 s.x.to_bits().hash(&mut h);
                 s.y.to_bits().hash(&mut h);
                 s.width.to_bits().hash(&mut h);
+                s.length.to_bits().hash(&mut h);
                 s.height.to_bits().hash(&mut h);
                 std::mem::discriminant(&s.elevation).hash(&mut h);
             }
+            // NOTE: decor is intentionally excluded from this hash.
+            // Decor is drawn as a live overlay in the decor view so that
+            // dragging doesn't trigger expensive cache rebuilds every frame.
         }
     }
     layout.corridors.len().hash(&mut h);
@@ -147,6 +154,7 @@ pub fn decor_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut DecorVie
             show_labels: true,
             show_notes: false,
             show_secrets: false,
+            show_decor: false, // decor drawn as live overlay for smooth dragging
         };
         crate::render::themed::render_themed(
             &mut recorder,
@@ -165,19 +173,23 @@ pub fn decor_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut DecorVie
         replay_commands(&painter, &transform, &cache.commands);
     }
 
-    // Draw room labels
+    // Live decor overlay (not cached, so dragging is smooth)
+    let decor_color = egui::Color32::from_rgb(
+        dungeon.theme.wall_color[0], dungeon.theme.wall_color[1], dungeon.theme.wall_color[2],
+    );
     for rl in &render_layout.rooms {
         if let Some(room) = dungeon.graph.room_by_id(&rl.room_id) {
-            let cx = (rl.x as f32 + rl.width as f32 / 2.0) * GRID_PX;
-            let cy = (rl.y as f32 + rl.height as f32 / 2.0) * GRID_PX;
-            let screen = transform.world_to_screen(egui::pos2(cx, cy));
-            painter.text(
-                screen,
-                egui::Align2::CENTER_CENTER,
-                &room.label,
-                egui::FontId::monospace(10.0 * transform.zoom),
-                egui::Color32::from_rgb(60, 60, 60),
-            );
+            let room_px_x = rl.x as f32 * GRID_PX;
+            let room_px_y = rl.y as f32 * GRID_PX;
+            for decor in &room.decor {
+                let wx = room_px_x + decor.x * GRID_PX;
+                let wy = room_px_y + decor.y * GRID_PX;
+                let screen_center = transform.world_to_screen(egui::pos2(wx, wy));
+                let s = GRID_PX * 0.4 * decor.scale * transform.zoom;
+                let deg = decor.rotation;
+
+                draw_decor_symbol(&painter, screen_center, s, deg, decor.decor_type, decor_color);
+            }
         }
     }
 
@@ -215,7 +227,7 @@ pub fn decor_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut DecorVie
                 let handle_r = (6.0 * transform.zoom).max(4.0);
 
                 if is_selected_room {
-                    // Draw selection ring for selected decor
+                    // Draw selection ring and type label for selected room's decor
                     let is_sel = state.selected_decor == Some(di);
                     let ring_color = if is_sel {
                         egui::Color32::from_rgb(255, 200, 50)
@@ -223,6 +235,16 @@ pub fn decor_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut DecorVie
                         egui::Color32::from_rgb(100, 180, 255)
                     };
                     painter.circle_stroke(screen, handle_r + 2.0, egui::Stroke::new(1.5, ring_color));
+                    // Type label only for selected item
+                    if is_sel {
+                        painter.text(
+                            screen + egui::vec2(0.0, -handle_r - 6.0),
+                            egui::Align2::CENTER_BOTTOM,
+                            decor.decor_type.label(),
+                            egui::FontId::proportional((9.0 * transform.zoom).max(7.0)),
+                            ring_color,
+                        );
+                    }
                 }
             }
         }
@@ -390,14 +412,7 @@ pub fn decor_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Decor
         // Place mode toggle
         ui.horizontal(|ui| {
             ui.label("Place:");
-            egui::ComboBox::from_id_salt("decor_place_type")
-                .selected_text(state.place_type.label())
-                .width(90.0)
-                .show_ui(ui, |ui| {
-                    for dt in DecorType::ALL {
-                        ui.selectable_value(&mut state.place_type, dt, dt.label());
-                    }
-                });
+            decor_type_combo(ui, "decor_place_type", &mut state.place_type, &mut state.decor_search);
         });
         let place_label = if state.place_mode { "Stop Placing" } else { "Start Placing" };
         if ui.button(place_label).clicked() {
@@ -469,25 +484,20 @@ pub fn decor_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Decor
             ui.label("Properties:");
 
             if let Some(room) = dungeon.graph.room_by_id_mut(sel_room_id) {
-                let (rw, rh) = room.grid_size();
                 if sel_idx < room.decor.len() {
                     let decor = &mut room.decor[sel_idx];
                     ui.horizontal(|ui| {
                         ui.label("Type:");
-                        egui::ComboBox::from_id_salt("decor_sel_type")
-                            .selected_text(decor.decor_type.label())
-                            .width(90.0)
-                            .show_ui(ui, |ui| {
-                                for dt in DecorType::ALL {
-                                    ui.selectable_value(&mut decor.decor_type, dt, dt.label());
-                                }
-                            });
+                        decor_type_combo(ui, "decor_sel_type", &mut decor.decor_type, &mut state.decor_search);
                     });
                     ui.horizontal(|ui| {
-                        ui.add(egui::DragValue::new(&mut decor.x).range(0.0..=rw as f32).speed(0.1).prefix("x: "));
-                        ui.add(egui::DragValue::new(&mut decor.y).range(0.0..=rh as f32).speed(0.1).prefix("y: "));
+                        ui.label("x:");
+                        crate::ui::canvas_common::num_input_f32(ui, &mut decor.x, 35.0);
+                        ui.label("y:");
+                        crate::ui::canvas_common::num_input_f32(ui, &mut decor.y, 35.0);
                     });
                     ui.add(egui::Slider::new(&mut decor.rotation, 0.0..=360.0).text("Rotation"));
+                    ui.add(egui::Slider::new(&mut decor.scale, 0.2..=3.0).text("Size"));
                 }
             }
         }
@@ -537,5 +547,308 @@ pub fn decor_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Decor
                     }
                 }
             });
+    }
+}
+
+/// Fuzzy-searchable dropdown for DecorType selection.
+fn decor_type_combo(ui: &mut egui::Ui, id: &str, value: &mut DecorType, search: &mut String) {
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(value.label())
+        .width(110.0)
+        .show_ui(ui, |ui| {
+            ui.add(egui::TextEdit::singleline(search).hint_text("Search...").desired_width(100.0));
+            let filter = search.to_lowercase();
+            egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+                for dt in DecorType::ALL {
+                    if !filter.is_empty() && !dt.label().to_lowercase().contains(&filter) {
+                        continue;
+                    }
+                    if ui.selectable_value(value, dt, dt.label()).clicked() {
+                        search.clear();
+                    }
+                }
+            });
+        });
+}
+
+/// Rotate a screen-space point around a center by deg degrees.
+fn rot_screen(px: f32, py: f32, cx: f32, cy: f32, deg: f32) -> egui::Pos2 {
+    let rad = deg.to_radians();
+    let cos = rad.cos();
+    let sin = rad.sin();
+    let dx = px - cx;
+    let dy = py - cy;
+    egui::pos2(cx + dx * cos - dy * sin, cy + dx * sin + dy * cos)
+}
+
+fn rot_line_screen(
+    painter: &egui::Painter, x1: f32, y1: f32, x2: f32, y2: f32,
+    cx: f32, cy: f32, deg: f32, stroke: egui::Stroke,
+) {
+    let a = rot_screen(x1, y1, cx, cy, deg);
+    let b = rot_screen(x2, y2, cx, cy, deg);
+    painter.line_segment([a, b], stroke);
+}
+
+/// Draw a decor symbol in screen space using egui painter primitives.
+fn draw_decor_symbol(
+    painter: &egui::Painter,
+    center: egui::Pos2,
+    s: f32, // half-size in screen pixels
+    deg: f32,
+    decor_type: DecorType,
+    color: egui::Color32,
+) {
+    let cx = center.x;
+    let cy = center.y;
+    let stroke = egui::Stroke::new(1.5, color);
+    let thin = egui::Stroke::new(0.8, color);
+    match decor_type {
+        DecorType::Table => {
+            let hw = s;
+            let hh = s * 0.6;
+            // Tabletop
+            rot_line_screen(painter, cx - hw, cy - hh, cx + hw, cy - hh, cx, cy, deg, stroke);
+            rot_line_screen(painter, cx + hw, cy - hh, cx + hw, cy + hh, cx, cy, deg, stroke);
+            rot_line_screen(painter, cx + hw, cy + hh, cx - hw, cy + hh, cx, cy, deg, stroke);
+            rot_line_screen(painter, cx - hw, cy + hh, cx - hw, cy - hh, cx, cy, deg, stroke);
+            // Legs
+            let lr = s * 0.08;
+            for &(lx, ly) in &[(-hw + lr * 2.0, -hh + lr * 2.0), (hw - lr * 2.0, -hh + lr * 2.0),
+                                 (-hw + lr * 2.0, hh - lr * 2.0), (hw - lr * 2.0, hh - lr * 2.0)] {
+                let p = rot_screen(cx + lx, cy + ly, cx, cy, deg);
+                painter.circle_filled(p, lr, color);
+            }
+        }
+        DecorType::Chest => {
+            let cs = s * 0.6;
+            rot_line_screen(painter, cx - cs, cy - cs, cx + cs, cy - cs, cx, cy, deg, stroke);
+            rot_line_screen(painter, cx + cs, cy - cs, cx + cs, cy + cs, cx, cy, deg, stroke);
+            rot_line_screen(painter, cx + cs, cy + cs, cx - cs, cy + cs, cx, cy, deg, stroke);
+            rot_line_screen(painter, cx - cs, cy + cs, cx - cs, cy - cs, cx, cy, deg, stroke);
+            // Lid line
+            rot_line_screen(painter, cx - cs, cy - cs * 0.2, cx + cs, cy - cs * 0.2, cx, cy, deg, thin);
+            // Clasp
+            let clasp = rot_screen(cx, cy + cs, cx, cy, deg);
+            painter.circle_filled(clasp, s * 0.08, color);
+        }
+        DecorType::Pillar => {
+            painter.circle_filled(center, s * 0.5, color);
+            let light = egui::Color32::from_rgba_unmultiplied(
+                color.r().saturating_add(40), color.g().saturating_add(40), color.b().saturating_add(40), color.a());
+            painter.circle_stroke(center, s * 0.5, egui::Stroke::new(1.0, light));
+            painter.circle_stroke(center, s * 0.35, egui::Stroke::new(0.5, light));
+        }
+        DecorType::StairsUp | DecorType::StairsDown => {
+            // Box
+            rot_line_screen(painter, cx - s, cy - s, cx + s, cy - s, cx, cy, deg, stroke);
+            rot_line_screen(painter, cx + s, cy - s, cx + s, cy + s, cx, cy, deg, stroke);
+            rot_line_screen(painter, cx + s, cy + s, cx - s, cy + s, cx, cy, deg, stroke);
+            rot_line_screen(painter, cx - s, cy + s, cx - s, cy - s, cx, cy, deg, stroke);
+            // Treads
+            let steps = 5;
+            for i in 1..steps {
+                let y = cy - s + (i as f32 / steps as f32) * s * 2.0;
+                rot_line_screen(painter, cx - s, y, cx + s, y, cx, cy, deg, thin);
+            }
+            // Arrow
+            let (arrow_tip, arrow_l, arrow_r) = if decor_type == DecorType::StairsUp {
+                (cy - s * 0.9, cy - s * 0.5, cy - s * 0.5)
+            } else {
+                (cy + s * 0.9, cy + s * 0.5, cy + s * 0.5)
+            };
+            rot_line_screen(painter, cx, arrow_tip, cx - s * 0.3, arrow_l, cx, cy, deg, stroke);
+            rot_line_screen(painter, cx, arrow_tip, cx + s * 0.3, arrow_r, cx, cy, deg, stroke);
+        }
+        DecorType::Altar => {
+            // Platform
+            rot_line_screen(painter, cx - s * 0.8, cy + s * 0.6, cx + s * 0.8, cy + s * 0.6, cx, cy, deg, stroke);
+            rot_line_screen(painter, cx - s * 0.8, cy + s * 0.8, cx + s * 0.8, cy + s * 0.8, cx, cy, deg, stroke);
+            rot_line_screen(painter, cx - s * 0.8, cy + s * 0.6, cx - s * 0.8, cy + s * 0.8, cx, cy, deg, stroke);
+            rot_line_screen(painter, cx + s * 0.8, cy + s * 0.6, cx + s * 0.8, cy + s * 0.8, cx, cy, deg, stroke);
+            // Cross
+            let t = s * 0.2;
+            rot_line_screen(painter, cx - t, cy - s, cx + t, cy - s, cx, cy, deg, thin);
+            rot_line_screen(painter, cx + t, cy - s, cx + t, cy + s * 0.5, cx, cy, deg, thin);
+            rot_line_screen(painter, cx + t, cy + s * 0.5, cx - t, cy + s * 0.5, cx, cy, deg, thin);
+            rot_line_screen(painter, cx - t, cy + s * 0.5, cx - t, cy - s, cx, cy, deg, thin);
+            rot_line_screen(painter, cx - s * 0.6, cy - t * 1.5, cx + s * 0.6, cy - t * 1.5, cx, cy, deg, thin);
+            rot_line_screen(painter, cx - s * 0.6, cy + t * 0.5, cx + s * 0.6, cy + t * 0.5, cx, cy, deg, thin);
+            rot_line_screen(painter, cx - s * 0.6, cy - t * 1.5, cx - s * 0.6, cy + t * 0.5, cx, cy, deg, thin);
+            rot_line_screen(painter, cx + s * 0.6, cy - t * 1.5, cx + s * 0.6, cy + t * 0.5, cx, cy, deg, thin);
+        }
+        DecorType::Fountain => {
+            painter.circle_stroke(center, s * 0.85, stroke);
+            painter.circle_stroke(center, s * 0.55, thin);
+            painter.circle_stroke(center, s * 0.25, thin);
+            painter.circle_filled(center, s * 0.08, color);
+        }
+        DecorType::Trap => {
+            // Triangle with X
+            rot_line_screen(painter, cx, cy - s * 0.7, cx + s * 0.7, cy + s * 0.5, cx, cy, deg, stroke);
+            rot_line_screen(painter, cx + s * 0.7, cy + s * 0.5, cx - s * 0.7, cy + s * 0.5, cx, cy, deg, stroke);
+            rot_line_screen(painter, cx - s * 0.7, cy + s * 0.5, cx, cy - s * 0.7, cx, cy, deg, stroke);
+            rot_line_screen(painter, cx - s * 0.25, cy - s * 0.1, cx + s * 0.25, cy + s * 0.35, cx, cy, deg, thin);
+            rot_line_screen(painter, cx + s * 0.25, cy - s * 0.1, cx - s * 0.25, cy + s * 0.35, cx, cy, deg, thin);
+        }
+        DecorType::Rubble => {
+            let rocks: [(f32, f32, f32); 7] = [
+                (0.0, 0.0, 0.18), (-0.45, -0.35, 0.14), (0.35, -0.25, 0.16),
+                (-0.25, 0.4, 0.12), (0.4, 0.35, 0.13), (-0.15, -0.45, 0.1),
+                (0.2, 0.15, 0.11),
+            ];
+            for &(dx, dy, r) in &rocks {
+                let p = rot_screen(cx + dx * s, cy + dy * s, cx, cy, deg);
+                painter.circle_filled(p, r * s, color);
+            }
+        }
+        DecorType::Chair => {
+            let cs = s * 0.4;
+            rot_line_screen(painter, cx - cs, cy - cs, cx + cs, cy - cs, cx, cy, deg, stroke);
+            rot_line_screen(painter, cx + cs, cy - cs, cx + cs, cy + cs, cx, cy, deg, stroke);
+            rot_line_screen(painter, cx + cs, cy + cs, cx - cs, cy + cs, cx, cy, deg, stroke);
+            rot_line_screen(painter, cx - cs, cy + cs, cx - cs, cy - cs, cx, cy, deg, stroke);
+            rot_line_screen(painter, cx - cs, cy - cs, cx + cs, cy - cs, cx, cy, deg, egui::Stroke::new(2.5, color));
+        }
+        DecorType::Bench => {
+            let hw = s * 0.9;
+            let hh = s * 0.25;
+            rot_line_screen(painter, cx - hw, cy - hh, cx + hw, cy - hh, cx, cy, deg, stroke);
+            rot_line_screen(painter, cx + hw, cy - hh, cx + hw, cy + hh, cx, cy, deg, stroke);
+            rot_line_screen(painter, cx + hw, cy + hh, cx - hw, cy + hh, cx, cy, deg, stroke);
+            rot_line_screen(painter, cx - hw, cy + hh, cx - hw, cy - hh, cx, cy, deg, stroke);
+        }
+        DecorType::Barrel => {
+            painter.circle_stroke(center, s * 0.55, stroke);
+            rot_line_screen(painter, cx - s * 0.5, cy - s * 0.15, cx + s * 0.5, cy - s * 0.15, cx, cy, deg, thin);
+            rot_line_screen(painter, cx - s * 0.5, cy + s * 0.15, cx + s * 0.5, cy + s * 0.15, cx, cy, deg, thin);
+        }
+        DecorType::Crate => {
+            let cs = s * 0.55;
+            rot_line_screen(painter, cx - cs, cy - cs, cx + cs, cy - cs, cx, cy, deg, stroke);
+            rot_line_screen(painter, cx + cs, cy - cs, cx + cs, cy + cs, cx, cy, deg, stroke);
+            rot_line_screen(painter, cx + cs, cy + cs, cx - cs, cy + cs, cx, cy, deg, stroke);
+            rot_line_screen(painter, cx - cs, cy + cs, cx - cs, cy - cs, cx, cy, deg, stroke);
+            rot_line_screen(painter, cx - cs, cy - cs, cx + cs, cy + cs, cx, cy, deg, thin);
+            rot_line_screen(painter, cx + cs, cy - cs, cx - cs, cy + cs, cx, cy, deg, thin);
+        }
+        DecorType::Ladder => {
+            let hw = s * 0.3;
+            rot_line_screen(painter, cx - hw, cy - s, cx - hw, cy + s, cx, cy, deg, stroke);
+            rot_line_screen(painter, cx + hw, cy - s, cx + hw, cy + s, cx, cy, deg, stroke);
+            for i in 0..5 {
+                let y = cy - s + (i as f32 + 0.5) * s * 2.0 / 5.0;
+                rot_line_screen(painter, cx - hw, y, cx + hw, y, cx, cy, deg, thin);
+            }
+        }
+        DecorType::Well => {
+            painter.circle_stroke(center, s * 0.7, stroke);
+            painter.circle_stroke(center, s * 0.5, thin);
+            rot_line_screen(painter, cx - s * 0.7, cy, cx + s * 0.7, cy, cx, cy, deg, thin);
+            rot_line_screen(painter, cx, cy - s * 0.7, cx, cy + s * 0.7, cx, cy, deg, thin);
+        }
+        DecorType::Brazier => {
+            painter.circle_stroke(center, s * 0.4, stroke);
+            painter.circle_filled(center, s * 0.25, color);
+            rot_line_screen(painter, cx - s * 0.3, cy + s * 0.3, cx - s * 0.5, cy + s * 0.7, cx, cy, deg, thin);
+            rot_line_screen(painter, cx + s * 0.3, cy + s * 0.3, cx + s * 0.5, cy + s * 0.7, cx, cy, deg, thin);
+            rot_line_screen(painter, cx, cy + s * 0.4, cx, cy + s * 0.7, cx, cy, deg, thin);
+        }
+        DecorType::Fireplace => {
+            rot_line_screen(painter, cx - s * 0.7, cy - s * 0.6, cx - s * 0.7, cy + s * 0.6, cx, cy, deg, egui::Stroke::new(2.0, color));
+            rot_line_screen(painter, cx + s * 0.7, cy - s * 0.6, cx + s * 0.7, cy + s * 0.6, cx, cy, deg, egui::Stroke::new(2.0, color));
+            rot_line_screen(painter, cx - s * 0.7, cy + s * 0.6, cx + s * 0.7, cy + s * 0.6, cx, cy, deg, egui::Stroke::new(2.0, color));
+            rot_line_screen(painter, cx, cy + s * 0.3, cx - s * 0.15, cy - s * 0.2, cx, cy, deg, thin);
+            rot_line_screen(painter, cx, cy + s * 0.3, cx + s * 0.15, cy - s * 0.2, cx, cy, deg, thin);
+        }
+        DecorType::Statue => {
+            let p = rot_screen(cx, cy - s * 0.15, cx, cy, deg);
+            painter.circle_filled(p, s * 0.4, color);
+            let bs = s * 0.5;
+            rot_line_screen(painter, cx - bs, cy + s * 0.3, cx + bs, cy + s * 0.3, cx, cy, deg, stroke);
+            rot_line_screen(painter, cx + bs, cy + s * 0.3, cx + bs, cy + s * 0.7, cx, cy, deg, stroke);
+            rot_line_screen(painter, cx + bs, cy + s * 0.7, cx - bs, cy + s * 0.7, cx, cy, deg, stroke);
+            rot_line_screen(painter, cx - bs, cy + s * 0.7, cx - bs, cy + s * 0.3, cx, cy, deg, stroke);
+        }
+        DecorType::Throne => {
+            let cs = s * 0.5;
+            rot_line_screen(painter, cx - cs, cy - cs, cx + cs, cy - cs, cx, cy, deg, thin);
+            rot_line_screen(painter, cx + cs, cy - cs, cx + cs, cy + cs, cx, cy, deg, thin);
+            rot_line_screen(painter, cx + cs, cy + cs, cx - cs, cy + cs, cx, cy, deg, thin);
+            rot_line_screen(painter, cx - cs, cy + cs, cx - cs, cy - cs, cx, cy, deg, thin);
+            rot_line_screen(painter, cx - cs, cy - cs, cx - cs, cy - s * 0.9, cx, cy, deg, egui::Stroke::new(2.0, color));
+            rot_line_screen(painter, cx + cs, cy - cs, cx + cs, cy - s * 0.9, cx, cy, deg, egui::Stroke::new(2.0, color));
+            rot_line_screen(painter, cx - cs, cy - s * 0.9, cx + cs, cy - s * 0.9, cx, cy, deg, egui::Stroke::new(2.0, color));
+            rot_line_screen(painter, cx - cs, cy, cx - s * 0.8, cy, cx, cy, deg, stroke);
+            rot_line_screen(painter, cx + cs, cy, cx + s * 0.8, cy, cx, cy, deg, stroke);
+        }
+        DecorType::Bed => {
+            let hw = s * 0.6;
+            let hh = s * 0.9;
+            rot_line_screen(painter, cx - hw, cy - hh, cx + hw, cy - hh, cx, cy, deg, thin);
+            rot_line_screen(painter, cx + hw, cy - hh, cx + hw, cy + hh, cx, cy, deg, thin);
+            rot_line_screen(painter, cx + hw, cy + hh, cx - hw, cy + hh, cx, cy, deg, thin);
+            rot_line_screen(painter, cx - hw, cy + hh, cx - hw, cy - hh, cx, cy, deg, thin);
+            rot_line_screen(painter, cx - hw, cy - hh, cx + hw, cy - hh, cx, cy, deg, egui::Stroke::new(3.0, color));
+            rot_line_screen(painter, cx - hw * 0.6, cy - hh + s * 0.3, cx + hw * 0.6, cy - hh + s * 0.3, cx, cy, deg, thin);
+        }
+        DecorType::Bookshelf => {
+            let hw = s * 0.8;
+            let hh = s * 0.4;
+            rot_line_screen(painter, cx - hw, cy - hh, cx + hw, cy - hh, cx, cy, deg, stroke);
+            rot_line_screen(painter, cx + hw, cy - hh, cx + hw, cy + hh, cx, cy, deg, stroke);
+            rot_line_screen(painter, cx + hw, cy + hh, cx - hw, cy + hh, cx, cy, deg, stroke);
+            rot_line_screen(painter, cx - hw, cy + hh, cx - hw, cy - hh, cx, cy, deg, stroke);
+            for i in 1..3 {
+                let y = cy - hh + (i as f32 / 3.0) * hh * 2.0;
+                rot_line_screen(painter, cx - hw, y, cx + hw, y, cx, cy, deg, thin);
+            }
+        }
+        DecorType::Bones => {
+            rot_line_screen(painter, cx - s * 0.6, cy - s * 0.4, cx + s * 0.6, cy + s * 0.4, cx, cy, deg, stroke);
+            rot_line_screen(painter, cx + s * 0.6, cy - s * 0.4, cx - s * 0.6, cy + s * 0.4, cx, cy, deg, stroke);
+            for &(bx, by) in &[(-0.6f32, -0.4f32), (0.6, 0.4), (0.6, -0.4), (-0.6, 0.4)] {
+                let p = rot_screen(cx + bx * s, cy + by * s, cx, cy, deg);
+                painter.circle_filled(p, s * 0.1, color);
+            }
+            let skull = rot_screen(cx, cy - s * 0.1, cx, cy, deg);
+            painter.circle_stroke(skull, s * 0.2, thin);
+        }
+        DecorType::Web => {
+            for i in 0..6 {
+                let angle = (i as f32 / 6.0) * std::f32::consts::TAU;
+                let ex = cx + s * 0.8 * angle.cos();
+                let ey = cy + s * 0.8 * angle.sin();
+                rot_line_screen(painter, cx, cy, ex, ey, cx, cy, deg, thin);
+            }
+            for ring in 1..3 {
+                let r = s * 0.8 * ring as f32 / 3.0;
+                for i in 0..6 {
+                    let a1 = (i as f32 / 6.0) * std::f32::consts::TAU;
+                    let a2 = ((i + 1) as f32 / 6.0) * std::f32::consts::TAU;
+                    let p1 = rot_screen(cx + r * a1.cos(), cy + r * a1.sin(), cx, cy, deg);
+                    let p2 = rot_screen(cx + r * a2.cos(), cy + r * a2.sin(), cx, cy, deg);
+                    painter.line_segment([p1, p2], egui::Stroke::new(0.5, color));
+                }
+            }
+        }
+        DecorType::Door => {
+            let hw = s * 0.05;
+            rot_line_screen(painter, cx - hw, cy - s * 0.7, cx - hw, cy + s * 0.7, cx, cy, deg, egui::Stroke::new(2.0, color));
+            rot_line_screen(painter, cx - hw, cy - s * 0.7, cx + s * 0.7, cy - s * 0.7, cx, cy, deg, stroke);
+            rot_line_screen(painter, cx + s * 0.7, cy - s * 0.7, cx + s * 0.7, cy + s * 0.7, cx, cy, deg, stroke);
+            rot_line_screen(painter, cx + s * 0.7, cy + s * 0.7, cx - hw, cy + s * 0.7, cx, cy, deg, stroke);
+        }
+        DecorType::Gate => {
+            for i in 0..5 {
+                let x = cx - s * 0.6 + (i as f32 / 4.0) * s * 1.2;
+                rot_line_screen(painter, x, cy - s * 0.7, x, cy + s * 0.7, cx, cy, deg, thin);
+            }
+            rot_line_screen(painter, cx - s * 0.6, cy - s * 0.2, cx + s * 0.6, cy - s * 0.2, cx, cy, deg, thin);
+            rot_line_screen(painter, cx - s * 0.6, cy + s * 0.2, cx + s * 0.6, cy + s * 0.2, cx, cy, deg, thin);
+            rot_line_screen(painter, cx - s * 0.7, cy - s * 0.8, cx + s * 0.7, cy - s * 0.8, cx, cy, deg, egui::Stroke::new(2.0, color));
+            rot_line_screen(painter, cx - s * 0.7, cy - s * 0.8, cx - s * 0.7, cy + s * 0.7, cx, cy, deg, egui::Stroke::new(2.0, color));
+            rot_line_screen(painter, cx + s * 0.7, cy - s * 0.8, cx + s * 0.7, cy + s * 0.7, cx, cy, deg, egui::Stroke::new(2.0, color));
+        }
     }
 }

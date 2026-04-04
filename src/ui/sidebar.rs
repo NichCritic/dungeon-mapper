@@ -98,7 +98,8 @@ fn multi_room_properties(ui: &mut egui::Ui, dungeon: &mut Dungeon, ids: &[String
     ui.label("Dimensions:");
     let mut w = snaps[0].w;
     ui.horizontal(|ui| {
-        if ui.add(egui::DragValue::new(&mut w).range(1..=20).prefix("W: ")).changed() {
+        ui.label("W:");
+        if crate::ui::canvas_common::num_input_u32(ui, &mut w, 40.0) {
             for id in ids {
                 if let Some(room) = dungeon.graph.room_by_id_mut(id) {
                     room.grid_width = Some(w);
@@ -109,7 +110,8 @@ fn multi_room_properties(ui: &mut egui::Ui, dungeon: &mut Dungeon, ids: &[String
     });
     let mut h = snaps[0].h;
     ui.horizontal(|ui| {
-        if ui.add(egui::DragValue::new(&mut h).range(1..=20).prefix("H: ")).changed() {
+        ui.label("L:");
+        if crate::ui::canvas_common::num_input_u32(ui, &mut h, 40.0) {
             for id in ids {
                 if let Some(room) = dungeon.graph.room_by_id_mut(id) {
                     room.grid_height = Some(h);
@@ -183,7 +185,8 @@ fn multi_room_properties(ui: &mut egui::Ui, dungeon: &mut Dungeon, ids: &[String
         FloorAssignment::Single(f) | FloorAssignment::Half(f, _) => f,
     };
     ui.horizontal(|ui| {
-        if ui.add(egui::DragValue::new(&mut floor_val).speed(0.1).prefix("Set floor: ")).changed() {
+        ui.label("Set floor:");
+        if crate::ui::canvas_common::num_input_i32(ui, &mut floor_val, 40.0) {
             for id in ids {
                 if let Some(room) = dungeon.graph.room_by_id_mut(id) {
                     room.floor = FloorAssignment::Single(floor_val);
@@ -284,7 +287,10 @@ fn multi_connection_properties(ui: &mut egui::Ui, dungeon: &mut Dungeon, ids: &[
     let mut has_min = snaps[0].min_len.is_some();
     let mut min_val = snaps[0].min_len.unwrap_or(1);
     ui.horizontal(|ui| {
-        if ui.checkbox(&mut has_min, "Min:").changed() || ui.add_enabled(has_min, egui::DragValue::new(&mut min_val).range(0..=200).suffix(" sq")).changed() {
+        let min_changed = ui.checkbox(&mut has_min, "Min:").changed();
+        let val_changed = if has_min { crate::ui::canvas_common::num_input_u32(ui, &mut min_val, 40.0) } else { false };
+        ui.label("sq");
+        if min_changed || val_changed {
             for id in ids {
                 if let Some(edge) = dungeon.graph.connection_by_id_mut(id) {
                     edge.connection.min_length = if has_min { Some(min_val) } else { None };
@@ -298,7 +304,10 @@ fn multi_connection_properties(ui: &mut egui::Ui, dungeon: &mut Dungeon, ids: &[
     let mut has_max = snaps[0].max_len.is_some();
     let mut max_val = snaps[0].max_len.unwrap_or(50);
     ui.horizontal(|ui| {
-        if ui.checkbox(&mut has_max, "Max:").changed() || ui.add_enabled(has_max, egui::DragValue::new(&mut max_val).range(0..=200).suffix(" sq")).changed() {
+        let max_changed = ui.checkbox(&mut has_max, "Max:").changed();
+        let val_changed = if has_max { crate::ui::canvas_common::num_input_u32(ui, &mut max_val, 40.0) } else { false };
+        ui.label("sq");
+        if max_changed || val_changed {
             for id in ids {
                 if let Some(edge) = dungeon.graph.connection_by_id_mut(id) {
                     edge.connection.max_length = if has_max { Some(max_val) } else { None };
@@ -400,7 +409,7 @@ fn group_properties(ui: &mut egui::Ui, dungeon: &mut Dungeon, group_id: &str) {
     let mut max_w = group.max_width.unwrap_or(20);
     ui.horizontal(|ui| {
         ui.checkbox(&mut has_max_w, "Max width:");
-        ui.add_enabled(has_max_w, egui::DragValue::new(&mut max_w).range(1..=100).suffix(" sq"));
+        if has_max_w { crate::ui::canvas_common::num_input_u32(ui, &mut max_w, 40.0); ui.label("sq"); }
     });
     group.max_width = if has_max_w { Some(max_w) } else { None };
 
@@ -408,7 +417,7 @@ fn group_properties(ui: &mut egui::Ui, dungeon: &mut Dungeon, group_id: &str) {
     let mut max_h = group.max_height.unwrap_or(20);
     ui.horizontal(|ui| {
         ui.checkbox(&mut has_max_h, "Max height:");
-        ui.add_enabled(has_max_h, egui::DragValue::new(&mut max_h).range(1..=100).suffix(" sq"));
+        if has_max_h { crate::ui::canvas_common::num_input_u32(ui, &mut max_h, 40.0); ui.label("sq"); }
     });
     group.max_height = if has_max_h { Some(max_h) } else { None };
 
@@ -465,10 +474,12 @@ fn room_properties(ui: &mut egui::Ui, room: &mut Room, focus_label: &mut bool) {
 
     ui.label("Dimensions (grid squares):");
     ui.horizontal(|ui| {
-        if ui.add(egui::DragValue::new(&mut w).range(1..=20).prefix("W: ")).changed() {
+        ui.label("W:");
+        if crate::ui::canvas_common::num_input_u32(ui, &mut w, 40.0) {
             room.grid_width = Some(w);
         }
-        if ui.add(egui::DragValue::new(&mut h).range(1..=20).prefix("H: ")).changed() {
+        ui.label("L:");
+        if crate::ui::canvas_common::num_input_u32(ui, &mut h, 40.0) {
             room.grid_height = Some(h);
         }
     });
@@ -514,8 +525,7 @@ fn room_properties(ui: &mut egui::Ui, room: &mut Room, focus_label: &mut bool) {
                     }
                 });
             ui.horizontal(|ui| {
-                ui.label("Seed:");
-                ui.add(egui::DragValue::new(&mut cave.seed).speed(1.0));
+                ui.label(format!("Seed: {}", cave.seed));
                 if ui.small_button("Rand").clicked() {
                     cave.seed = rand::random();
                     cave.cells.clear();
@@ -567,9 +577,11 @@ fn room_properties(ui: &mut egui::Ui, room: &mut Room, focus_label: &mut bool) {
         FloorAssignment::Half(a, b) => (a, b),
     };
     ui.horizontal(|ui| {
-        ui.add(egui::DragValue::new(&mut floor_a).speed(0.1).prefix("Floor: "));
+        ui.label("Floor:");
+        crate::ui::canvas_common::num_input_i32(ui, &mut floor_a, 40.0);
         if is_half {
-            ui.add(egui::DragValue::new(&mut floor_b).speed(0.1).prefix("& "));
+            ui.label("&");
+            crate::ui::canvas_common::num_input_i32(ui, &mut floor_b, 40.0);
         }
     });
     if ui.checkbox(&mut is_half, "Half floor (spans two)").changed() || floor_a != match room.floor { FloorAssignment::Single(f) | FloorAssignment::Half(f, _) => f } || (is_half && floor_b != match room.floor { FloorAssignment::Half(_, b) => b, _ => floor_a + 1 }) {
@@ -594,9 +606,7 @@ fn room_properties(ui: &mut egui::Ui, room: &mut Room, focus_label: &mut bool) {
     let mut remove_idx = None;
     for (i, decor) in room.decor.iter_mut().enumerate() {
         ui.horizontal(|ui| {
-            ui.label(decor.decor_type.label());
-            ui.add(egui::DragValue::new(&mut decor.x).range(0.0..=20.0).speed(0.1).prefix("x:"));
-            ui.add(egui::DragValue::new(&mut decor.y).range(0.0..=20.0).speed(0.1).prefix("y:"));
+            ui.label(format!("{} ({:.1}, {:.1})", decor.decor_type.label(), decor.x, decor.y));
             if ui.small_button("X").clicked() {
                 remove_idx = Some(i);
             }
@@ -647,7 +657,7 @@ fn connection_properties(ui: &mut egui::Ui, edge: &mut StoredEdge) {
     let mut min_val = edge.connection.min_length.unwrap_or(1);
     ui.horizontal(|ui| {
         ui.checkbox(&mut has_min, "Min:");
-        ui.add_enabled(has_min, egui::DragValue::new(&mut min_val).range(0..=200).suffix(" sq"));
+        if has_min { crate::ui::canvas_common::num_input_u32(ui, &mut min_val, 40.0); ui.label("sq"); }
     });
     edge.connection.min_length = if has_min { Some(min_val) } else { None };
 
@@ -655,7 +665,7 @@ fn connection_properties(ui: &mut egui::Ui, edge: &mut StoredEdge) {
     let mut max_val = edge.connection.max_length.unwrap_or(50);
     ui.horizontal(|ui| {
         ui.checkbox(&mut has_max, "Max:");
-        ui.add_enabled(has_max, egui::DragValue::new(&mut max_val).range(0..=200).suffix(" sq"));
+        if has_max { crate::ui::canvas_common::num_input_u32(ui, &mut max_val, 40.0); ui.label("sq"); }
     });
     edge.connection.max_length = if has_max { Some(max_val) } else { None };
 

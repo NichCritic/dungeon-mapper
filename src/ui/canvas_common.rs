@@ -125,3 +125,75 @@ pub fn draw_arrow_head(painter: &egui::Painter, from: egui::Pos2, to: egui::Pos2
         egui::Stroke::NONE,
     ));
 }
+
+// --- Numeric text input helpers ---
+
+/// Select all text in a TextEdit when it gains focus.
+fn select_all_on_focus(ui: &egui::Ui, response: &egui::Response, text: &str) {
+    if response.gained_focus() {
+        if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), response.id) {
+            let range = egui::text::CCursorRange::two(
+                egui::text::CCursor::new(0),
+                egui::text::CCursor::new(text.len()),
+            );
+            state.cursor.set_char_range(Some(range));
+            state.store(ui.ctx(), response.id);
+        }
+    }
+}
+
+/// A small numeric text input. Returns true if the value changed.
+pub fn num_input_u32(ui: &mut egui::Ui, value: &mut u32, width: f32) -> bool {
+    let mut text = value.to_string();
+    let response = ui.add(egui::TextEdit::singleline(&mut text).desired_width(width));
+    select_all_on_focus(ui, &response, &text);
+    if response.changed() {
+        if let Ok(v) = text.parse::<u32>() {
+            *value = v;
+            return true;
+        }
+    }
+    false
+}
+
+/// A small numeric text input for i32. Returns true if the value changed.
+pub fn num_input_i32(ui: &mut egui::Ui, value: &mut i32, width: f32) -> bool {
+    let mut text = value.to_string();
+    let response = ui.add(egui::TextEdit::singleline(&mut text).desired_width(width));
+    select_all_on_focus(ui, &response, &text);
+    if response.changed() {
+        if let Ok(v) = text.parse::<i32>() {
+            *value = v;
+            return true;
+        }
+    }
+    false
+}
+
+/// A small numeric text input for f32. Returns true if the value changed.
+pub fn num_input_f32(ui: &mut egui::Ui, value: &mut f32, width: f32) -> bool {
+    let mut text = format!("{:.1}", value);
+    let response = ui.add(egui::TextEdit::singleline(&mut text).desired_width(width));
+    select_all_on_focus(ui, &response, &text);
+    if response.changed() {
+        if let Ok(v) = text.parse::<f32>() {
+            *value = v;
+            return true;
+        }
+    }
+    false
+}
+
+/// A small numeric text input for u16. Returns true if the value changed.
+pub fn num_input_u16(ui: &mut egui::Ui, value: &mut u16, width: f32) -> bool {
+    let mut text = value.to_string();
+    let response = ui.add(egui::TextEdit::singleline(&mut text).desired_width(width));
+    select_all_on_focus(ui, &response, &text);
+    if response.changed() {
+        if let Ok(v) = text.parse::<u16>() {
+            *value = v;
+            return true;
+        }
+    }
+    false
+}

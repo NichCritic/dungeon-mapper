@@ -92,8 +92,17 @@ fn render_input_hash(layout: &SpatialLayout, graph: &DungeonGraph, theme: &Theme
                 s.x.to_bits().hash(&mut h);
                 s.y.to_bits().hash(&mut h);
                 s.width.to_bits().hash(&mut h);
+                s.length.to_bits().hash(&mut h);
                 s.height.to_bits().hash(&mut h);
                 std::mem::discriminant(&s.elevation).hash(&mut h);
+            }
+            room.decor.len().hash(&mut h);
+            for d in &room.decor {
+                d.x.to_bits().hash(&mut h);
+                d.y.to_bits().hash(&mut h);
+                d.rotation.to_bits().hash(&mut h);
+                d.scale.to_bits().hash(&mut h);
+                std::mem::discriminant(&d.decor_type).hash(&mut h);
             }
         }
     }
@@ -155,6 +164,7 @@ pub fn encounters_view(ui: &mut egui::Ui, dungeon: &Dungeon, state: &mut Encount
             show_labels: true,
             show_notes: false,
             show_secrets: false,
+            show_decor: true,
         };
         crate::render::themed::render_themed(
             &mut recorder,
@@ -442,7 +452,7 @@ fn encounters_list(
                                 ui.label("-");
                             } else {
                                 let mut r = wander_range.unwrap_or(2);
-                                if ui.add(egui::DragValue::new(&mut r).range(1..=20).prefix("range: ")).changed() {
+                                if ui.add(egui::Slider::new(&mut r, 1..=20).prefix("range: ")).changed() {
                                     wander_range = Some(r);
                                     enc.encounter_type = EncounterType::Wandering(wander_range);
                                 }
@@ -476,7 +486,8 @@ fn encounters_list(
                         for (m_idx, em) in enc.monsters.iter_mut().enumerate() {
                             ui.horizontal(|ui| {
                                 // Count
-                                ui.add(egui::DragValue::new(&mut em.count).range(1..=100).prefix("x"));
+                                ui.label("x");
+                                crate::ui::canvas_common::num_input_u32(ui, &mut em.count, 30.0);
 
                                 // Monster name
                                 let name = resolve_monster_name(&em.monster_ref, monster_db, &dungeon.custom_monsters);
@@ -655,7 +666,7 @@ fn monte_carlo_window(
 
             ui.horizontal(|ui| {
                 ui.label("N:");
-                ui.add(egui::DragValue::new(&mut sim_state.monte_carlo_n).range(10..=10000));
+                crate::ui::canvas_common::num_input_u32(ui, &mut sim_state.monte_carlo_n, 60.0);
                 if ui.button("Run").clicked() {
                     let (side_a, label_a) = build_side(&sim_state.side_a, 0, combat_stats_cache);
                     let (side_b, label_b) = build_side(&sim_state.side_b, 1, combat_stats_cache);
@@ -1092,7 +1103,7 @@ fn custom_monster_editor_window(
                 ui.horizontal(|ui| {
                     ui.label("AC:");
                     let mut ac_val = m.ac.first().and_then(|a| a.value()).unwrap_or(10) as i32;
-                    if ui.add(egui::DragValue::new(&mut ac_val).range(0..=30)).changed() {
+                    if crate::ui::canvas_common::num_input_i32(ui, &mut ac_val, 35.0) {
                         m.ac = vec![ArmorClass::Simple(ac_val as u8)];
                     }
                 });
@@ -1103,14 +1114,14 @@ fn custom_monster_editor_window(
                     match &mut m.hp {
                         HitPoints::Formula { average, formula } => {
                             let mut avg = *average;
-                            ui.add(egui::DragValue::new(&mut avg).prefix("avg: "));
+                            ui.label("avg:"); crate::ui::canvas_common::num_input_i32(ui, &mut avg, 40.0);
                             *average = avg;
                             ui.add(egui::TextEdit::singleline(formula).desired_width(80.0).hint_text("formula"));
                         }
                         _ => {
                             let mut avg: i32 = 0;
                             let mut formula = String::new();
-                            ui.add(egui::DragValue::new(&mut avg).prefix("avg: "));
+                            ui.label("avg:"); crate::ui::canvas_common::num_input_i32(ui, &mut avg, 40.0);
                             ui.add(egui::TextEdit::singleline(&mut formula).desired_width(80.0).hint_text("formula"));
                             if avg > 0 || !formula.is_empty() {
                                 m.hp = HitPoints::Formula { average: avg, formula };
@@ -1145,7 +1156,7 @@ fn custom_monster_editor_window(
                         ui.vertical(|ui| {
                             ui.label(egui::RichText::new(label).strong().size(10.0));
                             let mut val = *score as i32;
-                            if ui.add(egui::DragValue::new(&mut val).range(1..=30).speed(0.2)).changed() {
+                            if crate::ui::canvas_common::num_input_i32(ui, &mut val, 35.0) {
                                 *score = val as u8;
                             }
                         });
@@ -1187,7 +1198,11 @@ fn speed_edit(ui: &mut egui::Ui, label: &str, speed: &mut SpeedValue, _id_salt: 
         let mut val = speed.value().unwrap_or(0) as i32;
         let has_value = speed.value().is_some();
         if has_value {
-            if ui.add(egui::DragValue::new(&mut val).range(0..=999).suffix(" ft.")).changed() {
+            let mut uval = val as u32;
+            let changed = crate::ui::canvas_common::num_input_u32(ui, &mut uval, 40.0);
+            ui.label("ft.");
+            val = uval as i32;
+            if changed {
                 *speed = SpeedValue::Simple(val as u32);
             }
             if ui.small_button("X").clicked() {

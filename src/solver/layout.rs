@@ -1,4 +1,7 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::f32::consts::PI;
+
+use petgraph::graph::{NodeIndex, UnGraph};
 
 use crate::model::*;
 
@@ -241,6 +244,214 @@ fn sort_by_preference(candidates: &mut [(i32, i32)], pref_x: i32, pref_y: i32) {
     candidates.sort_by_key(|&(x, y)| (x - pref_x).abs() + (y - pref_y).abs());
 }
 
+/// Compute a Tutte embedding for the graph, producing crossing-free positions
+/// for planar graphs. Uses the entrance's connected component.
+///
+/// Algorithm:
+/// 1. Find a boundary cycle (outer face) via DFS from the entrance.
+///    Falls back to the entrance + its neighbors if no cycle is found.
+/// 2. Fix boundary vertices equally spaced on a circle.
+/// 3. Iteratively solve for interior vertices as barycentric averages of neighbors.
+fn tutte_embedding(
+    pg: &UnGraph<String, String>,
+    node_map: &HashMap<String, NodeIndex>,
+    entrance_id: &str,
+) -> HashMap<String, (f32, f32)> {
+    let mut positions: HashMap<NodeIndex, (f32, f32)> = HashMap::new();
+
+    let Some(&entrance_idx) = node_map.get(entrance_id) else {
+        return HashMap::new();
+    };
+
+    // Collect all nodes reachable from entrance (connected component)
+    let mut component: Vec<NodeIndex> = Vec::new();
+    let mut visited: HashSet<NodeIndex> = HashSet::new();
+    let mut stack = vec![entrance_idx];
+    while let Some(node) = stack.pop() {
+        if visited.insert(node) {
+            component.push(node);
+            for neighbor in pg.neighbors(node) {
+                if !visited.contains(&neighbor) {
+                    stack.push(neighbor);
+                }
+            }
+        }
+    }
+
+    if component.len() <= 2 {
+        return HashMap::new();
+    }
+
+    // Find a boundary cycle using DFS
+    let boundary = find_boundary_cycle(pg, entrance_idx, &component);
+
+    let boundary_set: HashSet<NodeIndex> = boundary.iter().copied().collect();
+    let interior: Vec<NodeIndex> = component.iter()
+        .filter(|n| !boundary_set.contains(n))
+        .copied()
+        .collect();
+
+    // Scale radius based on number of nodes and average room size
+    let radius = 10.0 * (component.len() as f32).sqrt();
+
+    // Fix boundary vertices on a circle
+    let k = boundary.len() as f32;
+    for (i, &node) in boundary.iter().enumerate() {
+        let angle = 2.0 * PI * i as f32 / k;
+        positions.insert(node, (radius * angle.cos(), radius * angle.sin()));
+    }
+
+    // Initialize interior vertices at center
+    for &node in &interior {
+        positions.insert(node, (0.0, 0.0));
+    }
+
+    // Gauss-Seidel iteration
+    for _ in 0..200 {
+        let mut max_delta: f32 = 0.0;
+        for &node in &interior {
+            let neighbors: Vec<NodeIndex> = pg.neighbors(node).collect();
+            if neighbors.is_empty() {
+                continue;
+            }
+            let (sum_x, sum_y) = neighbors.iter()
+                .filter_map(|n| positions.get(n))
+                .fold((0.0f32, 0.0f32), |(ax, ay), &(bx, by)| (ax + bx, ay + by));
+            let count = neighbors.iter().filter(|n| positions.contains_key(n)).count();
+            if count == 0 {
+                continue;
+            }
+            let new_x = sum_x / count as f32;
+            let new_y = sum_y / count as f32;
+            let (old_x, old_y) = positions[&node];
+            max_delta = max_delta.max((new_x - old_x).abs().max((new_y - old_y).abs()));
+            positions.insert(node, (new_x, new_y));
+        }
+        if max_delta < 0.01 {
+            break;
+        }
+    }
+
+    // Convert NodeIndex keys back to room ID strings
+    let idx_to_id: HashMap<NodeIndex, &str> = node_map.iter()
+        .map(|(id, &idx)| (idx, id.as_str()))
+        .collect();
+
+    positions.into_iter()
+        .filter_map(|(idx, pos)| {
+            idx_to_id.get(&idx).map(|&id| (id.to_string(), pos))
+        })
+        .collect()
+}
+
+/// Find a cycle to use as the outer boundary for Tutte embedding.
+/// Tries to find the longest cycle reachable from the start node.
+/// Falls back to the start node + its neighbors.
+fn find_boundary_cycle(
+    pg: &UnGraph<String, String>,
+    start: NodeIndex,
+    component: &[NodeIndex],
+) -> Vec<NodeIndex> {
+    // Strategy: find a cycle via DFS, then try to expand it.
+    // For most dungeon graphs this produces a good outer face.
+
+    if component.len() <= 3 {
+        // Small graph: use all nodes as boundary
+        return component.to_vec();
+    }
+
+    // DFS to find the first back-edge cycle
+    let mut parent: HashMap<NodeIndex, NodeIndex> = HashMap::new();
+    let mut visited: HashSet<NodeIndex> = HashSet::new();
+    let mut dfs_stack: Vec<(NodeIndex, Option<NodeIndex>)> = vec![(start, None)];
+    let mut cycle: Option<Vec<NodeIndex>> = None;
+
+    'dfs: while let Some((node, from)) = dfs_stack.pop() {
+        if !visited.insert(node) {
+            continue;
+        }
+        if let Some(p) = from {
+            parent.insert(node, p);
+        }
+
+        for neighbor in pg.neighbors(node) {
+            if !visited.contains(&neighbor) {
+                dfs_stack.push((neighbor, Some(node)));
+            } else if from.is_some() && Some(neighbor) != from {
+                // Back edge found — extract cycle
+                let mut path_a = vec![node];
+                let mut cur = node;
+                while cur != start && parent.contains_key(&cur) {
+                    cur = parent[&cur];
+                    path_a.push(cur);
+                }
+
+                let mut path_b = vec![neighbor];
+                cur = neighbor;
+                while cur != start && parent.contains_key(&cur) {
+                    cur = parent[&cur];
+                    path_b.push(cur);
+                }
+
+                // Find common ancestor and build cycle
+                let set_a: HashSet<NodeIndex> = path_a.iter().copied().collect();
+                let mut lca_idx_b = 0;
+                for (i, &n) in path_b.iter().enumerate() {
+                    if set_a.contains(&n) {
+                        lca_idx_b = i;
+                        break;
+                    }
+                }
+                let lca = path_b[lca_idx_b];
+                let lca_idx_a = path_a.iter().position(|&n| n == lca).unwrap_or(0);
+
+                let mut c: Vec<NodeIndex> = path_a[..=lca_idx_a].to_vec();
+                for &n in path_b[..lca_idx_b].iter().rev() {
+                    c.push(n);
+                }
+
+                if c.len() >= 3 {
+                    cycle = Some(c);
+                    break 'dfs;
+                }
+            }
+        }
+    }
+
+    // If we found a cycle, use it; otherwise fall back to star from entrance
+    if let Some(c) = cycle {
+        // Try to find a longer cycle by attempting BFS on the dual,
+        // but for now the first cycle is good enough
+        if c.len() >= 3 {
+            return c;
+        }
+    }
+
+    // Fallback: entrance + all neighbors
+    let mut boundary = vec![start];
+    for neighbor in pg.neighbors(start) {
+        boundary.push(neighbor);
+    }
+    if boundary.len() < 3 {
+        // Extend with neighbors-of-neighbors
+        let first_neighbors: Vec<NodeIndex> = pg.neighbors(start).collect();
+        for n in first_neighbors {
+            for nn in pg.neighbors(n) {
+                if !boundary.contains(&nn) {
+                    boundary.push(nn);
+                    if boundary.len() >= 3 {
+                        break;
+                    }
+                }
+            }
+            if boundary.len() >= 3 {
+                break;
+            }
+        }
+    }
+    boundary
+}
+
 /// BFS greedy placer. Uses graph view positions as hints for relative placement.
 pub fn solve_layout(
     graph: &DungeonGraph,
@@ -250,13 +461,19 @@ pub fn solve_layout(
         return Err("No rooms to layout".to_string());
     }
 
-    // Convert graph view positions to grid-scale hints.
-    // Scale factor: graph positions are in ~pixels (NODE_WIDTH=120),
-    // grid positions are in grid squares. We normalize relative to the entrance.
-    let graph_pos = &graph.graph_positions;
-    let scale = 0.05_f32; // rough conversion from graph pixels to grid squares
-
     let (pg, node_map) = graph.build_petgraph();
+
+    // Find entrance room
+    let entrance = graph.rooms.iter()
+        .find(|r| r.tags.contains(&RoomTag::Entrance))
+        .unwrap_or(&graph.rooms[0]);
+
+    // Compute Tutte embedding for crossing-free placement hints (planar graphs)
+    let tutte_pos = tutte_embedding(&pg, &node_map, &entrance.id);
+    // Prefer Tutte positions over raw graph editor positions
+    let graph_pos = if tutte_pos.len() >= 3 { &tutte_pos } else { &graph.graph_positions };
+    let scale = if tutte_pos.len() >= 3 { 1.0_f32 } else { 0.05_f32 };
+
     let mut state = PlacementState::new();
     let ctx = PlacementContext {
         gap,
@@ -264,11 +481,6 @@ pub fn solve_layout(
         connections: &graph.connections,
         graph,
     };
-
-    // Find entrance room
-    let entrance = graph.rooms.iter()
-        .find(|r| r.tags.contains(&RoomTag::Entrance))
-        .unwrap_or(&graph.rooms[0]);
 
     let (ew, eh) = entrance.grid_size();
     let entrance_graph_pos = graph_pos.get(&entrance.id).copied().unwrap_or((0.0, 0.0));
@@ -523,12 +735,14 @@ pub fn solve_incremental(
             graph,
         };
 
-        // Graph positions for hints
-        let graph_pos = &graph.graph_positions;
-        let scale = 0.05_f32;
+        // Graph positions for hints — use Tutte embedding when available
+        let (pg, node_map) = graph.build_petgraph();
         let entrance = graph.rooms.iter()
             .find(|r| r.tags.contains(&RoomTag::Entrance))
             .unwrap_or(&graph.rooms[0]);
+        let tutte_pos = tutte_embedding(&pg, &node_map, &entrance.id);
+        let graph_pos = if tutte_pos.len() >= 3 { &tutte_pos } else { &graph.graph_positions };
+        let scale = if tutte_pos.len() >= 3 { 1.0_f32 } else { 0.05_f32 };
         let entrance_graph_pos = graph_pos.get(&entrance.id).copied().unwrap_or((0.0, 0.0));
 
         for room_id in &new_room_ids {

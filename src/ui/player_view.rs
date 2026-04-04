@@ -119,6 +119,7 @@ pub fn player_viewport(
                 show_labels: presentation.show_labels_player,
                 show_notes: false,
                 show_secrets: false,
+                show_decor: true,
             };
             render_player_view(
                 &mut recorder,

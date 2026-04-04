@@ -17,8 +17,8 @@ enum DragTarget {
     GroupCorner(usize, u8),
     /// Dragging a whole group (group index)
     Group(usize),
-    /// Painting cave cells: (room_id, painting_floor)
-    CaveCell(String, bool),
+    /// Dragging an elevation section: (room_id, section index)
+    Section(String, usize),
 }
 
 pub struct SpatialViewState {
@@ -240,6 +240,32 @@ fn handle_spatial_interactions(
                 }
             }
 
+            // Check elevation sections (if a room with sections is selected)
+            if let Some((ref sec_room_id, sec_idx)) = state.selected_section {
+                if let Some(layout) = &dungeon.layout {
+                    if let Some(rl) = layout.room_by_id(sec_room_id) {
+                        if let Some(room) = dungeon.graph.room_by_id(sec_room_id) {
+                            if sec_idx < room.sections.len() {
+                                let sec = &room.sections[sec_idx];
+                                let room_px_x = rl.x as f32 * GRID_PX;
+                                let room_px_y = rl.y as f32 * GRID_PX;
+                                let sx = room_px_x + sec.x * GRID_PX;
+                                let sy = room_px_y + sec.y * GRID_PX;
+                                let sw = sec.width * GRID_PX;
+                                let sh = sec.length * GRID_PX;
+                                if world.x >= sx && world.x <= sx + sw
+                                    && world.y >= sy && world.y <= sy + sh
+                                {
+                                    state.drag_target = DragTarget::Section(sec_room_id.clone(), sec_idx);
+                                    state.drag_accum = egui::Vec2::ZERO;
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             // Check rooms
             let gx = world_to_grid(world.x);
             let gy = world_to_grid(world.y);
@@ -259,7 +285,7 @@ fn handle_spatial_interactions(
                         && gy >= rl.y
                         && gy < rl.y + rl.height as i32
                     {
-                        // If this is a cave room that's already selected, start cell painting
+                        // If this is a cave room that's already selected, toggle the clicked cell
                         if state.selected_room.as_deref() == Some(&rl.room_id) {
                             if let Some(room) = dungeon.graph.room_by_id(&rl.room_id) {
                                 if room.shape == RoomShape::Cave {
@@ -269,14 +295,11 @@ fn handle_spatial_interactions(
                                             let ly = (gy - rl.y) as usize;
                                             let w = rl.width as usize;
                                             let idx = ly * w + lx;
-                                            let painting_floor = !cave.cells.get(idx).copied().unwrap_or(false);
-                                            state.drag_target = DragTarget::CaveCell(rl.room_id.clone(), painting_floor);
-                                            state.drag_accum = egui::Vec2::ZERO;
-                                            // Toggle the clicked cell immediately
+                                            let new_val = !cave.cells.get(idx).copied().unwrap_or(false);
                                             if let Some(room) = dungeon.graph.room_by_id_mut(&rl.room_id) {
                                                 if let Some(cave) = &mut room.cave_data {
                                                     if let Some(cell) = cave.cells.get_mut(idx) {
-                                                        *cell = painting_floor;
+                                                        *cell = new_val;
                                                         cave.generation += 1;
                                                     }
                                                 }
@@ -416,10 +439,30 @@ fn handle_spatial_interactions(
                             && gy >= rl.y
                             && gy < rl.y + rl.height as i32
                         {
+                            // Check if click is on an elevation section
+                            let room_px_x = rl.x as f32 * GRID_PX;
+                            let room_px_y = rl.y as f32 * GRID_PX;
+                            let mut hit_section = None;
+                            if let Some(room) = dungeon.graph.room_by_id(&rl.room_id) {
+                                for (si, sec) in room.sections.iter().enumerate() {
+                                    let sx = room_px_x + sec.x * GRID_PX;
+                                    let sy = room_px_y + sec.y * GRID_PX;
+                                    let sw = sec.width * GRID_PX;
+                                    let sh = sec.length * GRID_PX;
+                                    if world.x >= sx && world.x <= sx + sw
+                                        && world.y >= sy && world.y <= sy + sh
+                                    {
+                                        hit_section = Some((rl.room_id.clone(), si));
+                                        break;
+                                    }
+                                }
+                            }
+
                             state.selected_room = Some(rl.room_id.clone());
                             state.selected_corridor = None;
                             state.selected_waypoint = None;
                             state.selected_group = None;
+                            state.selected_section = hit_section;
                             hit_room = true;
                             break;
                         }
@@ -445,8 +488,11 @@ fn handle_spatial_interactions(
                             }
                         }
                         if !hit_group {
+                            state.selected_room = None;
+                            state.selected_corridor = None;
                             state.selected_waypoint = None;
                             state.selected_group = None;
+                            state.selected_section = None;
                         }
                     }
                 }
@@ -484,38 +530,6 @@ fn handle_spatial_interactions(
         }
     }
 
-    // === CAVE CELL PAINTING (continuous, not grid-stepped) ===
-    if let DragTarget::CaveCell(ref room_id, painting_floor) = state.drag_target {
-        if response.dragged_by(egui::PointerButton::Primary) {
-            if let Some(pos) = response.hover_pos() {
-                let world = transform.screen_to_world(pos);
-                let gx = world_to_grid(world.x);
-                let gy = world_to_grid(world.y);
-                let room_id = room_id.clone();
-                if let Some(layout) = &dungeon.layout {
-                    if let Some(rl) = layout.room_by_id(&room_id) {
-                        let lx = gx - rl.x;
-                        let ly = gy - rl.y;
-                        if lx >= 0 && ly >= 0 && lx < rl.width as i32 && ly < rl.height as i32 {
-                            let w = rl.width as usize;
-                            let idx = ly as usize * w + lx as usize;
-                            if let Some(room) = dungeon.graph.room_by_id_mut(&room_id) {
-                                if let Some(cave) = &mut room.cave_data {
-                                    if let Some(cell) = cave.cells.get_mut(idx) {
-                                        if *cell != painting_floor {
-                                            *cell = painting_floor;
-                                            cave.generation += 1;
-                                            state.cave_contours_dirty = true;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
 
     // === DRAGGING ===
     if response.dragged_by(egui::PointerButton::Primary) {
@@ -707,7 +721,27 @@ fn handle_spatial_interactions(
                         }
                     }
                 }
-                DragTarget::CaveCell(_, _) => {} // handled above, not grid-stepped
+                DragTarget::Section(room_id, sec_idx) => {
+                    let room_id = room_id.clone();
+                    let sec_idx = *sec_idx;
+                    // Use layout dimensions (which reflect rotation) rather than model grid_size()
+                    let layout_size = dungeon.layout.as_ref()
+                        .and_then(|l| l.room_by_id(&room_id))
+                        .map(|rl| (rl.width as f32, rl.height as f32));
+                    if let Some(room) = dungeon.graph.room_by_id_mut(&room_id) {
+                        if sec_idx < room.sections.len() {
+                            let (rw, rh) = layout_size.unwrap_or_else(|| {
+                                let (w, h) = room.grid_size();
+                                (w as f32, h as f32)
+                            });
+                            let sec = &mut room.sections[sec_idx];
+                            let max_x = (rw - sec.width).max(0.0);
+                            let max_y = (rh - sec.length).max(0.0);
+                            sec.x = (sec.x + grid_steps_x as f32).clamp(0.0, max_x);
+                            sec.y = (sec.y + grid_steps_y as f32).clamp(0.0, max_y);
+                        }
+                    }
+                }
                 DragTarget::None => {}
             }
             state.drag_accum.x -= grid_steps_x as f32 * GRID_PX;
@@ -718,10 +752,14 @@ fn handle_spatial_interactions(
     // === DRAG STOP ===
     if response.drag_stopped_by(egui::PointerButton::Primary) {
         match &state.drag_target {
-            DragTarget::Room(_) => {
+            DragTarget::Room(room_id) => {
+                let room_id = room_id.clone();
                 if let Some(layout) = &mut dungeon.layout {
+                    let affected = std::collections::HashSet::from([room_id]);
                     layout.corridors =
-                        crate::solver::corridor::route_corridors(&dungeon.graph, layout);
+                        crate::solver::corridor::route_corridors_for_rooms(
+                            &dungeon.graph, layout, &affected,
+                        );
                     layout.recheck_corridor_overlaps();
                 }
             }
@@ -739,15 +777,24 @@ fn handle_spatial_interactions(
             DragTarget::GroupCorner(_, _) => {
                 // Group constraint changed — will trigger re-solve via hash check
             }
-            DragTarget::Group(_) => {
-                // Re-route corridors that cross the group boundary
+            DragTarget::Group(gi) => {
+                let gi = *gi;
+                // Re-route only corridors connected to rooms in the group
                 if let Some(layout) = &mut dungeon.layout {
+                    let affected: std::collections::HashSet<String> =
+                        if gi < dungeon.graph.groups.len() {
+                            dungeon.graph.groups[gi].room_ids.iter().cloned().collect()
+                        } else {
+                            std::collections::HashSet::new()
+                        };
                     layout.corridors =
-                        crate::solver::corridor::route_corridors(&dungeon.graph, layout);
+                        crate::solver::corridor::route_corridors_for_rooms(
+                            &dungeon.graph, layout, &affected,
+                        );
                     layout.recheck_corridor_overlaps();
                 }
             }
-            DragTarget::CaveCell(_, _) => {} // painting done during drag
+            DragTarget::Section(_, _) => {} // position already updated during drag
             DragTarget::None => {}
         }
         state.drag_target = DragTarget::None;
@@ -1126,20 +1173,6 @@ fn draw_rooms(
                                 painter.rect_filled(cell_rect, 0.0, c);
                             }
                         }
-                        // Draw cell grid when selected
-                        if is_selected {
-                            let grid_stroke = egui::Stroke::new(0.5, egui::Color32::from_rgba_unmultiplied(80, 80, 80, 60));
-                            for ly in 0..=rl.height as i32 {
-                                let y = transform.world_to_screen(egui::pos2(grid_to_world(rl.x), grid_to_world(rl.y + ly)));
-                                let y2 = transform.world_to_screen(egui::pos2(grid_to_world(rl.x + rl.width as i32), grid_to_world(rl.y + ly)));
-                                painter.line_segment([y, y2], grid_stroke);
-                            }
-                            for lx in 0..=rl.width as i32 {
-                                let x = transform.world_to_screen(egui::pos2(grid_to_world(rl.x + lx), grid_to_world(rl.y)));
-                                let x2 = transform.world_to_screen(egui::pos2(grid_to_world(rl.x + lx), grid_to_world(rl.y + rl.height as i32)));
-                                painter.line_segment([x, x2], grid_stroke);
-                            }
-                        }
                         // Draw baked marching squares contour
                         let contour_stroke = egui::Stroke::new(1.5, egui::Color32::from_rgb(40, 40, 40));
                         for &(x1, y1, x2, y2) in &cave.contour_segments {
@@ -1161,6 +1194,21 @@ fn draw_rooms(
             RoomShape::Rectangle => {
                 painter.rect_filled(rect, 0.0, fill);
                 painter.rect_stroke(rect, 0.0, stroke, egui::StrokeKind::Middle);
+            }
+        }
+
+        // Grid lines on all rooms
+        {
+            let grid_stroke = egui::Stroke::new(0.5, egui::Color32::from_rgba_unmultiplied(80, 80, 80, 60));
+            for ly in 1..rl.height as i32 {
+                let y1 = transform.world_to_screen(egui::pos2(grid_to_world(rl.x), grid_to_world(rl.y + ly)));
+                let y2 = transform.world_to_screen(egui::pos2(grid_to_world(rl.x + rl.width as i32), grid_to_world(rl.y + ly)));
+                painter.line_segment([y1, y2], grid_stroke);
+            }
+            for lx in 1..rl.width as i32 {
+                let x1 = transform.world_to_screen(egui::pos2(grid_to_world(rl.x + lx), grid_to_world(rl.y)));
+                let x2 = transform.world_to_screen(egui::pos2(grid_to_world(rl.x + lx), grid_to_world(rl.y + rl.height as i32)));
+                painter.line_segment([x1, x2], grid_stroke);
             }
         }
 
@@ -1188,30 +1236,39 @@ fn draw_rooms(
                 ));
                 let sec_max = transform.world_to_screen(egui::pos2(
                     room_px_x + (section.x + section.width) * GRID_PX,
-                    room_px_y + (section.y + section.height) * GRID_PX,
+                    room_px_y + (section.y + section.length) * GRID_PX,
                 ));
                 let sec_rect = egui::Rect::from_min_max(sec_min, sec_max);
 
                 // Fill based on elevation type
+                let is_water = section.elevation == ElevationType::Water;
                 let (fill_alpha, tick_dir) = match section.elevation {
                     ElevationType::Raised => (30u8, 1.0f32),  // ticks outward
                     ElevationType::Lowered => (50, -1.0),       // ticks inward
                     ElevationType::Steps | ElevationType::Slope => (20, 0.0),
                     ElevationType::BottomlessPit => (160, 0.0),
                     ElevationType::Hole => (90, 0.0),
+                    ElevationType::Water => (0, 0.0), // handled separately
                 };
-                let section_fill = egui::Color32::from_rgba_unmultiplied(60, 60, 60, fill_alpha);
+                let section_fill = if is_water {
+                    egui::Color32::from_rgba_unmultiplied(80, 130, 200, 60)
+                } else {
+                    egui::Color32::from_rgba_unmultiplied(60, 60, 60, fill_alpha)
+                };
                 painter.rect_filled(sec_rect, 0.0, section_fill);
 
                 // Border
                 let is_sel_section = state.selected_section.as_ref()
                     .is_some_and(|(rid, idx)| rid == &rl.room_id && *idx == si);
-                let sec_stroke = if is_sel_section {
-                    egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 200, 50))
-                } else {
-                    egui::Stroke::new(1.5, egui::Color32::from_rgb(80, 80, 80))
-                };
-                painter.rect_stroke(sec_rect, 0.0, sec_stroke, egui::StrokeKind::Middle);
+                if is_sel_section {
+                    painter.rect_stroke(sec_rect, 0.0,
+                        egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 200, 50)),
+                        egui::StrokeKind::Middle);
+                } else if !is_water {
+                    painter.rect_stroke(sec_rect, 0.0,
+                        egui::Stroke::new(1.5, egui::Color32::from_rgb(80, 80, 80)),
+                        egui::StrokeKind::Middle);
+                }
 
                 // Tick marks for raised/lowered
                 if tick_dir != 0.0 {
@@ -1315,15 +1372,32 @@ fn draw_rooms(
                     }
                 }
 
-                // Label
-                let elev_label = section.elevation.label();
-                painter.text(
-                    sec_rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    elev_label,
-                    egui::FontId::monospace((8.0 * transform.zoom).max(6.0)),
-                    egui::Color32::from_rgb(100, 100, 100),
-                );
+                // Water: wavy lines
+                if is_water {
+                    let wave_color = egui::Color32::from_rgba_unmultiplied(60, 100, 170, 140);
+                    let wave_stroke = egui::Stroke::new(0.8, wave_color);
+                    let wave_count = ((sec_rect.height() / (20.0 * transform.zoom)).max(2.0)) as i32;
+                    for i in 1..wave_count {
+                        let base_y = sec_rect.min.y + (i as f32 / wave_count as f32) * sec_rect.height();
+                        let segments = ((sec_rect.width() / (5.0 * transform.zoom)).max(8.0)) as i32;
+                        let amp = 2.0 * transform.zoom;
+                        let mut points = Vec::with_capacity(segments as usize + 1);
+                        for j in 0..=segments {
+                            let t = j as f32 / segments as f32;
+                            let x = sec_rect.min.x + t * sec_rect.width();
+                            let y = base_y + amp * (t * std::f32::consts::TAU * 2.0).sin();
+                            points.push(egui::pos2(x, y));
+                        }
+                        for pair in points.windows(2) {
+                            painter.line_segment([pair[0], pair[1]], wave_stroke);
+                        }
+                    }
+                    // Blue-tinted border
+                    painter.rect_stroke(sec_rect, 0.0,
+                        egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(60, 100, 170, 200)),
+                        egui::StrokeKind::Middle);
+                }
+
             }
         }
     }
@@ -1572,14 +1646,7 @@ pub fn spatial_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Spa
                         to_remove = Some(i);
                     }
                 });
-                ui.horizontal(|ui| {
-                    ui.add(egui::DragValue::new(&mut b.x).prefix("x: "));
-                    ui.add(egui::DragValue::new(&mut b.y).prefix("y: "));
-                });
-                ui.horizontal(|ui| {
-                    ui.add(egui::DragValue::new(&mut b.width).range(1..=500).prefix("w: "));
-                    ui.add(egui::DragValue::new(&mut b.height).range(1..=500).prefix("h: "));
-                });
+                ui.label(format!("  ({}, {}) {}x{}", b.x, b.y, b.width, b.height));
             }
             if let Some(i) = to_remove {
                 layout.bounds.remove(i);
@@ -1609,15 +1676,16 @@ pub fn spatial_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Spa
 
         if let Some(layout) = &mut dungeon.layout {
             if let Some(rl) = layout.room_by_id_mut(&room_id) {
-                ui.label("Position:");
                 ui.horizontal(|ui| {
-                    ui.add(egui::DragValue::new(&mut rl.x).prefix("x: "));
-                    ui.add(egui::DragValue::new(&mut rl.y).prefix("y: "));
+                    ui.label("Position:");
+                    crate::ui::canvas_common::num_input_i32(ui, &mut rl.x, 35.0);
+                    crate::ui::canvas_common::num_input_i32(ui, &mut rl.y, 35.0);
                 });
-                ui.label("Size:");
                 ui.horizontal(|ui| {
-                    ui.add(egui::DragValue::new(&mut rl.width).range(1..=100u32).prefix("w: "));
-                    ui.add(egui::DragValue::new(&mut rl.height).range(1..=100u32).prefix("h: "));
+                    ui.label("Size:");
+                    crate::ui::canvas_common::num_input_u32(ui, &mut rl.width, 35.0);
+                    ui.label("x");
+                    crate::ui::canvas_common::num_input_u32(ui, &mut rl.height, 35.0);
                 });
                 ui.label(format!("{}x{} ft", rl.width * 5, rl.height * 5));
                 if !rl.violations.is_empty() {
@@ -1748,17 +1816,25 @@ pub fn spatial_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Spa
                                 });
                         });
                         ui.horizontal(|ui| {
-                            ui.add(egui::DragValue::new(&mut section.x)
-                                .range(0.0..=room_w as f32).speed(0.1).prefix("x: "));
-                            ui.add(egui::DragValue::new(&mut section.y)
-                                .range(0.0..=room_h as f32).speed(0.1).prefix("y: "));
+                            ui.label("x");
+                            crate::ui::canvas_common::num_input_f32(ui, &mut section.x, 40.0);
+                            ui.label("y");
+                            crate::ui::canvas_common::num_input_f32(ui, &mut section.y, 40.0);
                         });
                         ui.horizontal(|ui| {
-                            ui.add(egui::DragValue::new(&mut section.width)
-                                .range(0.5..=room_w as f32).speed(0.1).prefix("w: "));
-                            ui.add(egui::DragValue::new(&mut section.height)
-                                .range(0.5..=room_h as f32).speed(0.1).prefix("h: "));
+                            ui.label("Width");
+                            crate::ui::canvas_common::num_input_f32(ui, &mut section.width, 40.0);
+                            ui.label("Length");
+                            crate::ui::canvas_common::num_input_f32(ui, &mut section.length, 40.0);
                         });
+                        if matches!(section.elevation, ElevationType::Raised | ElevationType::Lowered | ElevationType::Water) {
+                            let height_label = if section.elevation == ElevationType::Water { "Depth:" } else { "Height:" };
+                            ui.horizontal(|ui| {
+                                ui.label(height_label);
+                                crate::ui::canvas_common::num_input_f32(ui, &mut section.height, 40.0);
+                                ui.label("ft");
+                            });
+                        }
                     }
                 }
             }
@@ -1791,7 +1867,7 @@ pub fn spatial_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Spa
             let mut w = group.max_width.unwrap_or(20);
             ui.horizontal(|ui| {
                 ui.checkbox(&mut has_w, "Max width:");
-                ui.add_enabled(has_w, egui::DragValue::new(&mut w).range(1..=100).suffix(" sq"));
+                if has_w { crate::ui::canvas_common::num_input_u32(ui, &mut w, 40.0); ui.label("sq"); }
             });
             group.max_width = if has_w { Some(w) } else { None };
 
@@ -1799,7 +1875,7 @@ pub fn spatial_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Spa
             let mut h = group.max_height.unwrap_or(20);
             ui.horizontal(|ui| {
                 ui.checkbox(&mut has_h, "Max height:");
-                ui.add_enabled(has_h, egui::DragValue::new(&mut h).range(1..=100).suffix(" sq"));
+                if has_h { crate::ui::canvas_common::num_input_u32(ui, &mut h, 40.0); ui.label("sq"); }
             });
             group.max_height = if has_h { Some(h) } else { None };
 
