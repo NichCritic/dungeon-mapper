@@ -1,7 +1,13 @@
 use crate::model::Dungeon;
 
-pub fn status_bar(ui: &mut egui::Ui, dungeon: &Dungeon, zoom: f32) {
+pub fn status_bar(ui: &mut egui::Ui, dungeon: &Dungeon, zoom: f32, saved: bool) {
     ui.horizontal(|ui| {
+        if saved {
+            ui.colored_label(egui::Color32::from_rgb(100, 200, 100), "\u{2713} Saved");
+        } else {
+            ui.colored_label(egui::Color32::from_rgb(180, 180, 180), "\u{25cb} Unsaved");
+        }
+        ui.separator();
         ui.label(format!(
             "{} rooms, {} connections",
             dungeon.graph.rooms.len(),

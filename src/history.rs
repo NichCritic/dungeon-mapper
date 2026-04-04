@@ -178,6 +178,11 @@ impl UndoHistory {
         !self.redo_stack.is_empty()
     }
 
+    /// Current committed state hash (used by auto-save to detect unsaved changes).
+    pub fn committed_hash(&self) -> u64 {
+        self.committed_hash
+    }
+
     fn hash_dungeon(dungeon: &Dungeon) -> u64 {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};

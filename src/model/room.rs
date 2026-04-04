@@ -141,10 +141,13 @@ pub enum DecorType {
     Web,
     Door,
     Gate,
+    OfferingMouth,
+    Vines,
+    Scales,
 }
 
 impl DecorType {
-    pub const ALL: [DecorType; 25] = [
+    pub const ALL: [DecorType; 28] = [
         DecorType::Table, DecorType::Chair, DecorType::Bench,
         DecorType::Chest, DecorType::Barrel, DecorType::Crate,
         DecorType::Pillar, DecorType::StairsUp, DecorType::StairsDown,
@@ -153,6 +156,7 @@ impl DecorType {
         DecorType::Statue, DecorType::Throne, DecorType::Bed,
         DecorType::Bookshelf, DecorType::Trap, DecorType::Rubble,
         DecorType::Bones, DecorType::Web, DecorType::Door, DecorType::Gate,
+        DecorType::OfferingMouth, DecorType::Vines, DecorType::Scales,
     ];
 
     pub fn label(self) -> &'static str {
@@ -182,6 +186,9 @@ impl DecorType {
             DecorType::Web => "Web",
             DecorType::Door => "Door",
             DecorType::Gate => "Gate",
+            DecorType::OfferingMouth => "Offering Mouth",
+            DecorType::Vines => "Vines",
+            DecorType::Scales => "Scales",
         }
     }
 }

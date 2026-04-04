@@ -873,6 +873,117 @@ pub fn render_decor(
                 rot_line(renderer, cx - s * 0.7, cy - s * 0.8, cx - s * 0.7, cy + s * 0.7, cx, cy, deg, 2.0, color);
                 rot_line(renderer, cx + s * 0.7, cy - s * 0.8, cx + s * 0.7, cy + s * 0.7, cx, cy, deg, 2.0, color);
             }
+            DecorType::Vines => {
+                // Curving tendrils radiating from center with small leaf marks
+                let tendrils: [(f32, f32, f32, f32, f32, f32); 5] = [
+                    // (start_x, start_y, ctrl_x, ctrl_y, end_x, end_y) relative to s
+                    (0.0, 0.0, -0.4, -0.6, -0.7, -0.8),
+                    (0.0, 0.0,  0.5, -0.4,  0.8, -0.7),
+                    (0.0, 0.0, -0.6,  0.3, -0.8,  0.6),
+                    (0.0, 0.0,  0.3,  0.5,  0.6,  0.8),
+                    (0.0, 0.0,  0.1, -0.3, -0.2, -0.9),
+                ];
+                for &(sx, sy, cx1, cy1, ex, ey) in &tendrils {
+                    // Approximate bezier with line segments
+                    let steps = 6;
+                    let mut px = cx + sx * s;
+                    let mut py = cy + sy * s;
+                    for i in 1..=steps {
+                        let t = i as f32 / steps as f32;
+                        let it = 1.0 - t;
+                        let nx = cx + (it * it * sx + 2.0 * it * t * cx1 + t * t * ex) * s;
+                        let ny = cy + (it * it * sy + 2.0 * it * t * cy1 + t * t * ey) * s;
+                        rot_line(renderer, px, py, nx, ny, cx, cy, deg, 1.0, color);
+                        px = nx;
+                        py = ny;
+                    }
+                    // Small leaf near the end
+                    let leaf_t = 0.7;
+                    let it = 1.0 - leaf_t;
+                    let lx = cx + (it * it * sx + 2.0 * it * leaf_t * cx1 + leaf_t * leaf_t * ex) * s;
+                    let ly = cy + (it * it * sy + 2.0 * it * leaf_t * cy1 + leaf_t * leaf_t * ey) * s;
+                    let leaf_s = s * 0.12;
+                    rot_line(renderer, lx - leaf_s, ly, lx, ly - leaf_s, cx, cy, deg, 0.8, color);
+                    rot_line(renderer, lx, ly - leaf_s, lx + leaf_s, ly, cx, cy, deg, 0.8, color);
+                    rot_line(renderer, lx - leaf_s, ly, lx + leaf_s, ly, cx, cy, deg, 0.5, color);
+                }
+            }
+            DecorType::OfferingMouth => {
+                // Face outline (circle)
+                renderer.stroke_circle(cx, cy, s * 0.85, 1.5, color);
+                // Eyes (small filled circles)
+                let (lex, ley) = rot(cx - s * 0.3, cy - s * 0.25, cx, cy, deg);
+                let (rex, rey) = rot(cx + s * 0.3, cy - s * 0.25, cx, cy, deg);
+                renderer.fill_circle(lex, ley, s * 0.12, color);
+                renderer.fill_circle(rex, rey, s * 0.12, color);
+                // Open mouth (oval) — drawn as a wider ellipse approximated with lines
+                let mouth_cx = cx;
+                let mouth_cy = cy + s * 0.3;
+                let mouth_rx = s * 0.35;
+                let mouth_ry = s * 0.25;
+                let segments = 16;
+                let dark = [color[0] / 2, color[1] / 2, color[2] / 2, color[3]];
+                for i in 0..segments {
+                    let a0 = (i as f32 / segments as f32) * std::f32::consts::TAU;
+                    let a1 = ((i + 1) as f32 / segments as f32) * std::f32::consts::TAU;
+                    let x0 = mouth_cx + mouth_rx * a0.cos();
+                    let y0 = mouth_cy + mouth_ry * a0.sin();
+                    let x1 = mouth_cx + mouth_rx * a1.cos();
+                    let y1 = mouth_cy + mouth_ry * a1.sin();
+                    rot_line(renderer, x0, y0, x1, y1, cx, cy, deg, 1.5, color);
+                }
+                // Dark fill inside mouth
+                let (mcx, mcy) = rot(mouth_cx, mouth_cy, cx, cy, deg);
+                renderer.fill_circle(mcx, mcy, mouth_ry * 0.6, dark);
+                // Brow ridges
+                rot_line(renderer, cx - s * 0.5, cy - s * 0.45, cx - s * 0.1, cy - s * 0.5, cx, cy, deg, 1.5, color);
+                rot_line(renderer, cx + s * 0.5, cy - s * 0.45, cx + s * 0.1, cy - s * 0.5, cx, cy, deg, 1.5, color);
+                // Nose hint
+                rot_line(renderer, cx, cy - s * 0.1, cx - s * 0.08, cy + s * 0.05, cx, cy, deg, 1.0, color);
+                rot_line(renderer, cx, cy - s * 0.1, cx + s * 0.08, cy + s * 0.05, cx, cy, deg, 1.0, color);
+            }
+            DecorType::Scales => {
+                // Central stand (vertical post)
+                rot_line(renderer, cx, cy - s * 0.9, cx, cy + s * 0.8, cx, cy, deg, 1.5, color);
+                // Base
+                rot_line(renderer, cx - s * 0.4, cy + s * 0.8, cx + s * 0.4, cy + s * 0.8, cx, cy, deg, 2.0, color);
+                // Crossbeam (tilted slightly for visual interest)
+                rot_line(renderer, cx - s * 0.8, cy - s * 0.5, cx + s * 0.8, cy - s * 0.7, cx, cy, deg, 1.5, color);
+                // Pivot triangle at top
+                rot_line(renderer, cx - s * 0.1, cy - s * 0.9, cx + s * 0.1, cy - s * 0.9, cx, cy, deg, 1.0, color);
+                rot_line(renderer, cx - s * 0.1, cy - s * 0.9, cx, cy - s * 0.7, cx, cy, deg, 1.0, color);
+                rot_line(renderer, cx + s * 0.1, cy - s * 0.9, cx, cy - s * 0.7, cx, cy, deg, 1.0, color);
+                // Left chain and pan
+                rot_line(renderer, cx - s * 0.8, cy - s * 0.5, cx - s * 0.8, cy + s * 0.1, cx, cy, deg, 0.8, color);
+                rot_line(renderer, cx - s * 1.05, cy + s * 0.1, cx - s * 0.55, cy + s * 0.1, cx, cy, deg, 1.0, color);
+                // Left pan curve (arc via segments)
+                for i in 0..6 {
+                    let a0 = std::f32::consts::PI * (i as f32 / 6.0);
+                    let a1 = std::f32::consts::PI * ((i + 1) as f32 / 6.0);
+                    let pr = s * 0.25;
+                    let pcx = cx - s * 0.8;
+                    let pcy = cy + s * 0.1;
+                    rot_line(renderer,
+                        pcx + pr * a0.cos(), pcy + pr * a0.sin(),
+                        pcx + pr * a1.cos(), pcy + pr * a1.sin(),
+                        cx, cy, deg, 1.0, color);
+                }
+                // Right chain and pan
+                rot_line(renderer, cx + s * 0.8, cy - s * 0.7, cx + s * 0.8, cy - s * 0.1, cx, cy, deg, 0.8, color);
+                rot_line(renderer, cx + s * 0.55, cy - s * 0.1, cx + s * 1.05, cy - s * 0.1, cx, cy, deg, 1.0, color);
+                // Right pan curve
+                for i in 0..6 {
+                    let a0 = std::f32::consts::PI * (i as f32 / 6.0);
+                    let a1 = std::f32::consts::PI * ((i + 1) as f32 / 6.0);
+                    let pr = s * 0.25;
+                    let pcx = cx + s * 0.8;
+                    let pcy = cy - s * 0.1;
+                    rot_line(renderer,
+                        pcx + pr * a0.cos(), pcy + pr * a0.sin(),
+                        pcx + pr * a1.cos(), pcy + pr * a1.sin(),
+                        cx, cy, deg, 1.0, color);
+                }
+            }
         }
     }
 }

@@ -57,6 +57,18 @@ pub struct DungeonApp {
 
     // Undo/Redo
     pub history: UndoHistory,
+
+    // Save state
+    /// Current file path (set after Save As or Open).
+    pub current_file: Option<std::path::PathBuf>,
+    /// Hash of the dungeon at last save (to detect unsaved changes for auto-save).
+    last_saved_hash: u64,
+    /// Time of last auto-save.
+    last_autosave: std::time::Instant,
+    /// True when the auto-save timer has elapsed and we're waiting for the next change.
+    autosave_due: bool,
+    /// Committed hash from previous frame, used to detect new commits for auto-save.
+    last_autosave_hash: u64,
 }
 
 impl Default for DungeonApp {
@@ -74,6 +86,7 @@ impl Default for DungeonApp {
 
         let dungeon = Dungeon::default();
         let history = UndoHistory::new(&dungeon);
+        let initial_hash = history.committed_hash();
 
         Self {
             dungeon,
@@ -99,6 +112,11 @@ impl Default for DungeonApp {
             annotation_state: AnnotationModeState::default(),
             pending_file_op: None,
             history,
+            current_file: None,
+            last_saved_hash: initial_hash,
+            last_autosave: std::time::Instant::now(),
+            autosave_due: false,
+            last_autosave_hash: initial_hash,
         }
     }
 }
@@ -432,7 +450,7 @@ impl eframe::App for DungeonApp {
             if let Ok(result) = rx.try_recv() {
                 use crate::io::save_load::FileOpResult;
                 match result {
-                    FileOpResult::Loaded(Ok(d)) => {
+                    FileOpResult::Loaded(Ok((d, path))) => {
                         self.dungeon = d;
                         self.graph_state = GraphEditorState::default();
                         self.presenting = false;
@@ -440,9 +458,14 @@ impl eframe::App for DungeonApp {
                         // Sync snapshot so auto-solve doesn't re-route saved corridors
                         self.last_graph_snapshot = self.graph_hash();
                         self.history.reset(&self.dungeon);
+                        self.current_file = Some(path);
+                        self.last_saved_hash = self.history.committed_hash();
                     }
                     FileOpResult::Loaded(Err(e)) => eprintln!("Load error: {}", e),
-                    FileOpResult::Saved(Ok(_path)) => {}
+                    FileOpResult::Saved(Ok(path)) => {
+                        self.current_file = Some(path);
+                        self.last_saved_hash = self.history.committed_hash();
+                    }
                     FileOpResult::Saved(Err(e)) => eprintln!("Save error: {}", e),
                     FileOpResult::ExportedPng(Ok(())) => {}
                     FileOpResult::ExportedPng(Err(e)) => eprintln!("Export error: {}", e),
@@ -452,14 +475,15 @@ impl eframe::App for DungeonApp {
             }
         }
 
-        // Global key: Ctrl+Z undo, Ctrl+Y / Ctrl+Shift+Z redo
-        let (undo_pressed, redo_pressed) = ctx.input(|i| {
+        // Global keys: Ctrl+Z undo, Ctrl+Y / Ctrl+Shift+Z redo, Ctrl+S save
+        let (undo_pressed, redo_pressed, save_pressed) = ctx.input(|i| {
             let ctrl = i.modifiers.command; // Cmd on Mac, Ctrl on others
             let shift = i.modifiers.shift;
             let undo = ctrl && !shift && i.key_pressed(egui::Key::Z);
             let redo = (ctrl && i.key_pressed(egui::Key::Y))
                 || (ctrl && shift && i.key_pressed(egui::Key::Z));
-            (undo, redo)
+            let save = ctrl && !shift && i.key_pressed(egui::Key::S);
+            (undo, redo, save)
         });
         if undo_pressed {
             if self.history.undo(&mut self.dungeon) {
@@ -468,6 +492,18 @@ impl eframe::App for DungeonApp {
         } else if redo_pressed {
             if self.history.redo(&mut self.dungeon) {
                 self.after_history_restore(ctx);
+            }
+        }
+        // Ctrl+S: save to current file or open Save As dialog
+        if save_pressed && self.pending_file_op.is_none() {
+            if let Some(path) = &self.current_file {
+                self.pending_file_op = Some(
+                    crate::io::save_load::save_dungeon_to_path(&self.dungeon, path.clone()),
+                );
+            } else {
+                self.pending_file_op = Some(
+                    crate::io::save_load::save_dungeon_async(&self.dungeon),
+                );
             }
         }
 
@@ -495,11 +531,27 @@ impl eframe::App for DungeonApp {
                         self.presenting = false;
                         self.presentation = None;
                         self.history.reset(&self.dungeon);
+                        self.current_file = None;
+                        self.last_saved_hash = 0;
                         ui.close_menu();
                     }
                     if ui.button("Open...").clicked() {
                         if self.pending_file_op.is_none() {
                             self.pending_file_op = Some(crate::io::save_load::load_dungeon_async());
+                        }
+                        ui.close_menu();
+                    }
+                    if ui.button("Save  Ctrl+S").clicked() {
+                        if self.pending_file_op.is_none() {
+                            if let Some(path) = &self.current_file {
+                                self.pending_file_op = Some(
+                                    crate::io::save_load::save_dungeon_to_path(&self.dungeon, path.clone()),
+                                );
+                            } else {
+                                self.pending_file_op = Some(
+                                    crate::io::save_load::save_dungeon_async(&self.dungeon),
+                                );
+                            }
                         }
                         ui.close_menu();
                     }
@@ -582,7 +634,13 @@ impl eframe::App for DungeonApp {
                         ui.colored_label(egui::Color32::from_rgb(255, 100, 100), "PRESENTING");
                         ui.separator();
                     }
-                    ui.label(&self.dungeon.name);
+                    let unsaved = self.history.committed_hash() != self.last_saved_hash;
+                    let title = if unsaved {
+                        format!("{} *", self.dungeon.name)
+                    } else {
+                        self.dungeon.name.clone()
+                    };
+                    ui.label(&title);
                 });
             });
         });
@@ -639,7 +697,8 @@ impl eframe::App for DungeonApp {
                 }
             };
             ui.horizontal(|ui| {
-                crate::ui::status_bar::status_bar(ui, &self.dungeon, zoom);
+                let saved = self.history.committed_hash() == self.last_saved_hash;
+                crate::ui::status_bar::status_bar(ui, &self.dungeon, zoom, saved);
                 if self.presenting {
                     ui.separator();
                     if let Some(server) = &self.server {
@@ -904,6 +963,29 @@ impl eframe::App for DungeonApp {
         // Track state changes for undo/redo
         let pointer_down = ctx.input(|i| i.pointer.any_down());
         self.history.track(&self.dungeon, pointer_down);
+
+        // Auto-save: after 10s since last save, arm the trigger, then save on
+        // the next committed state change (i.e. when the undo history records a
+        // new commit, meaning the user finished an action).
+        const AUTOSAVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+        let committed_hash = self.history.committed_hash();
+        let has_unsaved = committed_hash != self.last_saved_hash;
+        if self.current_file.is_some() && has_unsaved && self.last_autosave.elapsed() >= AUTOSAVE_INTERVAL {
+            self.autosave_due = true;
+        }
+        if self.autosave_due
+            && self.current_file.is_some()
+            && self.pending_file_op.is_none()
+            && committed_hash != self.last_autosave_hash
+        {
+            let path = self.current_file.clone().unwrap();
+            self.pending_file_op = Some(
+                crate::io::save_load::save_dungeon_to_path(&self.dungeon, path),
+            );
+            self.last_autosave = std::time::Instant::now();
+            self.autosave_due = false;
+        }
+        self.last_autosave_hash = committed_hash;
 
         // Push server update only when presentation state has changed
         if self.presenting && self.server.is_some() {

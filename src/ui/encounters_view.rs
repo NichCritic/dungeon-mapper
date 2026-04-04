@@ -1059,6 +1059,7 @@ fn custom_monster_editor_window(
     let title = format!("Edit: {}", dungeon.custom_monsters[cm_idx].monster.name);
 
     egui::Window::new(title)
+        .id(egui::Id::new("custom_monster_editor_window"))
         .open(&mut open)
         .default_size([450.0, 600.0])
         .resizable(true)

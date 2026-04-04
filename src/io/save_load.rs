@@ -63,9 +63,29 @@ fn load_version(version: u32, value: &serde_json::Value) -> Result<Dungeon, Stri
 
 pub enum FileOpResult {
     Saved(Result<PathBuf, String>),
-    Loaded(Result<Dungeon, String>),
+    Loaded(Result<(Dungeon, PathBuf), String>),
     ExportedPng(Result<(), String>),
     Cancelled,
+}
+
+/// Save a dungeon directly to a known file path (no dialog).
+/// Returns a receiver that will produce the result.
+pub fn save_dungeon_to_path(dungeon: &Dungeon, path: PathBuf) -> mpsc::Receiver<FileOpResult> {
+    let (tx, rx) = mpsc::channel();
+    let json = match serialize_versioned(dungeon) {
+        Ok(j) => j,
+        Err(e) => {
+            let _ = tx.send(FileOpResult::Saved(Err(e.to_string())));
+            return rx;
+        }
+    };
+    std::thread::spawn(move || {
+        let result = std::fs::write(&path, &json)
+            .map(|_| path)
+            .map_err(|e| e.to_string());
+        let _ = tx.send(FileOpResult::Saved(result));
+    });
+    rx
 }
 
 /// Spawn an async save dialog on a background thread.
@@ -119,7 +139,8 @@ pub fn load_dungeon_async() -> mpsc::Receiver<FileOpResult> {
                 let path = file.path().to_path_buf();
                 match std::fs::read_to_string(&path) {
                     Ok(json) => {
-                        let result = deserialize_versioned(&json);
+                        let result = deserialize_versioned(&json)
+                            .map(|d| (d, path));
                         let _ = tx.send(FileOpResult::Loaded(result));
                     }
                     Err(e) => {

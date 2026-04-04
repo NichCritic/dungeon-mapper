@@ -850,5 +850,109 @@ fn draw_decor_symbol(
             rot_line_screen(painter, cx - s * 0.7, cy - s * 0.8, cx - s * 0.7, cy + s * 0.7, cx, cy, deg, egui::Stroke::new(2.0, color));
             rot_line_screen(painter, cx + s * 0.7, cy - s * 0.8, cx + s * 0.7, cy + s * 0.7, cx, cy, deg, egui::Stroke::new(2.0, color));
         }
+        DecorType::Vines => {
+            let tendrils: [(f32, f32, f32, f32, f32, f32); 5] = [
+                (0.0, 0.0, -0.4, -0.6, -0.7, -0.8),
+                (0.0, 0.0,  0.5, -0.4,  0.8, -0.7),
+                (0.0, 0.0, -0.6,  0.3, -0.8,  0.6),
+                (0.0, 0.0,  0.3,  0.5,  0.6,  0.8),
+                (0.0, 0.0,  0.1, -0.3, -0.2, -0.9),
+            ];
+            for &(sx, sy, cx1, cy1, ex, ey) in &tendrils {
+                let steps = 6;
+                let mut prev = rot_screen(cx + sx * s, cy + sy * s, cx, cy, deg);
+                for i in 1..=steps {
+                    let t = i as f32 / steps as f32;
+                    let it = 1.0 - t;
+                    let nx = cx + (it * it * sx + 2.0 * it * t * cx1 + t * t * ex) * s;
+                    let ny = cy + (it * it * sy + 2.0 * it * t * cy1 + t * t * ey) * s;
+                    let cur = rot_screen(nx, ny, cx, cy, deg);
+                    painter.line_segment([prev, cur], thin);
+                    prev = cur;
+                }
+                // Leaf near end
+                let leaf_t = 0.7;
+                let it = 1.0 - leaf_t;
+                let lx = cx + (it * it * sx + 2.0 * it * leaf_t * cx1 + leaf_t * leaf_t * ex) * s;
+                let ly = cy + (it * it * sy + 2.0 * it * leaf_t * cy1 + leaf_t * leaf_t * ey) * s;
+                let ls = s * 0.12;
+                rot_line_screen(painter, lx - ls, ly, lx, ly - ls, cx, cy, deg, thin);
+                rot_line_screen(painter, lx, ly - ls, lx + ls, ly, cx, cy, deg, thin);
+                rot_line_screen(painter, lx - ls, ly, lx + ls, ly, cx, cy, deg, egui::Stroke::new(0.5, color));
+            }
+        }
+        DecorType::Scales => {
+            // Central stand
+            rot_line_screen(painter, cx, cy - s * 0.9, cx, cy + s * 0.8, cx, cy, deg, stroke);
+            // Base
+            rot_line_screen(painter, cx - s * 0.4, cy + s * 0.8, cx + s * 0.4, cy + s * 0.8, cx, cy, deg, egui::Stroke::new(2.0, color));
+            // Crossbeam
+            rot_line_screen(painter, cx - s * 0.8, cy - s * 0.5, cx + s * 0.8, cy - s * 0.7, cx, cy, deg, stroke);
+            // Pivot triangle
+            rot_line_screen(painter, cx - s * 0.1, cy - s * 0.9, cx + s * 0.1, cy - s * 0.9, cx, cy, deg, thin);
+            rot_line_screen(painter, cx - s * 0.1, cy - s * 0.9, cx, cy - s * 0.7, cx, cy, deg, thin);
+            rot_line_screen(painter, cx + s * 0.1, cy - s * 0.9, cx, cy - s * 0.7, cx, cy, deg, thin);
+            // Left chain + pan
+            rot_line_screen(painter, cx - s * 0.8, cy - s * 0.5, cx - s * 0.8, cy + s * 0.1, cx, cy, deg, thin);
+            rot_line_screen(painter, cx - s * 1.05, cy + s * 0.1, cx - s * 0.55, cy + s * 0.1, cx, cy, deg, thin);
+            for i in 0..6 {
+                let a0 = std::f32::consts::PI * (i as f32 / 6.0);
+                let a1 = std::f32::consts::PI * ((i + 1) as f32 / 6.0);
+                let pr = s * 0.25;
+                let pcx = cx - s * 0.8;
+                let pcy = cy + s * 0.1;
+                rot_line_screen(painter,
+                    pcx + pr * a0.cos(), pcy + pr * a0.sin(),
+                    pcx + pr * a1.cos(), pcy + pr * a1.sin(),
+                    cx, cy, deg, thin);
+            }
+            // Right chain + pan
+            rot_line_screen(painter, cx + s * 0.8, cy - s * 0.7, cx + s * 0.8, cy - s * 0.1, cx, cy, deg, thin);
+            rot_line_screen(painter, cx + s * 0.55, cy - s * 0.1, cx + s * 1.05, cy - s * 0.1, cx, cy, deg, thin);
+            for i in 0..6 {
+                let a0 = std::f32::consts::PI * (i as f32 / 6.0);
+                let a1 = std::f32::consts::PI * ((i + 1) as f32 / 6.0);
+                let pr = s * 0.25;
+                let pcx = cx + s * 0.8;
+                let pcy = cy - s * 0.1;
+                rot_line_screen(painter,
+                    pcx + pr * a0.cos(), pcy + pr * a0.sin(),
+                    pcx + pr * a1.cos(), pcy + pr * a1.sin(),
+                    cx, cy, deg, thin);
+            }
+        }
+        DecorType::OfferingMouth => {
+            // Face outline
+            painter.circle_stroke(egui::pos2(cx, cy), s * 0.85, stroke);
+            // Eyes
+            let le = rot_screen(cx - s * 0.3, cy - s * 0.25, cx, cy, deg);
+            let re = rot_screen(cx + s * 0.3, cy - s * 0.25, cx, cy, deg);
+            painter.circle_filled(le, s * 0.12, color);
+            painter.circle_filled(re, s * 0.12, color);
+            // Open mouth (oval via line segments)
+            let mouth_cx = cx;
+            let mouth_cy = cy + s * 0.3;
+            let mouth_rx = s * 0.35;
+            let mouth_ry = s * 0.25;
+            let segments = 16;
+            for i in 0..segments {
+                let a0 = (i as f32 / segments as f32) * std::f32::consts::TAU;
+                let a1 = ((i + 1) as f32 / segments as f32) * std::f32::consts::TAU;
+                let x0 = mouth_cx + mouth_rx * a0.cos();
+                let y0 = mouth_cy + mouth_ry * a0.sin();
+                let x1 = mouth_cx + mouth_rx * a1.cos();
+                let y1 = mouth_cy + mouth_ry * a1.sin();
+                rot_line_screen(painter, x0, y0, x1, y1, cx, cy, deg, stroke);
+            }
+            // Dark mouth interior
+            let mc = rot_screen(mouth_cx, mouth_cy, cx, cy, deg);
+            painter.circle_filled(mc, mouth_ry * 0.6, color.linear_multiply(0.3));
+            // Brow ridges
+            rot_line_screen(painter, cx - s * 0.5, cy - s * 0.45, cx - s * 0.1, cy - s * 0.5, cx, cy, deg, stroke);
+            rot_line_screen(painter, cx + s * 0.5, cy - s * 0.45, cx + s * 0.1, cy - s * 0.5, cx, cy, deg, stroke);
+            // Nose hint
+            rot_line_screen(painter, cx, cy - s * 0.1, cx - s * 0.08, cy + s * 0.05, cx, cy, deg, thin);
+            rot_line_screen(painter, cx, cy - s * 0.1, cx + s * 0.08, cy + s * 0.05, cx, cy, deg, thin);
+        }
     }
 }
