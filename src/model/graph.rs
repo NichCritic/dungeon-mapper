@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use petgraph::graph::UnGraph;
 use serde::{Deserialize, Serialize};
@@ -9,9 +9,10 @@ use super::{Connection, Room};
 pub struct DungeonGraph {
     pub rooms: Vec<Room>,
     pub connections: Vec<StoredEdge>,
-    /// Visual positions of rooms in the graph editor (room_id -> (x, y))
+    /// Visual positions of rooms in the graph editor (room_id -> (x, y)).
+    /// Uses BTreeMap for deterministic serialization order (needed for undo hashing).
     #[serde(default)]
-    pub graph_positions: HashMap<String, (f32, f32)>,
+    pub graph_positions: BTreeMap<String, (f32, f32)>,
     /// Room groups with optional solver constraints
     #[serde(default)]
     pub groups: Vec<RoomGroup>,
@@ -105,7 +106,7 @@ impl DungeonGraph {
         Self {
             rooms: Vec::new(),
             connections: Vec::new(),
-            graph_positions: HashMap::new(),
+            graph_positions: BTreeMap::new(),
             groups: Vec::new(),
         }
     }

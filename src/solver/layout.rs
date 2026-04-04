@@ -471,7 +471,8 @@ pub fn solve_layout(
     // Compute Tutte embedding for crossing-free placement hints (planar graphs)
     let tutte_pos = tutte_embedding(&pg, &node_map, &entrance.id);
     // Prefer Tutte positions over raw graph editor positions
-    let graph_pos = if tutte_pos.len() >= 3 { &tutte_pos } else { &graph.graph_positions };
+    let fallback_pos: HashMap<String, (f32, f32)> = graph.graph_positions.iter().map(|(k, v)| (k.clone(), *v)).collect();
+    let graph_pos = if tutte_pos.len() >= 3 { &tutte_pos } else { &fallback_pos };
     let scale = if tutte_pos.len() >= 3 { 1.0_f32 } else { 0.05_f32 };
 
     let mut state = PlacementState::new();
@@ -741,7 +742,8 @@ pub fn solve_incremental(
             .find(|r| r.tags.contains(&RoomTag::Entrance))
             .unwrap_or(&graph.rooms[0]);
         let tutte_pos = tutte_embedding(&pg, &node_map, &entrance.id);
-        let graph_pos = if tutte_pos.len() >= 3 { &tutte_pos } else { &graph.graph_positions };
+        let fallback_pos: HashMap<String, (f32, f32)> = graph.graph_positions.iter().map(|(k, v)| (k.clone(), *v)).collect();
+        let graph_pos = if tutte_pos.len() >= 3 { &tutte_pos } else { &fallback_pos };
         let scale = if tutte_pos.len() >= 3 { 1.0_f32 } else { 0.05_f32 };
         let entrance_graph_pos = graph_pos.get(&entrance.id).copied().unwrap_or((0.0, 0.0));
 

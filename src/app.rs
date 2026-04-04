@@ -1,4 +1,5 @@
 use crate::data::MonsterDatabase;
+use crate::history::UndoHistory;
 use crate::model::combat_stats::CombatStatsCache;
 use crate::model::Dungeon;
 use crate::presentation::PresentationState;
@@ -53,6 +54,9 @@ pub struct DungeonApp {
 
     /// Pending async file operation (save/load/export).
     pending_file_op: Option<std::sync::mpsc::Receiver<crate::io::save_load::FileOpResult>>,
+
+    // Undo/Redo
+    pub history: UndoHistory,
 }
 
 impl Default for DungeonApp {
@@ -68,8 +72,11 @@ impl Default for DungeonApp {
             }
         };
 
+        let dungeon = Dungeon::default();
+        let history = UndoHistory::new(&dungeon);
+
         Self {
-            dungeon: Dungeon::default(),
+            dungeon,
             active_tab: Tab::Graph,
             graph_state: GraphEditorState::default(),
             spatial_state: SpatialViewState::default(),
@@ -91,6 +98,7 @@ impl Default for DungeonApp {
             annotation_mode: false,
             annotation_state: AnnotationModeState::default(),
             pending_file_op: None,
+            history,
         }
     }
 }
@@ -382,6 +390,27 @@ impl DungeonApp {
         }
     }
 
+    /// Called after undo/redo restores a dungeon state. Syncs derived/view state.
+    fn after_history_restore(&mut self, ctx: &egui::Context) {
+        // Clear graph editor positions so they reload from restored dungeon
+        self.graph_state.room_positions.clear();
+        // Clear selections (referenced items may no longer exist)
+        self.graph_state.selection = Default::default();
+        self.graph_state.drag_state = crate::ui::graph_editor::DragState::None;
+        self.spatial_state.selected_room = None;
+        self.spatial_state.selected_corridor = None;
+        self.spatial_state.selected_waypoint = None;
+        self.spatial_state.selected_group = None;
+        self.spatial_state.selected_section = None;
+        self.decor_state.selected_room = None;
+        self.decor_state.selected_decor = None;
+        // Sync graph hash so auto-solve doesn't trigger inappropriately
+        self.last_graph_snapshot = self.graph_hash();
+        // Recompute cave contours (they're skipped in serialization)
+        self.recompute_cave_contours();
+        ctx.request_repaint();
+    }
+
     fn push_server_update_if_changed(&mut self) {
         let hash = self.presentation_hash();
         if hash == self.last_server_push_hash {
@@ -410,6 +439,7 @@ impl eframe::App for DungeonApp {
                         self.presentation = None;
                         // Sync snapshot so auto-solve doesn't re-route saved corridors
                         self.last_graph_snapshot = self.graph_hash();
+                        self.history.reset(&self.dungeon);
                     }
                     FileOpResult::Loaded(Err(e)) => eprintln!("Load error: {}", e),
                     FileOpResult::Saved(Ok(_path)) => {}
@@ -419,6 +449,25 @@ impl eframe::App for DungeonApp {
                     FileOpResult::Cancelled => {}
                 }
                 self.pending_file_op = None;
+            }
+        }
+
+        // Global key: Ctrl+Z undo, Ctrl+Y / Ctrl+Shift+Z redo
+        let (undo_pressed, redo_pressed) = ctx.input(|i| {
+            let ctrl = i.modifiers.command; // Cmd on Mac, Ctrl on others
+            let shift = i.modifiers.shift;
+            let undo = ctrl && !shift && i.key_pressed(egui::Key::Z);
+            let redo = (ctrl && i.key_pressed(egui::Key::Y))
+                || (ctrl && shift && i.key_pressed(egui::Key::Z));
+            (undo, redo)
+        });
+        if undo_pressed {
+            if self.history.undo(&mut self.dungeon) {
+                self.after_history_restore(ctx);
+            }
+        } else if redo_pressed {
+            if self.history.redo(&mut self.dungeon) {
+                self.after_history_restore(ctx);
             }
         }
 
@@ -445,6 +494,7 @@ impl eframe::App for DungeonApp {
                         self.styled_state = StyledViewState::default();
                         self.presenting = false;
                         self.presentation = None;
+                        self.history.reset(&self.dungeon);
                         ui.close_menu();
                     }
                     if ui.button("Open...").clicked() {
@@ -457,6 +507,38 @@ impl eframe::App for DungeonApp {
                         if self.pending_file_op.is_none() {
                             self.pending_file_op = Some(crate::io::save_load::save_dungeon_async(&self.dungeon));
                         }
+                        ui.close_menu();
+                    }
+                });
+                ui.menu_button("Edit", |ui| {
+                    if ui.add_enabled(self.history.can_undo(), egui::Button::new("Undo  Ctrl+Z")).clicked() {
+                        self.history.undo(&mut self.dungeon);
+                        self.graph_state.room_positions.clear();
+                        self.graph_state.selection = Default::default();
+                        self.graph_state.drag_state = crate::ui::graph_editor::DragState::None;
+                        self.spatial_state.selected_room = None;
+                        self.spatial_state.selected_corridor = None;
+                        self.spatial_state.selected_waypoint = None;
+                        self.spatial_state.selected_group = None;
+                        self.spatial_state.selected_section = None;
+                        self.decor_state.selected_room = None;
+                        self.decor_state.selected_decor = None;
+                        self.last_graph_snapshot = self.graph_hash();
+                        ui.close_menu();
+                    }
+                    if ui.add_enabled(self.history.can_redo(), egui::Button::new("Redo  Ctrl+Y")).clicked() {
+                        self.history.redo(&mut self.dungeon);
+                        self.graph_state.room_positions.clear();
+                        self.graph_state.selection = Default::default();
+                        self.graph_state.drag_state = crate::ui::graph_editor::DragState::None;
+                        self.spatial_state.selected_room = None;
+                        self.spatial_state.selected_corridor = None;
+                        self.spatial_state.selected_waypoint = None;
+                        self.spatial_state.selected_group = None;
+                        self.spatial_state.selected_section = None;
+                        self.decor_state.selected_room = None;
+                        self.decor_state.selected_decor = None;
+                        self.last_graph_snapshot = self.graph_hash();
                         ui.close_menu();
                     }
                 });
@@ -818,6 +900,10 @@ impl eframe::App for DungeonApp {
                 dump_annotations_file(&self.dungeon.annotations, &self.dungeon);
             }
         }
+
+        // Track state changes for undo/redo
+        let pointer_down = ctx.input(|i| i.pointer.any_down());
+        self.history.track(&self.dungeon, pointer_down);
 
         // Push server update only when presentation state has changed
         if self.presenting && self.server.is_some() {

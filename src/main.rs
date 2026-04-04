@@ -3,6 +3,7 @@
 
 mod app;
 mod data;
+mod history;
 mod io;
 mod model;
 mod presentation;
