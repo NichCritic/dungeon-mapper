@@ -24,8 +24,14 @@ pub struct AttackResult {
     pub extra_damage: Vec<(DiceResult, String)>,
 }
 
+/// Parse and roll a dice expression, returning just the total.
+pub fn roll_dice_expr(expr: &str) -> i32 {
+    let mut rng = rand::thread_rng();
+    roll_dice_with_rng(expr, &mut rng).total
+}
+
 /// Parse and roll a dice expression like "2d6 + 4", "1d8 - 1", "3d6", etc.
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn roll_dice(expr: &str) -> DiceResult {
     let mut rng = rand::thread_rng();
     roll_dice_with_rng(expr, &mut rng)
@@ -213,6 +219,7 @@ mod tests {
             damage_avg: 7.5,
             damage_type: "slashing".into(),
             extra_damage: Vec::new(),
+            effect: String::new(),
         };
 
         // Run several times to cover hit/miss cases
@@ -254,6 +261,7 @@ mod tests {
                     damage_type: "fire".into(),
                 },
             ],
+            effect: String::new(),
         };
 
         // With +14 to hit vs AC 10, should almost always hit

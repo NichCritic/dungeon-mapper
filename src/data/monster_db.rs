@@ -180,7 +180,7 @@ impl MonsterDatabase {
         }
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.monsters.len()
     }
@@ -258,8 +258,16 @@ fn apply_field_ops(monster: &mut Map<String, Value>, field: &str, ops: &Value) {
                     if let Some(idx) = arr.iter().position(|item| {
                         item.get("name").and_then(|n| n.as_str()) == Some(replace_name)
                     }) {
-                        if let Some(new_item) = items {
-                            arr[idx] = new_item.clone();
+                        if let Some(new_items) = items {
+                            // If items is an array, splice all elements in; otherwise replace single
+                            arr.remove(idx);
+                            if let Some(new_arr) = new_items.as_array() {
+                                for (i, item) in new_arr.iter().enumerate() {
+                                    arr.insert(idx + i, item.clone());
+                                }
+                            } else {
+                                arr.insert(idx, new_items.clone());
+                            }
                         } else {
                             arr.remove(idx);
                         }

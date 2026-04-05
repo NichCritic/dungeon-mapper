@@ -35,6 +35,19 @@ where
     }).unwrap_or_default())
 }
 
+/// Deserialize passive perception that may be a number or a formula string.
+fn deserialize_passive<'de, D>(deserializer: D) -> Result<Option<u8>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let val: Option<serde_json::Value> = Option::deserialize(deserializer)?;
+    Ok(val.and_then(|v| match v {
+        serde_json::Value::Number(n) => n.as_u64().map(|n| n as u8),
+        serde_json::Value::String(s) => s.parse::<u8>().ok(),
+        _ => None,
+    }))
+}
+
 /// A monster stat block, deserialized from 5e-Tools JSON.
 /// Fields that are complex or polymorphic are kept as serde_json::Value
 /// to avoid modeling every edge case in the data.
@@ -82,7 +95,7 @@ pub struct Monster {
     pub skill: HashMap<String, String>,
     #[serde(default, deserialize_with = "null_as_empty_vec")]
     pub senses: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_passive")]
     pub passive: Option<u8>,
     #[serde(default, deserialize_with = "null_as_empty_vec")]
     pub languages: Vec<String>,
@@ -125,12 +138,20 @@ pub enum MonsterType {
     Simple(String),
     Detailed {
         #[serde(rename = "type")]
-        type_name: String,
+        type_name: MonsterTypeName,
         #[serde(default)]
         tags: Vec<serde_json::Value>,
         #[serde(default, rename = "swarmSize")]
         swarm_size: Option<String>,
     },
+}
+
+/// The type name itself can be a plain string or a choose-from list.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum MonsterTypeName {
+    Plain(String),
+    Choose { choose: Vec<String> },
 }
 
 impl Default for MonsterType {
@@ -139,15 +160,25 @@ impl Default for MonsterType {
     }
 }
 
+impl MonsterTypeName {
+    pub fn display(&self) -> String {
+        match self {
+            MonsterTypeName::Plain(s) => s.clone(),
+            MonsterTypeName::Choose { choose } => choose.join("/"),
+        }
+    }
+}
+
 impl MonsterType {
     pub fn display(&self) -> String {
         match self {
             MonsterType::Simple(s) => s.clone(),
             MonsterType::Detailed { type_name, swarm_size, .. } => {
+                let name = type_name.display();
                 if let Some(swarm) = swarm_size {
-                    format!("swarm of {} {}s", size_label(swarm), type_name)
+                    format!("swarm of {} {}s", size_label(swarm), name)
                 } else {
-                    type_name.clone()
+                    name
                 }
             }
         }
@@ -1222,7 +1253,7 @@ mod tests {
     #[test]
     fn test_monster_type_display_detailed_no_swarm() {
         let t = MonsterType::Detailed {
-            type_name: "humanoid".to_string(),
+            type_name: MonsterTypeName::Plain("humanoid".to_string()),
             tags: Vec::new(),
             swarm_size: None,
         };
@@ -1232,7 +1263,7 @@ mod tests {
     #[test]
     fn test_monster_type_display_detailed_swarm() {
         let t = MonsterType::Detailed {
-            type_name: "humanoid".to_string(),
+            type_name: MonsterTypeName::Plain("humanoid".to_string()),
             tags: Vec::new(),
             swarm_size: Some("T".to_string()),
         };

@@ -12,7 +12,7 @@ use crate::presentation::combat_sim::{
     self, build_combatants_from_encounter, build_combatants_from_party,
     run_monte_carlo, MonteCarloResult,
 };
-use crate::render::recording::{RecordingRenderer, RenderCommand, replay_commands};
+use crate::render::recording::replay_commands;
 use crate::render::themed::RenderOptions;
 use crate::ui::canvas_common::{handle_pan_zoom, ViewState, COLOR_PLACEHOLDER_TEXT};
 use crate::util::{ViewTransform, GRID_PX};
@@ -20,10 +20,7 @@ use crate::util::{ViewTransform, GRID_PX};
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
-struct RenderCache {
-    commands: Vec<RenderCommand>,
-    input_hash: u64,
-}
+use crate::render::bg_cache::BackgroundRenderCache;
 
 /// Which side selector in the combat simulator.
 #[derive(Clone, Debug, PartialEq)]
@@ -54,23 +51,43 @@ impl Default for SimulationState {
     }
 }
 
+/// Pending file operation request from the encounters sidebar.
+pub enum EncounterFileRequest {
+    /// Export a single encounter by index.
+    ExportEncounter(usize),
+    /// Import encounters, optionally targeting a specific room.
+    ImportEncounters { target_room: Option<String> },
+    ExportCreatures,
+    ImportCreatures,
+}
+
 pub struct EncountersViewState {
     pub view: ViewState,
-    render_cache: Option<RenderCache>,
+    pub render_cache: BackgroundRenderCache,
     pub sim_state: SimulationState,
     /// Room selected on the map canvas (for contextual sidebar).
     pub selected_room: Option<String>,
+    /// Set by sidebar buttons, consumed by app.rs to dispatch async file ops.
+    pub file_request: Option<EncounterFileRequest>,
+    /// Target room for encounter import (set when import is dispatched, consumed on completion).
+    pub import_target_room: Option<String>,
 }
 
 impl Default for EncountersViewState {
     fn default() -> Self {
         Self {
             view: ViewState::default(),
-            render_cache: None,
+            render_cache: BackgroundRenderCache::default(),
             sim_state: SimulationState::default(),
             selected_room: None,
+            file_request: None,
+            import_target_room: None,
         }
     }
+}
+
+pub fn render_cache_hash(layout: &SpatialLayout, graph: &DungeonGraph, theme: &Theme) -> u64 {
+    render_input_hash(layout, graph, theme)
 }
 
 fn render_input_hash(layout: &SpatialLayout, graph: &DungeonGraph, theme: &Theme) -> u64 {
@@ -155,32 +172,34 @@ pub fn encounters_view(ui: &mut egui::Ui, dungeon: &Dungeon, state: &mut Encount
 
     // Rebuild cached render commands if inputs changed
     let hash = render_input_hash(layout, &dungeon.graph, &dungeon.theme);
-    let needs_rebuild = state.render_cache.as_ref().is_none_or(|c| c.input_hash != hash);
+    let options = RenderOptions {
+        show_grid: true,
+        show_labels: true,
+        show_notes: false,
+        show_secrets: false,
+        show_decor: true,
+    };
+    let cache_ready = state.render_cache.ensure(
+        hash, &dungeon.graph, layout, &dungeon.theme, options, "Encounters",
+    );
 
-    if needs_rebuild {
-        let mut recorder = RecordingRenderer::new();
-        let options = RenderOptions {
-            show_grid: true,
-            show_labels: true,
-            show_notes: false,
-            show_secrets: false,
-            show_decor: true,
-        };
-        crate::render::themed::render_themed(
-            &mut recorder,
-            &dungeon.graph,
-            layout,
-            &dungeon.theme,
-            &options,
+    if cache_ready {
+        if let Some(commands) = state.render_cache.commands() {
+            replay_commands(&painter, &transform, commands);
+        }
+    } else {
+        let msg = format!("Rendering {}...",
+            state.render_cache.pending_label().unwrap_or("map"));
+        let spinner_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(200.0, 40.0));
+        painter.rect_filled(spinner_rect, 8.0, egui::Color32::from_rgba_unmultiplied(0, 0, 0, 180));
+        painter.text(
+            spinner_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            &msg,
+            egui::FontId::proportional(14.0),
+            egui::Color32::WHITE,
         );
-        state.render_cache = Some(RenderCache {
-            commands: recorder.commands,
-            input_hash: hash,
-        });
-    }
-
-    if let Some(cache) = &state.render_cache {
-        replay_commands(&painter, &transform, &cache.commands);
+        ui.ctx().request_repaint();
     }
 
     // Draw room labels
@@ -214,8 +233,10 @@ pub fn encounters_view(ui: &mut egui::Ui, dungeon: &Dungeon, state: &mut Encount
         let offset_y = (idx as f32 - (siblings.len() as f32 - 1.0) / 2.0) * 14.0 * transform.zoom;
         let pos = screen + egui::vec2(0.0, 16.0 * transform.zoom + offset_y);
 
-        let (marker, color) = match enc.encounter_type {
-            EncounterType::Static => ("S", egui::Color32::from_rgb(255, 80, 80)),
+        let color = if enc.is_hazard() {
+            egui::Color32::from_rgb(160, 80, 255)
+        } else { match enc.encounter_type {
+            EncounterType::Static => egui::Color32::from_rgb(255, 80, 80),
             EncounterType::Wandering(r) => {
                 if let Some(range) = r {
                     let radius_px = range as f32 * GRID_PX * 2.0 * transform.zoom;
@@ -225,12 +246,12 @@ pub fn encounters_view(ui: &mut egui::Ui, dungeon: &Dungeon, state: &mut Encount
                         egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(255, 160, 40, 60)),
                     );
                 }
-                ("W", egui::Color32::from_rgb(255, 160, 40))
+                egui::Color32::from_rgb(255, 160, 40)
             }
-        };
+        }};
 
         let text_size = 9.0 * transform.zoom;
-        let display = format!("{} {}", marker, truncate_name(&enc.name, 10));
+        let display = truncate_name(&enc.name, 10);
 
         let galley = painter.layout_no_wrap(
             display.clone(),
@@ -330,13 +351,20 @@ pub fn encounters_sidebar(
         }
 
         ui.add_space(4.0);
-        if ui.button("Add Encounter Here").clicked() {
-            dungeon.encounters.push(Encounter::new("New Encounter".to_string(), sel_room_id.clone()));
-        }
+        ui.horizontal(|ui| {
+            if ui.button("Add Encounter Here").clicked() {
+                dungeon.encounters.push(Encounter::new("New Encounter".to_string(), sel_room_id.clone()));
+            }
+            if ui.button("Import Here").on_hover_text("Import encounters into this room").clicked() {
+                state.file_request = Some(EncounterFileRequest::ImportEncounters {
+                    target_room: Some(sel_room_id.clone()),
+                });
+            }
+        });
 
         if !room_enc_indices.is_empty() {
             ui.add_space(8.0);
-            encounters_list(ui, dungeon, monster_db, &room_enc_indices);
+            encounters_list(ui, dungeon, monster_db, &room_enc_indices, &mut state.file_request);
         }
 
         // Other rooms' encounters (collapsed)
@@ -348,7 +376,7 @@ pub fn encounters_sidebar(
             egui::CollapsingHeader::new(format!("Other Encounters ({})", other_indices.len()))
                 .default_open(false)
                 .show(ui, |ui| {
-                    encounters_list(ui, dungeon, monster_db, &other_indices);
+                    encounters_list(ui, dungeon, monster_db, &other_indices, &mut state.file_request);
                 });
         }
     } else {
@@ -367,9 +395,12 @@ pub fn encounters_sidebar(
                     dungeon.encounters.push(Encounter::new("New Encounter".to_string(), room_id));
                 }
             }
-            if ui.button("Monster Workshop").clicked() {
+            if ui.button("Import Encounters").clicked() {
+                state.file_request = Some(EncounterFileRequest::ImportEncounters { target_room: None });
+            }
+            if ui.button("Monster Browser").clicked() {
                 ui.ctx().memory_mut(|mem| {
-                    mem.data.insert_temp(egui::Id::new("monster_workshop_open"), true);
+                    mem.data.insert_temp(egui::Id::new("monster_browser_open"), true);
                 });
             }
         });
@@ -377,11 +408,11 @@ pub fn encounters_sidebar(
         ui.add_space(8.0);
 
         let all_indices: Vec<usize> = (0..dungeon.encounters.len()).collect();
-        encounters_list(ui, dungeon, monster_db, &all_indices);
+        encounters_list(ui, dungeon, monster_db, &all_indices, &mut state.file_request);
     }
 
     // Monster browser window
-    monster_browser_window(ui.ctx(), dungeon, monster_db);
+    monster_browser_window(ui.ctx(), dungeon, monster_db, &mut state.file_request);
     // Custom monster editor window
     custom_monster_editor_window(ui.ctx(), dungeon);
     // Monster workshop window (merge + custom editing)
@@ -404,6 +435,7 @@ fn encounters_list(
     dungeon: &mut Dungeon,
     monster_db: &MonsterDatabase,
     indices: &[usize],
+    file_request: &mut Option<EncounterFileRequest>,
 ) {
 
     let rooms_list: Vec<_> = dungeon.graph.rooms.iter()
@@ -424,9 +456,12 @@ fn encounters_list(
             let enc_id = enc.id.clone();
             ui.push_id(&enc_id, |ui| {
                 ui.group(|ui| {
-                    // Header: name + delete
+                    // Header: name + export + delete
                     ui.horizontal(|ui| {
                         ui.text_edit_singleline(&mut enc.name);
+                        if ui.small_button("Export").on_hover_text("Export this encounter").clicked() {
+                            *file_request = Some(EncounterFileRequest::ExportEncounter(enc_idx));
+                        }
                         if ui.small_button("X").clicked() {
                             remove_enc_idx = Some(enc_idx);
                         }
@@ -464,6 +499,66 @@ fn encounters_list(
                             }
                         }
                     });
+
+                    // Hazard toggle
+                    let mut is_hazard = enc.hazard.is_some();
+                    if ui.checkbox(&mut is_hazard, "Hazard").changed() {
+                        enc.hazard = if is_hazard {
+                            Some(crate::model::encounter::Hazard::default())
+                        } else {
+                            None
+                        };
+                    }
+                    if let Some(ref mut hazard) = enc.hazard {
+                        ui.indent("hazard_indent", |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label("Damage:");
+                                ui.add(egui::TextEdit::singleline(&mut hazard.damage)
+                                    .desired_width(80.0).hint_text("e.g. 2d6"));
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("Save DC:");
+                                let mut has_dc = hazard.save_dc.is_some();
+                                if ui.checkbox(&mut has_dc, "").changed() {
+                                    hazard.save_dc = if has_dc { Some(13) } else { None };
+                                }
+                                if let Some(ref mut dc) = hazard.save_dc {
+                                    let mut dc_val = *dc as i32;
+                                    if crate::ui::canvas_common::num_input_i32(ui, &mut dc_val, 35.0) {
+                                        *dc = dc_val.clamp(1, 30) as u8;
+                                    }
+                                    egui::ComboBox::from_id_salt(format!("haz_save_{}", enc_id))
+                                        .selected_text(hazard.save_ability.label())
+                                        .width(55.0)
+                                        .show_ui(ui, |ui| {
+                                            for ability in crate::model::encounter::SaveAbility::ALL {
+                                                if ui.selectable_label(hazard.save_ability == *ability, ability.label()).clicked() {
+                                                    hazard.save_ability = ability.clone();
+                                                }
+                                            }
+                                        });
+                                }
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("Condition:");
+                                let current = hazard.condition.as_deref().unwrap_or("None");
+                                egui::ComboBox::from_id_salt(format!("haz_cond_{}", enc_id))
+                                    .selected_text(current)
+                                    .width(100.0)
+                                    .show_ui(ui, |ui| {
+                                        if ui.selectable_label(hazard.condition.is_none(), "None").clicked() {
+                                            hazard.condition = None;
+                                        }
+                                        for &cond in crate::presentation::combat_tracker::STANDARD_CONDITIONS {
+                                            let selected = hazard.condition.as_deref() == Some(cond);
+                                            if ui.selectable_label(selected, cond).clicked() {
+                                                hazard.condition = Some(cond.to_string());
+                                            }
+                                        }
+                                    });
+                            });
+                        });
+                    }
 
                     // Home room
                     egui::ComboBox::from_id_salt(format!("enc_home_{}", enc_id))
@@ -706,6 +801,7 @@ fn monster_browser_window(
     ctx: &egui::Context,
     dungeon: &mut Dungeon,
     monster_db: &MonsterDatabase,
+    file_request: &mut Option<EncounterFileRequest>,
 ) {
     let mut open: bool = ctx.memory(|mem|
         mem.data.get_temp(egui::Id::new("monster_browser_open")).unwrap_or(false)
@@ -754,6 +850,21 @@ fn monster_browser_window(
                 ui.add(egui::TextEdit::singleline(&mut type_filter).desired_width(80.0));
             });
 
+            // Actions
+            ui.horizontal(|ui| {
+                if ui.button("Monster Workshop").clicked() {
+                    ctx.memory_mut(|mem| {
+                        mem.data.insert_temp(egui::Id::new("monster_workshop_open"), true);
+                    });
+                }
+                if ui.button("Export Creatures").clicked() {
+                    *file_request = Some(EncounterFileRequest::ExportCreatures);
+                }
+                if ui.button("Import Creatures").clicked() {
+                    *file_request = Some(EncounterFileRequest::ImportCreatures);
+                }
+            });
+
             ui.separator();
 
             // Build filter
@@ -765,24 +876,80 @@ fn monster_browser_window(
                 ..Default::default()
             };
 
-            let results = if filter.is_active() {
+            // Custom monsters matching the filter — collect ids and names for display
+            let custom_results: Vec<(String, String, String)> = dungeon.custom_monsters.iter()
+                .filter(|cm| filter.matches(&cm.monster))
+                .map(|cm| (cm.id.clone(), cm.monster.name.clone(), cm.monster.cr.cr_string().to_string()))
+                .collect();
+
+            let db_results = if filter.is_active() {
                 monster_db.filter(&filter)
             } else {
-                // Show all, but cap display
                 monster_db.all().iter().collect()
             };
 
-            let total = results.len();
-            ui.label(format!("{} monsters", total));
+            let total = custom_results.len() + db_results.len();
+            ui.label(format!("{} monsters ({} custom)", total, custom_results.len()));
+
+            // Track selected custom monster ID separately
+            let selected_custom_id: Option<String> = ctx.memory(|mem|
+                mem.data.get_temp(egui::Id::new("mb_selected_custom"))
+            );
 
             // Split: left = list, right = detail
             ui.columns(2, |cols| {
                 // Left: scrollable list
                 egui::ScrollArea::vertical().id_salt("mb_list").show(&mut cols[0], |ui| {
-                    let display_limit = 200;
-                    for (i, m) in results.iter().take(display_limit).enumerate() {
+                    let display_limit: usize = 200;
+                    let custom_color = egui::Color32::from_rgb(100, 220, 180);
+
+                    // Show custom monsters first
+                    if !custom_results.is_empty() {
+                        for (cm_id, cm_name, cm_cr) in &custom_results {
+                            let is_selected = selected_custom_id.as_ref()
+                                .is_some_and(|id| id == cm_id);
+                            let label = format!(
+                                "CR {} {} (custom)",
+                                cm_cr,
+                                cm_name,
+                            );
+                            let response = ui.selectable_label(is_selected,
+                                egui::RichText::new(&label).color(custom_color));
+                            if response.clicked() {
+                                ui.ctx().memory_mut(|mem| {
+                                    mem.data.insert_temp(
+                                        egui::Id::new("mb_selected_custom"),
+                                        cm_id.clone(),
+                                    );
+                                    // Clear base selection
+                                    mem.data.remove::<(String, String)>(egui::Id::new("mb_selected"));
+                                });
+                            }
+
+                            // Double-click to add
+                            if ui.ctx().input(|i| i.pointer.button_double_clicked(egui::PointerButton::Primary)) && is_selected {
+                                if let Some(enc_idx) = target_enc {
+                                    if enc_idx < dungeon.encounters.len() {
+                                        dungeon.encounters[enc_idx].monsters.push(EncounterMonster {
+                                            monster_ref: MonsterRef::Custom { id: cm_id.clone() },
+                                            count: 1,
+                                            notes: String::new(),
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                        if !db_results.is_empty() {
+                            ui.separator();
+                        }
+                    }
+
+                    // Database monsters
+                    let db_display_limit = display_limit.saturating_sub(custom_results.len());
+                    for (i, m) in db_results.iter().take(db_display_limit).enumerate() {
                         let is_selected = selected.as_ref()
-                            .is_some_and(|(s, n)| s == &m.source && n == &m.name);
+                            .is_some_and(|(s, n)| s == &m.source && n == &m.name)
+                            && selected_custom_id.is_none();
                         let label = format!(
                             "CR {} {}",
                             m.cr.cr_string(),
@@ -794,6 +961,8 @@ fn monster_browser_window(
                                     egui::Id::new("mb_selected"),
                                     (m.source.clone(), m.name.clone()),
                                 );
+                                // Clear custom selection
+                                mem.data.remove::<String>(egui::Id::new("mb_selected_custom"));
                             });
                         }
 
@@ -813,16 +982,34 @@ fn monster_browser_window(
                             }
                         }
 
-                        let _ = i; // suppress unused warning
+                        let _ = i;
                     }
-                    if total > display_limit {
-                        ui.label(format!("... and {} more (refine search)", total - display_limit));
+                    if db_results.len() > db_display_limit {
+                        ui.label(format!("... and {} more (refine search)", db_results.len() - db_display_limit));
                     }
                 });
 
                 // Right: stat block detail
                 egui::ScrollArea::vertical().id_salt("mb_detail").show(&mut cols[1], |ui| {
-                    if let Some((ref src, ref name)) = selected {
+                    if let Some(ref custom_id) = selected_custom_id {
+                        // Show custom monster detail
+                        if let Some(cm) = dungeon.custom_monsters.iter().find(|c| &c.id == custom_id) {
+                            draw_stat_block(ui, &cm.monster, monster_db);
+
+                            ui.add_space(8.0);
+                            if let Some(enc_idx) = target_enc {
+                                if ui.button("Add to Encounter").clicked() {
+                                    if enc_idx < dungeon.encounters.len() {
+                                        dungeon.encounters[enc_idx].monsters.push(EncounterMonster {
+                                            monster_ref: MonsterRef::Custom { id: cm.id.clone() },
+                                            count: 1,
+                                            notes: String::new(),
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    } else if let Some((ref src, ref name)) = selected {
                         if let Some(m) = monster_db.find(src, name) {
                             draw_stat_block(ui, m, monster_db);
 
@@ -877,7 +1064,7 @@ fn monster_browser_window(
 }
 
 /// Draw a formatted D&D stat block for a monster, optionally with token image.
-fn draw_stat_block(ui: &mut egui::Ui, m: &Monster, monster_db: &MonsterDatabase) {
+pub fn draw_stat_block(ui: &mut egui::Ui, m: &Monster, monster_db: &MonsterDatabase) {
     // Token image
     if let Some(token_path) = monster_db.token_path(&m.source, &m.name) {
         let uri = format!("file://{}", token_path.display());

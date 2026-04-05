@@ -34,16 +34,13 @@ pub enum CombatantId {
 
 /// Runtime state for a single monster instance during combat.
 #[derive(Clone, Debug)]
-#[allow(dead_code)] // Fields used by upcoming UI features
 pub struct MonsterInstance {
     pub label: String,
-    pub monster_name: String,
     pub max_hp: i32,
     pub current_hp: i32,
     pub temp_hp: i32,
     pub initiative: Option<i32>,
     pub conditions: Vec<bool>,
-    pub notes: String,
     pub is_dead: bool,
     pub dex_mod: i8,
     /// Parsed attacks from combat stats, populated during init.
@@ -52,7 +49,6 @@ pub struct MonsterInstance {
 
 /// Runtime state for a player character during combat.
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub struct PlayerCombatState {
     pub name: String,
     pub ac: u8,
@@ -62,7 +58,6 @@ pub struct PlayerCombatState {
     pub initiative: Option<i32>,
     pub initiative_modifier: i8,
     pub conditions: Vec<bool>,
-    pub notes: String,
 }
 
 /// Tracks combat state for all active encounters.
@@ -76,17 +71,6 @@ pub struct CombatTracker {
 }
 
 impl CombatTracker {
-    /// Initialize the tracker from the dungeon's encounters and party.
-    #[allow(dead_code)]
-    pub fn init(
-        encounters: &[Encounter],
-        monster_db: &MonsterDatabase,
-        custom_monsters: &[CustomMonster],
-        cache: &mut CombatStatsCache,
-    ) -> Self {
-        Self::init_with_party(encounters, monster_db, custom_monsters, cache, &[])
-    }
-
     /// Initialize the tracker from encounters and a party of player characters.
     pub fn init_with_party(
         encounters: &[Encounter],
@@ -128,13 +112,11 @@ impl CombatTracker {
                     };
                     instances.insert(id, MonsterInstance {
                         label,
-                        monster_name: monster.name.clone(),
                         max_hp: stats.max_hp,
                         current_hp: stats.max_hp,
                         temp_hp: 0,
                         initiative: None,
                         conditions: vec![false; STANDARD_CONDITIONS.len()],
-                        notes: String::new(),
                         is_dead: false,
                         dex_mod,
                         attacks: attacks.clone(),
@@ -154,7 +136,6 @@ impl CombatTracker {
                 initiative: None,
                 initiative_modifier: pc.initiative_modifier,
                 conditions: vec![false; STANDARD_CONDITIONS.len()],
-                notes: pc.notes.clone(),
             });
         }
 
@@ -169,22 +150,27 @@ impl CombatTracker {
     }
 
     /// Apply damage to a monster instance. Temp HP absorbs first.
-    /// Delegates to apply_damage_to for the CombatantId-based implementation.
-    #[allow(dead_code)]
+    #[cfg(test)]
+    pub fn init(
+        encounters: &[Encounter],
+        monster_db: &MonsterDatabase,
+        custom_monsters: &[CustomMonster],
+        cache: &mut CombatStatsCache,
+    ) -> Self {
+        Self::init_with_party(encounters, monster_db, custom_monsters, cache, &[])
+    }
+
+    #[cfg(test)]
     pub fn apply_damage(&mut self, id: &MonsterInstanceId, damage: i32) {
         self.apply_damage_to(&CombatantId::Monster(id.clone()), damage);
     }
 
-    /// Heal a monster instance.
-    /// Delegates to heal_combatant for the CombatantId-based implementation.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn heal(&mut self, id: &MonsterInstanceId, amount: i32) {
         self.heal_combatant(&CombatantId::Monster(id.clone()), amount);
     }
 
-    /// Toggle a condition on a monster instance.
-    /// Delegates to toggle_combatant_condition for the CombatantId-based implementation.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn toggle_condition(&mut self, id: &MonsterInstanceId, condition_index: usize) {
         self.toggle_combatant_condition(&CombatantId::Monster(id.clone()), condition_index);
     }
@@ -348,15 +334,6 @@ impl CombatTracker {
         self.initiative_order.get(self.current_turn)
     }
 
-    /// Get the current turn's monster instance ID, if the current combatant is a monster.
-    #[allow(dead_code)]
-    pub fn current_instance_id(&self) -> Option<&MonsterInstanceId> {
-        match self.current_combatant_id() {
-            Some(CombatantId::Monster(mid)) => Some(mid),
-            _ => None,
-        }
-    }
-
     /// Count alive/dead for a specific encounter (monsters only).
     pub fn counts_for_encounter(&self, encounter_id: &str) -> (usize, usize) {
         let mut alive = 0;
@@ -442,10 +419,9 @@ mod tests {
             log: CombatLog::new(),
         };
         tracker.instances.insert(id.clone(), MonsterInstance {
-            label: "Goblin".into(), monster_name: "Goblin".into(),
-            max_hp: 10, current_hp: 10, temp_hp: 0,
+            label: "Goblin".into(),            max_hp: 10, current_hp: 10, temp_hp: 0,
             initiative: None, conditions: vec![false; STANDARD_CONDITIONS.len()],
-            notes: String::new(), is_dead: false, dex_mod: 2,
+            is_dead: false, dex_mod: 2,
             attacks: Vec::new(),
         });
         tracker
@@ -479,10 +455,9 @@ mod tests {
             log: CombatLog::new(),
         };
         tracker.instances.insert(id.clone(), MonsterInstance {
-            label: "Goblin".into(), monster_name: "Goblin".into(),
-            max_hp: 10, current_hp: 10, temp_hp: 5,
+            label: "Goblin".into(),            max_hp: 10, current_hp: 10, temp_hp: 5,
             initiative: None, conditions: vec![false; STANDARD_CONDITIONS.len()],
-            notes: String::new(), is_dead: false, dex_mod: 2,
+            is_dead: false, dex_mod: 2,
             attacks: Vec::new(),
         });
 
@@ -503,10 +478,9 @@ mod tests {
             log: CombatLog::new(),
         };
         tracker.instances.insert(id.clone(), MonsterInstance {
-            label: "Goblin".into(), monster_name: "Goblin".into(),
-            max_hp: 10, current_hp: 3, temp_hp: 0,
+            label: "Goblin".into(),            max_hp: 10, current_hp: 3, temp_hp: 0,
             initiative: None, conditions: vec![false; STANDARD_CONDITIONS.len()],
-            notes: String::new(), is_dead: false, dex_mod: 2,
+            is_dead: false, dex_mod: 2,
             attacks: Vec::new(),
         });
 
@@ -529,10 +503,9 @@ mod tests {
             log: CombatLog::new(),
         };
         tracker.instances.insert(id.clone(), MonsterInstance {
-            label: "Goblin".into(), monster_name: "Goblin".into(),
-            max_hp: 10, current_hp: 0, temp_hp: 0,
+            label: "Goblin".into(),            max_hp: 10, current_hp: 0, temp_hp: 0,
             initiative: None, conditions: vec![false; STANDARD_CONDITIONS.len()],
-            notes: String::new(), is_dead: true, dex_mod: 2,
+            is_dead: true, dex_mod: 2,
             attacks: Vec::new(),
         });
 
@@ -609,10 +582,9 @@ mod tests {
                 encounter_id: "e1".into(), monster_index: 0, instance: i,
             };
             tracker.instances.insert(id, MonsterInstance {
-                label: format!("Goblin #{}", i + 1), monster_name: "Goblin".into(),
-                max_hp: 10, current_hp: if i == 2 { 0 } else { 10 }, temp_hp: 0,
+                label: format!("Goblin #{}", i + 1),                max_hp: 10, current_hp: if i == 2 { 0 } else { 10 }, temp_hp: 0,
                 initiative: None, conditions: vec![false; STANDARD_CONDITIONS.len()],
-                notes: String::new(), is_dead: i == 2, dex_mod: 2,
+                is_dead: i == 2, dex_mod: 2,
                 attacks: Vec::new(),
             });
         }
@@ -638,6 +610,7 @@ mod tests {
                 },
             ],
             notes: String::new(),
+            hazard: None,
         };
 
         let db = MonsterDatabase::empty();
@@ -663,9 +636,9 @@ mod tests {
             current_hp: 40,
             initiative_modifier: 2,
             passive_perception: 14,
-            notes: String::new(),
             attack_bonus: 5,
             damage_dice: "1d8 + 3".into(),
+            notes: String::new(),
         };
 
         let db = MonsterDatabase::empty();
@@ -696,7 +669,6 @@ mod tests {
             initiative: None,
             initiative_modifier: 1,
             conditions: vec![false; STANDARD_CONDITIONS.len()],
-            notes: String::new(),
         });
 
         tracker.apply_damage_to(&CombatantId::Player("pc1".into()), 15);
@@ -720,7 +692,6 @@ mod tests {
             initiative: None,
             initiative_modifier: 1,
             conditions: vec![false; STANDARD_CONDITIONS.len()],
-            notes: String::new(),
         });
 
         tracker.heal_combatant(&CombatantId::Player("pc1".into()), 10);
@@ -745,7 +716,6 @@ mod tests {
             initiative: None,
             initiative_modifier: 3,
             conditions: vec![false; STANDARD_CONDITIONS.len()],
-            notes: String::new(),
         });
 
         assert_eq!(tracker.get_combatant_name(&CombatantId::Monster(id)), "Goblin");

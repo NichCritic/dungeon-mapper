@@ -2,7 +2,7 @@
 
 Dungeon: Untitled Dungeon
 
-2 open issue(s):
+4 open issue(s):
 
 ## Issue 1
 
@@ -21,4 +21,20 @@ Dungeon: Untitled Dungeon
 - **Screen position:** (0.400, 0.099) [fraction of window]
 - **Near room:** C1 - The Web Gallery (3511e311-4189-4148-a73d-b64bdc7ca812)
 - **Created:** day-20547 18:25:43 UTC
+
+## Issue 3
+
+- **ID:** 8704ca9a-d382-4b64-84a9-2803437cedb9
+- **Description:** Move to the encounters section
+- **View:** Presentation
+- **Screen position:** (0.864, 0.083) [fraction of window]
+- **Created:** day-20548 03:38:24 UTC
+
+## Issue 4
+
+- **ID:** 4feecfed-7f9f-4f71-ab7c-89db9ed6b1b9
+- **Description:** Also should have a reset stats
+- **View:** Presentation
+- **Screen position:** (0.899, 0.652) [fraction of window]
+- **Created:** day-20548 03:42:54 UTC
 

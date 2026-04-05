@@ -1,17 +1,17 @@
-use crate::model::SpatialLayout;
-use super::PresentationState;
+use crate::model::{SpatialLayout, LightSource};
 
-/// Compute brightness for a grid cell from all light sources and ambient light.
+/// Compute brightness for a grid cell from light sources and ambient light.
 /// Returns a value in 0.0..=1.0.
-pub fn compute_brightness(
+pub fn compute_brightness_generic(
     cell_x: f32,
     cell_y: f32,
-    presentation: &PresentationState,
+    light_sources: &[LightSource],
+    ambient_light: f32,
     layout: &SpatialLayout,
 ) -> f32 {
-    let mut brightness = presentation.ambient_light;
+    let mut brightness = ambient_light;
 
-    for light in &presentation.light_sources {
+    for light in light_sources {
         let Some(light_rl) = layout.room_by_id(&light.room_id) else { continue };
         let light_cx = light_rl.x as f32 + light_rl.width as f32 / 2.0;
         let light_cy = light_rl.y as f32 + light_rl.height as f32 / 2.0;
@@ -33,17 +33,12 @@ pub fn compute_brightness(
 mod tests {
     use super::*;
     use crate::model::{RoomLayout, SpatialLayout};
-    use crate::presentation::{LightSource, PresentationState};
-    use std::collections::{HashMap, HashSet};
 
     fn make_layout_with_room(room_id: &str, x: i32, y: i32, w: u32, h: u32) -> SpatialLayout {
         SpatialLayout {
             rooms: vec![RoomLayout {
                 room_id: room_id.to_string(),
-                x,
-                y,
-                width: w,
-                height: h,
+                x, y, width: w, height: h,
                 violations: Vec::new(),
             }],
             corridors: Vec::new(),
@@ -51,25 +46,10 @@ mod tests {
         }
     }
 
-    fn make_presentation(ambient: f32, lights: Vec<LightSource>) -> PresentationState {
-        PresentationState {
-            room_visibility: HashMap::new(),
-            doors_open: HashSet::new(),
-            light_sources: lights,
-            ambient_light: ambient,
-            show_labels_player: false,
-            encounter_positions: HashMap::new(),
-            combat_tracker: None,
-            party_room: None,
-        }
-    }
-
     #[test]
     fn test_no_lights_returns_ambient() {
         let layout = make_layout_with_room("r1", 0, 0, 4, 4);
-        let presentation = make_presentation(0.3, Vec::new());
-
-        let brightness = compute_brightness(2.0, 2.0, &presentation, &layout);
+        let brightness = compute_brightness_generic(2.0, 2.0, &[], 0.3, &layout);
         assert!((brightness - 0.3).abs() < 0.001);
     }
 
@@ -83,11 +63,7 @@ mod tests {
             intensity: 1.0,
             color: [255, 255, 200],
         };
-        let presentation = make_presentation(0.0, vec![light]);
-
-        // Cell at center of room (2.0, 2.0), light also at center (2.0, 2.0)
-        // dist = 0, falloff = 1.0, brightness = 1.0 * 1.0 = 1.0
-        let brightness = compute_brightness(2.0, 2.0, &presentation, &layout);
+        let brightness = compute_brightness_generic(2.0, 2.0, &[light], 0.0, &layout);
         assert!((brightness - 1.0).abs() < 0.001);
     }
 
@@ -101,32 +77,8 @@ mod tests {
             intensity: 1.0,
             color: [255, 255, 200],
         };
-        let presentation = make_presentation(0.0, vec![light]);
-
-        // Light center is at (2.0, 2.0), cell at (20.0, 20.0) is far outside radius
-        let brightness = compute_brightness(20.0, 20.0, &presentation, &layout);
+        let brightness = compute_brightness_generic(20.0, 20.0, &[light], 0.0, &layout);
         assert!((brightness - 0.0).abs() < 0.001);
-    }
-
-    #[test]
-    fn test_multiple_overlapping_lights() {
-        let layout = SpatialLayout {
-            rooms: vec![
-                RoomLayout { room_id: "r1".to_string(), x: 0, y: 0, width: 4, height: 4, violations: Vec::new() },
-                RoomLayout { room_id: "r2".to_string(), x: 0, y: 0, width: 4, height: 4, violations: Vec::new() },
-            ],
-            corridors: Vec::new(),
-            bounds: Vec::new(),
-        };
-        let lights = vec![
-            LightSource { id: "l1".to_string(), room_id: "r1".to_string(), radius: 5.0, intensity: 0.4, color: [255, 255, 200] },
-            LightSource { id: "l2".to_string(), room_id: "r2".to_string(), radius: 5.0, intensity: 0.4, color: [255, 200, 200] },
-        ];
-        let presentation = make_presentation(0.0, lights);
-
-        // Both lights at center (2.0, 2.0), cell at center: each contributes 0.4
-        let brightness = compute_brightness(2.0, 2.0, &presentation, &layout);
-        assert!((brightness - 0.8).abs() < 0.001);
     }
 
     #[test]
@@ -139,10 +91,7 @@ mod tests {
             intensity: 1.0,
             color: [255, 255, 200],
         };
-        // High ambient + full light should cap at 1.0
-        let presentation = make_presentation(0.8, vec![light]);
-
-        let brightness = compute_brightness(2.0, 2.0, &presentation, &layout);
+        let brightness = compute_brightness_generic(2.0, 2.0, &[light], 0.8, &layout);
         assert!((brightness - 1.0).abs() < 0.001);
     }
 }

@@ -54,7 +54,7 @@ pub struct MonteCarloResult {
 }
 
 impl SimResult {
-    #[allow(dead_code)] // Used in tests and available for UI
+    #[cfg(test)]
     pub fn survivors(&self) -> Vec<&SimCombatantResult> {
         self.combatants.iter().filter(|c| c.current_hp > 0).collect()
     }
@@ -168,6 +168,94 @@ pub fn run_combat(side_a: &[SimCombatant], side_b: &[SimCombatant]) -> SimResult
     SimResult { winner, rounds: round.min(max_rounds), combatants: final_states }
 }
 
+/// Run a free-for-all combat where each group is a separate side.
+/// Groups are provided as slices of combatants, each already assigned their side.
+pub fn run_combat_ffa(groups: &[Vec<SimCombatant>]) -> SimResult {
+    let mut rng = rand::thread_rng();
+
+    let mut combatants: Vec<SimCombatant> = Vec::new();
+    for group in groups {
+        combatants.extend(group.iter().cloned());
+    }
+
+    // Roll initiative
+    let mut initiatives: Vec<(usize, i32)> = combatants.iter().enumerate().map(|(i, c)| {
+        let roll = rng.gen_range(1..=20) + c.initiative_mod as i32;
+        (i, roll)
+    }).collect();
+    initiatives.sort_by(|a, b| b.1.cmp(&a.1));
+    let order: Vec<usize> = initiatives.iter().map(|(i, _)| *i).collect();
+
+    let max_rounds = 100u32;
+    let mut round = 0u32;
+
+    loop {
+        round += 1;
+        if round > max_rounds { break; }
+
+        for &idx in &order {
+            if combatants[idx].current_hp <= 0 { continue; }
+
+            let attacker_side = combatants[idx].side;
+            let attacks = combatants[idx].attacks.clone();
+            let multi = combatants[idx].multiattack_count;
+            if attacks.is_empty() { continue; }
+
+            let best_attack = attacks.iter()
+                .max_by(|a, b| a.damage_avg.partial_cmp(&b.damage_avg).unwrap_or(std::cmp::Ordering::Equal))
+                .unwrap()
+                .clone();
+
+            for _ in 0..multi {
+                let enemies: Vec<usize> = combatants.iter().enumerate()
+                    .filter(|(_, c)| c.side != attacker_side && c.current_hp > 0)
+                    .map(|(i, _)| i)
+                    .collect();
+                if enemies.is_empty() { break; }
+
+                let target_idx = enemies[rng.gen_range(0..enemies.len())];
+                let target_ac = combatants[target_idx].ac;
+                let result = crate::presentation::dice::roll_attack(&best_attack, target_ac);
+                if result.hit {
+                    let mut total_damage = result.damage.as_ref().map(|d| d.total).unwrap_or(0);
+                    for (extra, _) in &result.extra_damage {
+                        total_damage += extra.total;
+                    }
+                    combatants[target_idx].current_hp -= total_damage;
+                }
+            }
+        }
+
+        // Check how many sides still have living combatants
+        let alive_sides: std::collections::HashSet<usize> = combatants.iter()
+            .filter(|c| c.current_hp > 0)
+            .map(|c| c.side)
+            .collect();
+        if alive_sides.len() <= 1 { break; }
+    }
+
+    let alive_sides: std::collections::HashSet<usize> = combatants.iter()
+        .filter(|c| c.current_hp > 0)
+        .map(|c| c.side)
+        .collect();
+    let winner = if alive_sides.len() == 1 {
+        Some(*alive_sides.iter().next().unwrap())
+    } else {
+        None
+    };
+
+    let final_states: Vec<SimCombatantResult> = combatants.iter()
+        .map(|c| SimCombatantResult {
+            name: c.name.clone(),
+            max_hp: c.max_hp,
+            current_hp: c.current_hp,
+            side: c.side,
+        })
+        .collect();
+
+    SimResult { winner, rounds: round.min(max_rounds), combatants: final_states }
+}
+
 /// Build SimCombatants from an encounter definition.
 pub fn build_combatants_from_encounter(
     encounter: &Encounter,
@@ -222,6 +310,7 @@ pub fn build_combatants_from_party(party: &[PlayerCharacter], side: usize) -> Ve
             damage_avg: estimate_dice_avg(&pc.damage_dice),
             damage_type: "weapon".to_string(),
             extra_damage: Vec::new(),
+            effect: String::new(),
         };
 
         SimCombatant {
@@ -309,6 +398,7 @@ mod tests {
             damage_avg,
             damage_type: "slashing".to_string(),
             extra_damage: Vec::new(),
+            effect: String::new(),
         }
     }
 

@@ -1,20 +1,17 @@
 use std::hash::{Hash, Hasher};
 
 use crate::model::*;
-use crate::render::recording::{RecordingRenderer, RenderCommand, replay_commands};
+use crate::render::recording::replay_commands;
 use crate::render::themed::RenderOptions;
 use crate::ui::canvas_common::{handle_pan_zoom, ViewState, COLOR_PLACEHOLDER_TEXT};
 use crate::ui::spatial_view::collect_floors;
 use crate::util::{ViewTransform, GRID_PX};
 
-struct RenderCache {
-    commands: Vec<RenderCommand>,
-    input_hash: u64,
-}
+use crate::render::bg_cache::BackgroundRenderCache;
 
 pub struct DecorViewState {
     pub view: ViewState,
-    render_cache: Option<RenderCache>,
+    pub render_cache: BackgroundRenderCache,
     pub current_floor: Option<i32>,
     /// Room selected for decor editing.
     pub selected_room: Option<String>,
@@ -26,6 +23,10 @@ pub struct DecorViewState {
     pub place_mode: bool,
     /// Selected decor item within the selected room (index).
     pub selected_decor: Option<usize>,
+    /// Multiple selected decor items (for drag-select).
+    pub selected_decor_set: std::collections::HashSet<usize>,
+    /// Drag-select start position in world coords.
+    drag_select_start: Option<egui::Pos2>,
     /// Search filter for decor type dropdowns.
     pub decor_search: String,
 }
@@ -34,16 +35,22 @@ impl Default for DecorViewState {
     fn default() -> Self {
         Self {
             view: ViewState::default(),
-            render_cache: None,
+            render_cache: BackgroundRenderCache::default(),
             current_floor: None,
             selected_room: None,
             dragging_decor: None,
             place_type: DecorType::Table,
             place_mode: false,
             selected_decor: None,
+            selected_decor_set: std::collections::HashSet::new(),
+            drag_select_start: None,
             decor_search: String::new(),
         }
     }
+}
+
+pub fn render_cache_hash(layout: &SpatialLayout, graph: &DungeonGraph, theme: &Theme, current_floor: Option<i32>) -> u64 {
+    render_input_hash(layout, graph, theme, current_floor)
 }
 
 fn render_input_hash(layout: &SpatialLayout, graph: &DungeonGraph, theme: &Theme, current_floor: Option<i32>) -> u64 {
@@ -145,32 +152,34 @@ pub fn decor_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut DecorVie
 
     // Rebuild cached render commands if inputs changed
     let hash = render_input_hash(layout, &dungeon.graph, &dungeon.theme, state.current_floor);
-    let needs_rebuild = state.render_cache.as_ref().is_none_or(|c| c.input_hash != hash);
+    let options = RenderOptions {
+        show_grid: true,
+        show_labels: true,
+        show_notes: false,
+        show_secrets: false,
+        show_decor: false, // decor drawn as live overlay for smooth dragging
+    };
+    let cache_ready = state.render_cache.ensure(
+        hash, &dungeon.graph, render_layout, &dungeon.theme, options, "Decor",
+    );
 
-    if needs_rebuild {
-        let mut recorder = RecordingRenderer::new();
-        let options = RenderOptions {
-            show_grid: true,
-            show_labels: true,
-            show_notes: false,
-            show_secrets: false,
-            show_decor: false, // decor drawn as live overlay for smooth dragging
-        };
-        crate::render::themed::render_themed(
-            &mut recorder,
-            &dungeon.graph,
-            render_layout,
-            &dungeon.theme,
-            &options,
+    if cache_ready {
+        if let Some(commands) = state.render_cache.commands() {
+            replay_commands(&painter, &transform, commands);
+        }
+    } else {
+        let msg = format!("Rendering {}...",
+            state.render_cache.pending_label().unwrap_or("map"));
+        let spinner_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(200.0, 40.0));
+        painter.rect_filled(spinner_rect, 8.0, egui::Color32::from_rgba_unmultiplied(0, 0, 0, 180));
+        painter.text(
+            spinner_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            &msg,
+            egui::FontId::proportional(14.0),
+            egui::Color32::WHITE,
         );
-        state.render_cache = Some(RenderCache {
-            commands: recorder.commands,
-            input_hash: hash,
-        });
-    }
-
-    if let Some(cache) = &state.render_cache {
-        replay_commands(&painter, &transform, &cache.commands);
+        ui.ctx().request_repaint();
     }
 
     // Live decor overlay (not cached, so dragging is smooth)
@@ -228,7 +237,7 @@ pub fn decor_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut DecorVie
 
                 if is_selected_room {
                     // Draw selection ring and type label for selected room's decor
-                    let is_sel = state.selected_decor == Some(di);
+                    let is_sel = state.selected_decor == Some(di) || state.selected_decor_set.contains(&di);
                     let ring_color = if is_sel {
                         egui::Color32::from_rgb(255, 200, 50)
                     } else {
@@ -348,6 +357,31 @@ pub fn decor_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut DecorVie
         }
     }
 
+    // Delete selected decor with Delete or Backspace key
+    if state.selected_room.is_some() && (!state.selected_decor_set.is_empty() || state.selected_decor.is_some()) {
+        let delete_pressed = ui.ctx().input(|i| {
+            i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)
+        });
+        if delete_pressed {
+            let sel_id = state.selected_room.clone().unwrap();
+            if let Some(room) = dungeon.graph.room_by_id_mut(&sel_id) {
+                // Collect all indices to remove
+                let mut to_remove: Vec<usize> = state.selected_decor_set.iter().copied().collect();
+                if let Some(di) = state.selected_decor {
+                    if !to_remove.contains(&di) { to_remove.push(di); }
+                }
+                to_remove.sort_unstable_by(|a, b| b.cmp(a)); // reverse order
+                for idx in to_remove {
+                    if idx < room.decor.len() {
+                        room.decor.remove(idx);
+                    }
+                }
+                state.selected_decor = None;
+                state.selected_decor_set.clear();
+            }
+        }
+    }
+
     // Start drag on primary button drag start over a decor item
     if response.drag_started_by(egui::PointerButton::Primary) && state.dragging_decor.is_none() && !state.place_mode {
         if let Some(pos) = pointer_pos {
@@ -369,6 +403,62 @@ pub fn decor_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut DecorVie
                         }
                     }
                 }
+            }
+        }
+    }
+
+    // Drag-select: secondary button (right-drag) to rubber-band select
+    if !state.place_mode && state.dragging_decor.is_none() {
+        if response.drag_started_by(egui::PointerButton::Secondary) {
+            if let Some(pos) = response.interact_pointer_pos() {
+                state.drag_select_start = Some(transform.screen_to_world(pos));
+            }
+        }
+        if let Some(start) = state.drag_select_start {
+            if response.dragged_by(egui::PointerButton::Secondary) {
+                if let Some(pos) = pointer_pos {
+                    let current = transform.screen_to_world(pos);
+                    let min = egui::pos2(start.x.min(current.x), start.y.min(current.y));
+                    let max = egui::pos2(start.x.max(current.x), start.y.max(current.y));
+                    let screen_min = transform.world_to_screen(min);
+                    let screen_max = transform.world_to_screen(max);
+                    painter.rect_stroke(
+                        egui::Rect::from_min_max(screen_min, screen_max),
+                        0.0,
+                        egui::Stroke::new(1.0, egui::Color32::from_rgb(100, 200, 255)),
+                        egui::StrokeKind::Outside,
+                    );
+                }
+            }
+            if response.drag_stopped_by(egui::PointerButton::Secondary) {
+                if let Some(pos) = pointer_pos {
+                    let end = transform.screen_to_world(pos);
+                    let min_x = start.x.min(end.x);
+                    let min_y = start.y.min(end.y);
+                    let max_x = start.x.max(end.x);
+                    let max_y = start.y.max(end.y);
+                    // Select all decor items within the rectangle
+                    state.selected_decor_set.clear();
+                    if let Some(ref sel_id) = state.selected_room {
+                        if let Some(rl) = render_layout.room_by_id(sel_id) {
+                            if let Some(room) = dungeon.graph.room_by_id(sel_id) {
+                                let room_px_x = rl.x as f32 * GRID_PX;
+                                let room_px_y = rl.y as f32 * GRID_PX;
+                                for (di, decor) in room.decor.iter().enumerate() {
+                                    let wx = room_px_x + decor.x * GRID_PX;
+                                    let wy = room_px_y + decor.y * GRID_PX;
+                                    if wx >= min_x && wx <= max_x && wy >= min_y && wy <= max_y {
+                                        state.selected_decor_set.insert(di);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if let Some(&first) = state.selected_decor_set.iter().next() {
+                        state.selected_decor = Some(first);
+                    }
+                }
+                state.drag_select_start = None;
             }
         }
     }
@@ -523,6 +613,88 @@ pub fn decor_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Decor
                     state.selected_room = Some(id.clone());
                 }
             }
+        }
+    }
+
+    // Lighting
+    ui.add_space(12.0);
+    ui.heading("Lighting");
+    ui.separator();
+
+    ui.add(egui::Slider::new(&mut dungeon.ambient_light, 0.0..=1.0).text("Ambient"));
+
+    if let Some(ref sel_room_id) = state.selected_room.clone() {
+        if ui.button("Add Light Here").clicked() {
+            dungeon.light_sources.push(crate::model::LightSource {
+                id: uuid::Uuid::new_v4().to_string(),
+                room_id: sel_room_id.clone(),
+                radius: 5.0,
+                intensity: 1.0,
+                color: [255, 200, 100],
+            });
+        }
+        let room_light_indices: Vec<usize> = dungeon.light_sources.iter().enumerate()
+            .filter(|(_, l)| l.room_id == *sel_room_id)
+            .map(|(i, _)| i)
+            .collect();
+        let mut remove_light = None;
+        for &li in &room_light_indices {
+            let light = &mut dungeon.light_sources[li];
+            ui.horizontal(|ui| {
+                ui.add(egui::Slider::new(&mut light.radius, 1.0..=20.0).text("R"));
+                ui.add(egui::Slider::new(&mut light.intensity, 0.0..=1.0).text("I"));
+                if ui.small_button("X").clicked() {
+                    remove_light = Some(li);
+                }
+            });
+        }
+        if let Some(idx) = remove_light {
+            dungeon.light_sources.remove(idx);
+        }
+    } else {
+        if ui.button("Add Light Source").clicked() {
+            let room_id = dungeon.graph.rooms.first()
+                .map(|r| r.id.clone())
+                .unwrap_or_default();
+            if !room_id.is_empty() {
+                dungeon.light_sources.push(crate::model::LightSource {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    room_id,
+                    radius: 5.0,
+                    intensity: 1.0,
+                    color: [255, 200, 100],
+                });
+            }
+        }
+        let mut remove_idx = None;
+        for (i, light) in dungeon.light_sources.iter_mut().enumerate() {
+            ui.horizontal(|ui| {
+                let room_label = dungeon.graph.room_by_id(&light.room_id)
+                    .map(|r| r.label.as_str())
+                    .unwrap_or("?");
+                ui.label(format!("Light in {}", room_label));
+                if ui.small_button("X").clicked() {
+                    remove_idx = Some(i);
+                }
+            });
+            ui.add(egui::Slider::new(&mut light.radius, 1.0..=20.0).text("Radius"));
+            ui.add(egui::Slider::new(&mut light.intensity, 0.0..=1.0).text("Intensity"));
+            let rooms: Vec<_> = dungeon.graph.rooms.iter().map(|r| (r.id.clone(), r.label.clone())).collect();
+            egui::ComboBox::from_id_salt(format!("light_room_{}", light.id))
+                .selected_text(
+                    dungeon.graph.room_by_id(&light.room_id)
+                        .map(|r| r.label.as_str())
+                        .unwrap_or("Select room"),
+                )
+                .show_ui(ui, |ui| {
+                    for (rid, rlabel) in &rooms {
+                        ui.selectable_value(&mut light.room_id, rid.clone(), rlabel);
+                    }
+                });
+            ui.separator();
+        }
+        if let Some(idx) = remove_idx {
+            dungeon.light_sources.remove(idx);
         }
     }
 

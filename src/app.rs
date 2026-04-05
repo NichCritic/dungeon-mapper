@@ -54,6 +54,8 @@ pub struct DungeonApp {
 
     /// Pending async file operation (save/load/export).
     pending_file_op: Option<std::sync::mpsc::Receiver<crate::io::save_load::FileOpResult>>,
+    /// Pending background monster database load.
+    pending_monster_db: Option<std::sync::mpsc::Receiver<MonsterDatabase>>,
 
     // Undo/Redo
     pub history: UndoHistory,
@@ -69,19 +71,28 @@ pub struct DungeonApp {
     autosave_due: bool,
     /// Committed hash from previous frame, used to detect new commits for auto-save.
     last_autosave_hash: u64,
+    /// Hash of dungeon state used for render pre-warming debounce.
+    last_prewarm_hash: u64,
+    /// When the prewarm hash last changed (for debounce).
+    prewarm_hash_changed_at: std::time::Instant,
+    /// Skip debounce on next prewarm check (set on map load).
+    prewarm_immediate: bool,
 }
 
 impl Default for DungeonApp {
     fn default() -> Self {
-        // Try to find the bestiary data directory
-        let bestiary_dir = find_bestiary_dir();
-        let monster_db = match bestiary_dir {
-            Some(dir) => MonsterDatabase::load_from_directory(&dir),
-            None => {
-                eprintln!("No bestiary data directory found. Monster database will be empty.");
-                eprintln!("Place 5e-Tools bestiary JSON files in data/bestiary/ or 5etools-src/data/bestiary/");
-                MonsterDatabase::empty()
-            }
+        // Start loading the bestiary in the background
+        let pending_monster_db = if let Some(dir) = find_bestiary_dir() {
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let db = MonsterDatabase::load_from_directory(&dir);
+                let _ = tx.send(db);
+            });
+            Some(rx)
+        } else {
+            eprintln!("No bestiary data directory found. Monster database will be empty.");
+            eprintln!("Place 5e-Tools bestiary JSON files in data/bestiary/ or 5etools-src/data/bestiary/");
+            None
         };
 
         let dungeon = Dungeon::default();
@@ -97,7 +108,7 @@ impl Default for DungeonApp {
             encounters_state: EncountersViewState::default(),
             styled_state: StyledViewState::default(),
             last_graph_snapshot: 0,
-            monster_db,
+            monster_db: MonsterDatabase::empty(),
             combat_stats_cache: CombatStatsCache::new(),
 
             presenting: false,
@@ -111,11 +122,15 @@ impl Default for DungeonApp {
             annotation_mode: false,
             annotation_state: AnnotationModeState::default(),
             pending_file_op: None,
+            pending_monster_db,
             history,
             current_file: None,
             last_saved_hash: initial_hash,
             last_autosave: std::time::Instant::now(),
             autosave_due: false,
+            last_prewarm_hash: 0,
+            prewarm_hash_changed_at: std::time::Instant::now(),
+            prewarm_immediate: false,
             last_autosave_hash: initial_hash,
         }
     }
@@ -330,6 +345,8 @@ impl DungeonApp {
             layout,
             &self.dungeon.theme,
             presentation,
+            &self.dungeon.light_sources,
+            self.dungeon.ambient_light,
             &options,
         );
 
@@ -361,14 +378,14 @@ impl DungeonApp {
         for conn_id in &presentation.doors_open {
             conn_id.hash(&mut h);
         }
-        presentation.light_sources.len().hash(&mut h);
-        for light in &presentation.light_sources {
+        self.dungeon.light_sources.len().hash(&mut h);
+        for light in &self.dungeon.light_sources {
             light.id.hash(&mut h);
             light.radius.to_bits().hash(&mut h);
             light.intensity.to_bits().hash(&mut h);
             light.room_id.hash(&mut h);
         }
-        presentation.ambient_light.to_bits().hash(&mut h);
+        self.dungeon.ambient_light.to_bits().hash(&mut h);
         presentation.encounter_positions.len().hash(&mut h);
         for (eid, rid) in &presentation.encounter_positions {
             eid.hash(&mut h);
@@ -445,6 +462,14 @@ impl DungeonApp {
 
 impl eframe::App for DungeonApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Poll background monster database load
+        if let Some(rx) = &self.pending_monster_db {
+            if let Ok(db) = rx.try_recv() {
+                self.monster_db = db;
+                self.pending_monster_db = None;
+            }
+        }
+
         // Poll pending async file operation
         if let Some(rx) = &self.pending_file_op {
             if let Ok(result) = rx.try_recv() {
@@ -460,6 +485,8 @@ impl eframe::App for DungeonApp {
                         self.history.reset(&self.dungeon);
                         self.current_file = Some(path);
                         self.last_saved_hash = self.history.committed_hash();
+                        // Trigger immediate render cache pre-warming (skip debounce)
+                        self.prewarm_immediate = true;
                     }
                     FileOpResult::Loaded(Err(e)) => eprintln!("Load error: {}", e),
                     FileOpResult::Saved(Ok(path)) => {
@@ -469,11 +496,53 @@ impl eframe::App for DungeonApp {
                     FileOpResult::Saved(Err(e)) => eprintln!("Save error: {}", e),
                     FileOpResult::ExportedPng(Ok(())) => {}
                     FileOpResult::ExportedPng(Err(e)) => eprintln!("Export error: {}", e),
+                    FileOpResult::ExportedEncounters(Ok(())) => {}
+                    FileOpResult::ExportedEncounters(Err(e)) => eprintln!("Encounter export error: {}", e),
+                    FileOpResult::ImportedEncounters(Ok(data)) => {
+                        let target_room = self.encounters_state.import_target_room.take();
+                        let fallback_room = self.dungeon.graph.rooms.first()
+                            .map(|r| r.id.clone())
+                            .unwrap_or_default();
+                        for mut enc in data.encounters {
+                            if let Some(ref room) = target_room {
+                                // User chose a specific room to import into
+                                enc.home_room_id = room.clone();
+                            } else if self.dungeon.graph.room_by_id(&enc.home_room_id).is_none() {
+                                enc.home_room_id = fallback_room.clone();
+                            }
+                            enc.id = uuid::Uuid::new_v4().to_string();
+                            self.dungeon.encounters.push(enc);
+                        }
+                        // Merge custom monsters, skipping duplicates by id
+                        let existing_ids: std::collections::HashSet<String> = self.dungeon.custom_monsters.iter()
+                            .map(|cm| cm.id.clone()).collect();
+                        for cm in data.custom_monsters {
+                            if !existing_ids.contains(&cm.id) {
+                                self.dungeon.custom_monsters.push(cm);
+                            }
+                        }
+                    }
+                    FileOpResult::ImportedEncounters(Err(e)) => eprintln!("Encounter import error: {}", e),
+                    FileOpResult::ExportedCreatures(Ok(())) => {}
+                    FileOpResult::ExportedCreatures(Err(e)) => eprintln!("Creature export error: {}", e),
+                    FileOpResult::ImportedCreatures(Ok(creatures)) => {
+                        let existing_ids: std::collections::HashSet<String> = self.dungeon.custom_monsters.iter()
+                            .map(|cm| cm.id.clone()).collect();
+                        for cm in creatures {
+                            if !existing_ids.contains(&cm.id) {
+                                self.dungeon.custom_monsters.push(cm);
+                            }
+                        }
+                    }
+                    FileOpResult::ImportedCreatures(Err(e)) => eprintln!("Creature import error: {}", e),
                     FileOpResult::Cancelled => {}
                 }
                 self.pending_file_op = None;
             }
         }
+
+        // Pre-warm render caches for all views (debounced, runs before UI so status bar sees pending state)
+        self.prewarm_render_caches(ctx);
 
         // Global keys: Ctrl+Z undo, Ctrl+Y / Ctrl+Shift+Z redo, Ctrl+S save
         let (undo_pressed, redo_pressed, save_pressed) = ctx.input(|i| {
@@ -696,9 +765,24 @@ impl eframe::App for DungeonApp {
                     Tab::Styled => self.styled_state.view.zoom,
                 }
             };
+            // Compute loading/rendering status for status bar
+            let mut stale_renders: Vec<&str> = Vec::new();
+            if self.pending_monster_db.is_some() {
+                stale_renders.push("Bestiary");
+            }
+            if let Some(layout) = &self.dungeon.layout {
+                let enc_hash = crate::ui::encounters_view::render_cache_hash(layout, &self.dungeon.graph, &self.dungeon.theme);
+                if !self.encounters_state.render_cache.is_current(enc_hash) { stale_renders.push("Encounters"); }
+                let pres_hash = crate::ui::presentation_view::render_cache_hash(layout, &self.dungeon.theme);
+                if !self.presentation_view_state.render_cache.is_current(pres_hash) { stale_renders.push("Presentation"); }
+                let styled_hash = crate::ui::styled_view::render_cache_hash(layout, &self.dungeon.graph, &self.dungeon.theme, self.styled_state.show_grid, self.styled_state.current_floor);
+                if !self.styled_state.render_cache.is_current(styled_hash) { stale_renders.push("Styled"); }
+                let decor_hash = crate::ui::decor_view::render_cache_hash(layout, &self.dungeon.graph, &self.dungeon.theme, self.decor_state.current_floor);
+                if !self.decor_state.render_cache.is_current(decor_hash) { stale_renders.push("Decor"); }
+            }
             ui.horizontal(|ui| {
                 let saved = self.history.committed_hash() == self.last_saved_hash;
-                crate::ui::status_bar::status_bar(ui, &self.dungeon, zoom, saved);
+                crate::ui::status_bar::status_bar(ui, &self.dungeon, zoom, saved, &stale_renders);
                 if self.presenting {
                     ui.separator();
                     if let Some(server) = &self.server {
@@ -822,6 +906,37 @@ impl eframe::App for DungeonApp {
                                     &mut self.combat_stats_cache,
                                     &mut self.encounters_state,
                                 );
+                                // Dispatch encounter/creature file ops
+                                if let Some(req) = self.encounters_state.file_request.take() {
+                                    if self.pending_file_op.is_none() {
+                                        use encounters_view::EncounterFileRequest;
+                                        self.pending_file_op = Some(match req {
+                                            EncounterFileRequest::ExportEncounter(idx) => {
+                                                let slice = if idx < self.dungeon.encounters.len() {
+                                                    &self.dungeon.encounters[idx..idx+1]
+                                                } else {
+                                                    &[]
+                                                };
+                                                crate::io::save_load::export_encounters_async(
+                                                    slice,
+                                                    &self.dungeon.custom_monsters,
+                                                )
+                                            }
+                                            EncounterFileRequest::ImportEncounters { target_room } => {
+                                                self.encounters_state.import_target_room = target_room;
+                                                crate::io::save_load::import_encounters_async()
+                                            }
+                                            EncounterFileRequest::ExportCreatures => {
+                                                crate::io::save_load::export_creatures_async(
+                                                    &self.dungeon.custom_monsters,
+                                                )
+                                            }
+                                            EncounterFileRequest::ImportCreatures => {
+                                                crate::io::save_load::import_creatures_async()
+                                            }
+                                        });
+                                    }
+                                }
                             }
                             Tab::Styled => {
                                 styled_view::styled_sidebar(
@@ -1010,6 +1125,115 @@ impl eframe::App for DungeonApp {
                     },
                 );
             }
+        }
+    }
+}
+
+impl DungeonApp {
+    /// Pre-warm render caches for all views in the background.
+    /// Uses debouncing: only triggers builds after the dungeon hash has been stable for 500ms.
+    fn prewarm_render_caches(&mut self, ctx: &egui::Context) {
+        use crate::render::themed::RenderOptions;
+
+        let Some(layout) = &self.dungeon.layout else { return };
+
+        // Compute a simple hash of things that affect renders
+        let prewarm_hash = {
+            use std::hash::{Hash, Hasher};
+            use std::collections::hash_map::DefaultHasher;
+            let mut h = DefaultHasher::new();
+            layout.rooms.len().hash(&mut h);
+            self.dungeon.theme.wall_color.hash(&mut h);
+            self.dungeon.theme.floor_color.hash(&mut h);
+            self.dungeon.theme.bg_color.hash(&mut h);
+            self.dungeon.graph.rooms.len().hash(&mut h);
+            for r in &self.dungeon.graph.rooms {
+                r.decor.len().hash(&mut h);
+            }
+            h.finish()
+        };
+
+        // Debounce: track when the hash last changed
+        let immediate = self.prewarm_immediate;
+        if prewarm_hash != self.last_prewarm_hash {
+            self.last_prewarm_hash = prewarm_hash;
+            self.prewarm_hash_changed_at = std::time::Instant::now();
+            if !immediate {
+                return; // Don't trigger builds yet (unless immediate flag is set)
+            }
+        }
+
+        // Wait 500ms after last change (unless immediate)
+        if !immediate && self.prewarm_hash_changed_at.elapsed() < std::time::Duration::from_millis(500) {
+            return;
+        }
+        self.prewarm_immediate = false;
+
+        // Poll all caches for completed builds
+        self.encounters_state.render_cache.poll();
+        self.styled_state.render_cache.poll();
+        self.decor_state.render_cache.poll();
+        self.presentation_view_state.render_cache.poll();
+        self.player_view_state.render_cache.poll();
+
+        // Trigger builds for stale caches (one at a time to avoid thread spam)
+        let layout = layout.clone();
+        let graph = &self.dungeon.graph;
+        let theme = &self.dungeon.theme;
+
+        // Encounters view cache
+        let enc_hash = crate::ui::encounters_view::render_cache_hash(&layout, graph, theme);
+        if !self.encounters_state.render_cache.is_current(enc_hash)
+            && self.encounters_state.render_cache.pending_label().is_none()
+        {
+            self.encounters_state.render_cache.ensure(
+                enc_hash, graph, &layout, theme,
+                RenderOptions { show_grid: true, show_labels: true, show_notes: false, show_secrets: false, show_decor: true },
+                "Encounters",
+            );
+            ctx.request_repaint();
+            return;
+        }
+
+        // Presentation view cache
+        let pres_hash = crate::ui::presentation_view::render_cache_hash(&layout, theme);
+        if !self.presentation_view_state.render_cache.is_current(pres_hash)
+            && self.presentation_view_state.render_cache.pending_label().is_none()
+        {
+            self.presentation_view_state.render_cache.ensure(
+                pres_hash, graph, &layout, theme,
+                RenderOptions { show_grid: true, show_labels: true, show_notes: true, show_secrets: true, show_decor: true },
+                "Presentation",
+            );
+            ctx.request_repaint();
+            return;
+        }
+
+        // Styled view cache
+        let styled_hash = crate::ui::styled_view::render_cache_hash(&layout, graph, theme, self.styled_state.show_grid, self.styled_state.current_floor);
+        if !self.styled_state.render_cache.is_current(styled_hash)
+            && self.styled_state.render_cache.pending_label().is_none()
+        {
+            self.styled_state.render_cache.ensure(
+                styled_hash, graph, &layout, theme,
+                RenderOptions { show_grid: self.styled_state.show_grid, show_labels: true, show_notes: true, show_secrets: true, show_decor: true },
+                "Styled",
+            );
+            ctx.request_repaint();
+            return;
+        }
+
+        // Decor view cache
+        let decor_hash = crate::ui::decor_view::render_cache_hash(&layout, graph, theme, self.decor_state.current_floor);
+        if !self.decor_state.render_cache.is_current(decor_hash)
+            && self.decor_state.render_cache.pending_label().is_none()
+        {
+            self.decor_state.render_cache.ensure(
+                decor_hash, graph, &layout, theme,
+                RenderOptions { show_grid: true, show_labels: true, show_notes: false, show_secrets: false, show_decor: false },
+                "Decor",
+            );
+            ctx.request_repaint();
         }
     }
 }

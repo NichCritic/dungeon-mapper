@@ -2,6 +2,16 @@ use serde::{Deserialize, Serialize};
 
 use super::{Annotation, CustomMonster, DungeonGraph, Encounter, PlayerCharacter, SpatialLayout, Theme};
 
+/// A light source placed in a room.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LightSource {
+    pub id: String,
+    pub room_id: String,
+    pub radius: f32,
+    pub intensity: f32,
+    pub color: [u8; 3],
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Dungeon {
     pub name: String,
@@ -19,6 +29,12 @@ pub struct Dungeon {
     /// Issue annotations pinned to map locations.
     #[serde(default)]
     pub annotations: Vec<Annotation>,
+    /// Placeable light sources for the player view.
+    #[serde(default)]
+    pub light_sources: Vec<LightSource>,
+    /// Ambient light level (0.0 = dark, 1.0 = fully lit).
+    #[serde(default)]
+    pub ambient_light: f32,
 }
 
 impl Dungeon {
@@ -32,6 +48,8 @@ impl Dungeon {
             custom_monsters: Vec::new(),
             party: Vec::new(),
             annotations: Vec::new(),
+            light_sources: Vec::new(),
+            ambient_light: 0.0,
         }
     }
 }

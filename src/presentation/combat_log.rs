@@ -1,4 +1,5 @@
 use super::dice::AttackResult;
+use crate::model::combat_stats::ParsedAttack;
 
 /// A single line in the combat log.
 pub struct LogEntry {
@@ -32,8 +33,8 @@ impl CombatLog {
         self.entries.push(LogEntry { text, color });
     }
 
-    /// Log an attack result.
-    pub fn log_attack(&mut self, attacker: &str, target: &str, attack_name: &str, result: &AttackResult) {
+    /// Log an attack result, including any additional effects from the attack.
+    pub fn log_attack(&mut self, attacker: &str, target: &str, attack_name: &str, result: &AttackResult, attack: Option<&ParsedAttack>) {
         // Attack roll line
         let roll_text = format!(
             "{} attacks {} with {} - d20({}) + bonus = {} vs AC",
@@ -65,6 +66,12 @@ impl CombatLog {
                     format!("    + {} {} damage [{}]", extra.total, dtype, rolls_str.join(", ")),
                     COLOR_HIT,
                 );
+            }
+            // Log additional effects on hit
+            if let Some(atk) = attack {
+                if !atk.effect.is_empty() {
+                    self.log(format!("  Effect: {}", atk.effect), COLOR_GOLD);
+                }
             }
         } else {
             self.log(format!("  MISS!"), COLOR_MISS);

@@ -19,6 +19,8 @@ pub struct ParsedAttack {
     pub damage_avg: f32,
     pub damage_type: String,
     pub extra_damage: Vec<DamageRider>,
+    /// Additional effect text (saving throws, conditions, etc.) after damage.
+    pub effect: String,
 }
 
 /// Additional damage on an attack (e.g. "plus 7 (2d6) fire damage").
@@ -148,6 +150,23 @@ fn parse_attack(name: &str, text: &str) -> Option<ParsedAttack> {
     // Determine attack type from presence of reach/range
     let attack_type = if range.is_some() { "rw" } else { "mw" }.to_string();
 
+    // Capture additional effect text after the last "damage" mention
+    let effect = {
+        // Find the end of the last damage clause
+        let mut last_damage_end = 0;
+        for m in Regex::new(r"\w+ damage").unwrap().find_iter(text) {
+            last_damage_end = m.end();
+        }
+        if last_damage_end > 0 && last_damage_end < text.len() {
+            let remainder = text[last_damage_end..].trim();
+            // Strip leading punctuation
+            let remainder = remainder.trim_start_matches(|c: char| c == '.' || c == ',' || c.is_whitespace());
+            if remainder.is_empty() { String::new() } else { remainder.to_string() }
+        } else {
+            String::new()
+        }
+    };
+
     Some(ParsedAttack {
         name: name.to_string(),
         attack_type,
@@ -158,6 +177,7 @@ fn parse_attack(name: &str, text: &str) -> Option<ParsedAttack> {
         damage_avg,
         damage_type,
         extra_damage,
+        effect,
     })
 }
 

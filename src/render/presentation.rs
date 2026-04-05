@@ -1,9 +1,9 @@
 use std::collections::HashSet;
 
 use crate::model::*;
-use crate::presentation::{PresentationState, Visibility};
-use crate::presentation::fog::corridor_visibility;
-use crate::presentation::lighting::compute_brightness;
+use crate::presentation::{PresentationState, PresentationSnapshot, Visibility, VisibilityProvider};
+use crate::presentation::fog::{corridor_visibility, corridor_visibility_generic};
+use crate::presentation::lighting::compute_brightness_generic;
 use crate::render::themed::*;
 use crate::render::traits::MapRenderer;
 use crate::util::GRID_PX;
@@ -32,7 +32,7 @@ fn blend_toward(color: [u8; 4], bg: [u8; 4], ratio: f32) -> [u8; 4] {
 fn build_visible_floor_set(
     layout: &SpatialLayout,
     graph: &DungeonGraph,
-    presentation: &PresentationState,
+    presentation: &dyn VisibilityProvider,
 ) -> HashSet<(i32, i32)> {
     let mut floor: HashSet<(i32, i32)> = HashSet::new();
 
@@ -89,7 +89,7 @@ fn build_visible_floor_set(
     }
 
     for corridor in &layout.corridors {
-        let vis = corridor_visibility(&corridor.connection_id, presentation, graph);
+        let vis = corridor_visibility_generic(&corridor.connection_id, presentation, graph);
         if vis == Visibility::Hidden { continue; }
         let cw = corridor.width as i32;
         let half = cw / 2;
@@ -116,6 +116,35 @@ pub fn render_player_view(
     layout: &SpatialLayout,
     theme: &Theme,
     presentation: &PresentationState,
+    light_sources: &[crate::model::LightSource],
+    ambient_light: f32,
+    options: &RenderOptions,
+) {
+    render_player_view_generic(renderer, graph, layout, theme, presentation, light_sources, ambient_light, options);
+}
+
+/// Render the player-facing view from a snapshot (for background threads).
+pub fn render_player_view_snapshot(
+    renderer: &mut dyn MapRenderer,
+    graph: &DungeonGraph,
+    layout: &SpatialLayout,
+    theme: &Theme,
+    snapshot: &PresentationSnapshot,
+    light_sources: &[crate::model::LightSource],
+    ambient_light: f32,
+    options: &RenderOptions,
+) {
+    render_player_view_generic(renderer, graph, layout, theme, snapshot, light_sources, ambient_light, options);
+}
+
+fn render_player_view_generic(
+    renderer: &mut dyn MapRenderer,
+    graph: &DungeonGraph,
+    layout: &SpatialLayout,
+    theme: &Theme,
+    presentation: &dyn VisibilityProvider,
+    light_sources: &[crate::model::LightSource],
+    ambient_light: f32,
     options: &RenderOptions,
 ) {
     let dim_ratio = 0.4;
@@ -158,7 +187,7 @@ pub fn render_player_view(
 
     // Corridor floors
     for corridor in &layout.corridors {
-        let vis = corridor_visibility(&corridor.connection_id, presentation, graph);
+        let vis = corridor_visibility_generic(&corridor.connection_id, presentation, graph);
         match vis {
             Visibility::Hidden => continue,
             Visibility::Explored => {
@@ -173,7 +202,7 @@ pub fn render_player_view(
     // Corridor chamfers
     if theme.corridor_chamfer != ChamferStyle::Sharp {
         for corridor in &layout.corridors {
-            let vis = corridor_visibility(&corridor.connection_id, presentation, graph);
+            let vis = corridor_visibility_generic(&corridor.connection_id, presentation, graph);
             if vis == Visibility::Hidden { continue; }
             render_corridor_chamfers(renderer, corridor, theme);
         }
@@ -220,7 +249,7 @@ pub fn render_player_view(
     // Corridor walls
     let cave_cells = build_cave_cell_set(layout, graph);
     for corridor in &layout.corridors {
-        let vis = corridor_visibility(&corridor.connection_id, presentation, graph);
+        let vis = corridor_visibility_generic(&corridor.connection_id, presentation, graph);
         if vis == Visibility::Hidden { continue; }
         if vis == Visibility::Explored {
             let dimmed_theme = Theme {
@@ -234,7 +263,7 @@ pub fn render_player_view(
     }
 
     // Doors (only on visible/explored corridors)
-    render_doors_filtered(renderer, graph, layout, theme, presentation);
+    render_doors_filtered_generic(renderer, graph, layout, theme, presentation);
 
     // Labels only on visible rooms
     if options.show_labels {
@@ -251,32 +280,24 @@ pub fn render_player_view(
     }
 
     // Lighting brightness overlay
-    if !presentation.light_sources.is_empty() {
-        render_lighting_overlay(renderer, layout, presentation, &visible_floor);
+    if !light_sources.is_empty() {
+        render_lighting_overlay_generic(renderer, layout, light_sources, ambient_light, &visible_floor);
     }
 }
 
-/// Render doors when at least one endpoint room is not hidden (unless secret).
-fn render_doors_filtered(
+fn render_doors_filtered_generic(
     renderer: &mut dyn MapRenderer,
     graph: &DungeonGraph,
     layout: &SpatialLayout,
     theme: &Theme,
-    presentation: &PresentationState,
+    presentation: &dyn VisibilityProvider,
 ) {
     for edge in &graph.connections {
-        // Never show secrets to players
-        if edge.connection.connection_type == ConnectionType::Secret {
-            continue;
-        }
-        if edge.connection.connection_type == ConnectionType::Open {
-            continue;
-        }
-        // Show door if either endpoint room is visible or explored
+        if edge.connection.connection_type == ConnectionType::Secret { continue; }
+        if edge.connection.connection_type == ConnectionType::Open { continue; }
         let src_vis = presentation.room_visibility(&edge.source_room_id);
         let tgt_vis = presentation.room_visibility(&edge.target_room_id);
-        let any_room_shown = *src_vis != Visibility::Hidden || *tgt_vis != Visibility::Hidden;
-        if !any_room_shown { continue; }
+        if *src_vis == Visibility::Hidden && *tgt_vis == Visibility::Hidden { continue; }
 
         let corridor = layout.corridors.iter().find(|c| c.connection_id == edge.connection.id);
         let Some(corridor) = corridor else { continue };
@@ -284,29 +305,20 @@ fn render_doors_filtered(
 
         let dw = edge.connection.door_width() as f32;
         let door_depth = 0.3;
-
         let room_ids = [&edge.source_room_id, &edge.target_room_id];
         let wp_ends = [&corridor.waypoints[0], corridor.waypoints.last().unwrap()];
-
-        let corr_vis = corridor_visibility(&edge.connection.id, presentation, graph);
+        let corr_vis = corridor_visibility_generic(&edge.connection.id, presentation, graph);
         let exits = [edge.source_exit.as_ref(), edge.target_exit.as_ref()];
 
         for ((room_id, wp), exit) in room_ids.iter().zip(wp_ends.iter()).zip(exits.iter()) {
-            // Skip drawing door on cave room walls
-            let is_cave = graph.room_by_id(room_id)
-                .is_some_and(|r| r.shape == RoomShape::Cave);
+            let is_cave = graph.room_by_id(room_id).is_some_and(|r| r.shape == RoomShape::Cave);
             if is_cave { continue; }
-            // Draw door on this room's wall if:
-            // - the room itself is shown, OR
-            // - the corridor is visible (door open + other room shown),
-            //   so the player can see down the hall to this door
             let room_shown = *presentation.room_visibility(room_id) != Visibility::Hidden;
             let corridor_shown = corr_vis != Visibility::Hidden;
             if !room_shown && !corridor_shown { continue; }
             let Some(rl) = layout.room_by_id(room_id) else { continue };
 
             let (dx1, dy1, dx2, dy2) = crate::render::themed::door_rect(rl, wp, *exit, dw, door_depth);
-
             let px = dx1 * GRID_PX;
             let py = dy1 * GRID_PX;
             let pw = (dx2 - dx1) * GRID_PX;
@@ -331,17 +343,17 @@ fn render_doors_filtered(
     }
 }
 
-/// Apply lighting brightness overlay on visible floor cells.
-fn render_lighting_overlay(
+fn render_lighting_overlay_generic(
     renderer: &mut dyn MapRenderer,
     layout: &SpatialLayout,
-    presentation: &PresentationState,
+    light_sources: &[crate::model::LightSource],
+    ambient_light: f32,
     visible_floor: &HashSet<(i32, i32)>,
 ) {
     for &(fx, fy) in visible_floor {
         let cell_cx = fx as f32 + 0.5;
         let cell_cy = fy as f32 + 0.5;
-        let brightness = compute_brightness(cell_cx, cell_cy, presentation, layout);
+        let brightness = compute_brightness_generic(cell_cx, cell_cy, light_sources, ambient_light, layout);
         if brightness < 1.0 {
             let alpha = ((1.0 - brightness) * 180.0) as u8;
             let px = fx as f32 * GRID_PX;
@@ -360,7 +372,7 @@ pub fn render_dm_overlay(
     presentation: &PresentationState,
 ) {
     let graph = &dungeon.graph;
-    // Room overlays (derived visibility)
+    // Room visibility overlays
     for rl in &layout.rooms {
         let vis = presentation.room_visibility(&rl.room_id);
         let alpha = match vis {
@@ -369,15 +381,15 @@ pub fn render_dm_overlay(
             Visibility::Visible => 0,
         };
 
+        let min = transform.world_to_screen(egui::pos2(
+            rl.x as f32 * GRID_PX,
+            rl.y as f32 * GRID_PX,
+        ));
+        let max = transform.world_to_screen(egui::pos2(
+            (rl.x + rl.width as i32) as f32 * GRID_PX,
+            (rl.y + rl.height as i32) as f32 * GRID_PX,
+        ));
         if alpha > 0 {
-            let min = transform.world_to_screen(egui::pos2(
-                rl.x as f32 * GRID_PX,
-                rl.y as f32 * GRID_PX,
-            ));
-            let max = transform.world_to_screen(egui::pos2(
-                (rl.x + rl.width as i32) as f32 * GRID_PX,
-                (rl.y + rl.height as i32) as f32 * GRID_PX,
-            ));
             painter.rect_filled(
                 egui::Rect::from_min_max(min, max),
                 0.0,
@@ -408,7 +420,7 @@ pub fn render_dm_overlay(
         );
     }
 
-    // Corridor overlays (direct doorway visibility)
+    // Corridor visibility overlays
     for corridor in &layout.corridors {
         let vis = corridor_visibility(&corridor.connection_id, presentation, graph);
         let alpha = match vis {
@@ -460,19 +472,25 @@ pub fn render_dm_overlay(
             let offset_y = (j as f32 - (encounters.len() as f32 - 1.0) / 2.0) * 12.0 * transform.zoom;
             let pos = screen + egui::vec2(0.0, 16.0 * transform.zoom + offset_y);
 
-            let (marker, color) = match enc.encounter_type {
-                crate::model::EncounterType::Static => {
-                    ("S", egui::Color32::from_rgb(255, 80, 80))
-                }
-                crate::model::EncounterType::Wandering(_) => {
-                    ("W", egui::Color32::from_rgb(255, 160, 40))
+            let is_defeated = presentation.defeated_encounters.contains(&enc.id);
+            let color = if is_defeated {
+                egui::Color32::from_rgb(120, 120, 120)
+            } else if enc.is_hazard() {
+                egui::Color32::from_rgb(160, 80, 255)
+            } else {
+                match enc.encounter_type {
+                    crate::model::EncounterType::Static => egui::Color32::from_rgb(255, 80, 80),
+                    crate::model::EncounterType::Wandering(_) => egui::Color32::from_rgb(255, 160, 40),
                 }
             };
 
             let text_size = 8.0 * transform.zoom;
-            let display = format!("{} {}", marker, truncate_name(&enc.name, 6));
+            let display = if is_defeated {
+                format!("{} (dead)", truncate_name(&enc.name, 6))
+            } else {
+                truncate_name(&enc.name, 8)
+            };
 
-            // Background pill sized to text
             let galley = painter.layout_no_wrap(
                 display.clone(),
                 egui::FontId::monospace(text_size),
@@ -525,7 +543,7 @@ pub fn render_dm_overlay(
     }
 
     // Light source indicators
-    for light in &presentation.light_sources {
+    for light in &dungeon.light_sources {
         let Some(rl) = layout.room_by_id(&light.room_id) else { continue };
         let cx = (rl.x as f32 + rl.width as f32 / 2.0) * GRID_PX;
         let cy = (rl.y as f32 + rl.height as f32 / 2.0) * GRID_PX;

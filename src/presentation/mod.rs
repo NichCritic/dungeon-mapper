@@ -16,13 +16,27 @@ pub enum Visibility {
     Visible,
 }
 
-#[derive(Clone, Debug)]
-pub struct LightSource {
-    pub id: String,
-    pub room_id: String,
-    pub radius: f32,
-    pub intensity: f32,
-    pub color: [u8; 3],
+/// Trait for types that provide visibility info needed by the renderer.
+pub trait VisibilityProvider {
+    fn room_visibility(&self, room_id: &str) -> &Visibility;
+    fn is_door_open(&self, conn_id: &str) -> bool;
+}
+
+/// Lightweight, Clone-able snapshot of the presentation state needed for rendering.
+/// Used to send to background render threads without cloning CombatTracker.
+#[derive(Clone)]
+pub struct PresentationSnapshot {
+    pub room_visibility: HashMap<String, Visibility>,
+    pub doors_open: HashSet<String>,
+}
+
+impl VisibilityProvider for PresentationSnapshot {
+    fn room_visibility(&self, room_id: &str) -> &Visibility {
+        self.room_visibility.get(room_id).unwrap_or(&Visibility::Hidden)
+    }
+    fn is_door_open(&self, conn_id: &str) -> bool {
+        self.doors_open.contains(conn_id)
+    }
 }
 
 pub struct PresentationState {
@@ -32,8 +46,6 @@ pub struct PresentationState {
     /// corridor is visible to players (if at least one endpoint room is
     /// not Hidden).
     pub doors_open: HashSet<String>,
-    pub light_sources: Vec<LightSource>,
-    pub ambient_light: f32,
     /// Whether room labels are shown in the player view.
     pub show_labels_player: bool,
     /// Runtime positions of encounters: encounter_id -> current_room_id.
@@ -43,6 +55,10 @@ pub struct PresentationState {
     pub combat_tracker: Option<combat_tracker::CombatTracker>,
     /// Which room the party token is in (None = not shown).
     pub party_room: Option<String>,
+    /// Encounter IDs that have been wiped out (all monsters dead in sim).
+    pub defeated_encounters: HashSet<String>,
+    /// When true, encounters sharing a room after a tick automatically fight (FFA).
+    pub autobattle: bool,
 }
 
 impl PresentationState {
@@ -58,12 +74,12 @@ impl PresentationState {
         Self {
             room_visibility,
             doors_open: HashSet::new(),
-            light_sources: Vec::new(),
-            ambient_light: 0.0,
             show_labels_player: false,
             encounter_positions,
             combat_tracker: None,
             party_room: None,
+            defeated_encounters: HashSet::new(),
+            autobattle: false,
         }
     }
 
@@ -74,7 +90,18 @@ impl PresentationState {
     pub fn is_door_open(&self, connection_id: &str) -> bool {
         self.doors_open.contains(connection_id)
     }
+}
 
+impl VisibilityProvider for PresentationState {
+    fn room_visibility(&self, room_id: &str) -> &Visibility {
+        self.room_visibility.get(room_id).unwrap_or(&Visibility::Hidden)
+    }
+    fn is_door_open(&self, conn_id: &str) -> bool {
+        self.doors_open.contains(conn_id)
+    }
+}
+
+impl PresentationState {
     /// Get current room for an encounter (falls back to home room).
     pub fn encounter_room<'a>(&'a self, encounter: &'a crate::model::Encounter) -> &'a str {
         self.encounter_positions
@@ -90,6 +117,9 @@ impl PresentationState {
         let mut rng = rand::thread_rng();
 
         for encounter in &dungeon.encounters {
+            if self.defeated_encounters.contains(&encounter.id) {
+                continue;
+            }
             let EncounterType::Wandering(range) = encounter.encounter_type else {
                 continue;
             };
@@ -209,6 +239,8 @@ mod tests {
             custom_monsters: Vec::new(),
             party: Vec::new(),
             annotations: Vec::new(),
+            light_sources: Vec::new(),
+            ambient_light: 0.0,
         }
     }
 
