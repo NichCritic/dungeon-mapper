@@ -29,6 +29,8 @@ pub struct DecorViewState {
     drag_select_start: Option<egui::Pos2>,
     /// Search filter for decor type dropdowns.
     pub decor_search: String,
+    /// Whether the object browser panel is open.
+    pub object_browser_open: bool,
 }
 
 impl Default for DecorViewState {
@@ -45,6 +47,7 @@ impl Default for DecorViewState {
             selected_decor_set: std::collections::HashSet::new(),
             drag_select_start: None,
             decor_search: String::new(),
+            object_browser_open: false,
         }
     }
 }
@@ -483,6 +486,115 @@ pub fn decor_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut DecorVie
 }
 
 pub fn decor_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut DecorViewState) {
+    // Object browser (shown when open, replaces other sidebar content)
+    if state.object_browser_open {
+        // Paint floor color as background for the entire browser area
+        let fc = dungeon.theme.floor_color;
+        let floor_bg = egui::Color32::from_rgba_unmultiplied(fc[0], fc[1], fc[2], fc[3]);
+        let browser_rect = ui.available_rect_before_wrap();
+        ui.painter().rect_filled(browser_rect, 0.0, floor_bg);
+
+        ui.heading("Object Browser");
+        ui.separator();
+
+        if ui.small_button("Close Browser").clicked() {
+            state.object_browser_open = false;
+            state.decor_search.clear();
+            return;
+        }
+
+        ui.add_space(4.0);
+
+        // Search field
+        let search_response = ui.add(
+            egui::TextEdit::singleline(&mut state.decor_search)
+                .hint_text("Search objects...")
+                .desired_width(ui.available_width()),
+        );
+        // Auto-focus the search field when browser opens
+        if search_response.gained_focus() || !search_response.lost_focus() {
+            search_response.request_focus();
+        }
+
+        ui.add_space(4.0);
+
+        if state.place_mode {
+            ui.colored_label(
+                egui::Color32::from_rgb(100, 255, 100),
+                format!("Placing: {}", state.place_type.label()),
+            );
+            if ui.small_button("Stop Placing").clicked() {
+                state.place_mode = false;
+            }
+            ui.add_space(4.0);
+        }
+
+        let filter = state.decor_search.to_lowercase();
+        let wall_color = dungeon.theme.wall_color;
+        let preview_color = egui::Color32::from_rgb(wall_color[0], wall_color[1], wall_color[2]);
+        let available_width = ui.available_width();
+
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for dt in DecorType::ALL {
+                if !filter.is_empty() && !dt.label().to_lowercase().contains(&filter) {
+                    continue;
+                }
+
+                let is_active = state.place_mode && state.place_type == dt;
+                let frame = if is_active {
+                    egui::Frame::NONE
+                        .inner_margin(6.0)
+                        .stroke(egui::Stroke::new(1.5, egui::Color32::from_rgb(100, 255, 100)))
+                        .corner_radius(4.0)
+                        .fill(egui::Color32::from_rgba_unmultiplied(100, 255, 100, 15))
+                } else {
+                    egui::Frame::NONE
+                        .inner_margin(6.0)
+                        .corner_radius(4.0)
+                };
+
+                let resp = frame.show(ui, |ui| {
+                    ui.set_min_width(available_width - 16.0);
+                    ui.horizontal(|ui| {
+                        // Preview icon
+                        let (icon_rect, _) = ui.allocate_exact_size(
+                            egui::vec2(28.0, 28.0),
+                            egui::Sense::hover(),
+                        );
+                        draw_decor_symbol(
+                            ui.painter(),
+                            icon_rect.center(),
+                            10.0,
+                            0.0,
+                            dt,
+                            preview_color,
+                        );
+
+                        ui.label(dt.label());
+                    });
+                }).response;
+
+                if resp.interact(egui::Sense::click()).clicked() {
+                    state.place_type = dt;
+                    state.place_mode = true;
+                    state.selected_decor = None;
+                }
+
+                if resp.interact(egui::Sense::hover()).hovered() && !is_active {
+                    ui.painter().rect_stroke(
+                        resp.rect,
+                        4.0,
+                        egui::Stroke::new(1.0, egui::Color32::from_rgb(100, 180, 255)),
+                        egui::StrokeKind::Middle,
+                    );
+                }
+            }
+        });
+
+        // Skip the rest of sidebar when browser is open
+        return;
+    }
+
     if let Some(ref sel_room_id) = state.selected_room.clone() {
         let room_label = dungeon.graph.room_by_id(sel_room_id)
             .map(|r| r.label.clone())
@@ -499,14 +611,21 @@ pub fn decor_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Decor
 
         ui.add_space(8.0);
 
-        // Place mode toggle
-        ui.horizontal(|ui| {
-            ui.label("Place:");
-            decor_type_combo(ui, "decor_place_type", &mut state.place_type, &mut state.decor_search);
-        });
-        let place_label = if state.place_mode { "Stop Placing" } else { "Start Placing" };
-        if ui.button(place_label).clicked() {
-            state.place_mode = !state.place_mode;
+        // Object browser button + current placement status
+        if ui.button("Object Browser").clicked() {
+            state.object_browser_open = true;
+            state.decor_search.clear();
+        }
+        if state.place_mode {
+            ui.horizontal(|ui| {
+                ui.colored_label(
+                    egui::Color32::from_rgb(100, 255, 100),
+                    format!("Placing: {}", state.place_type.label()),
+                );
+                if ui.small_button("Stop").clicked() {
+                    state.place_mode = false;
+                }
+            });
         }
 
         ui.add_space(8.0);
@@ -518,7 +637,7 @@ pub fn decor_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Decor
             .unwrap_or(0);
 
         if decor_count == 0 {
-            ui.label("No decorations. Use 'Start Placing' to add items.");
+            ui.label("No decorations. Use the Object Browser to add items.");
         } else {
             ui.label(format!("{} decoration(s):", decor_count));
             ui.add_space(4.0);
@@ -594,7 +713,15 @@ pub fn decor_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Decor
     } else {
         ui.heading("Decorations");
         ui.separator();
-        ui.label("Select a room on the map to edit its decorations.");
+
+        // Object browser button available even without room selected
+        if ui.button("Object Browser").clicked() {
+            state.object_browser_open = true;
+            state.decor_search.clear();
+        }
+
+        ui.add_space(8.0);
+        ui.label("Select a room on the map to place decorations.");
 
         ui.add_space(12.0);
 
