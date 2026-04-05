@@ -21,6 +21,8 @@ pub fn status_bar(ui: &mut egui::Ui, dungeon: &Dungeon, zoom: f32, saved: bool, 
             );
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.colored_label(egui::Color32::from_rgb(130, 130, 130), "F8: Help");
+            ui.separator();
             ui.label(format!("Zoom: {:.0}%", zoom * 100.0));
         });
     });

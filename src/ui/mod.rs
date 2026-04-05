@@ -1,4 +1,5 @@
 pub mod annotations;
+pub mod help_overlay;
 pub mod canvas_common;
 pub mod decor_view;
 pub mod encounters_view;

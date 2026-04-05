@@ -17,12 +17,12 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1200.0, 800.0])
-            .with_title("Dungeon Drafter"),
+            .with_title("Dungeon Mapper"),
         ..Default::default()
     };
 
     eframe::run_native(
-        "Dungeon Drafter",
+        "Dungeon Mapper",
         options,
         Box::new(|cc| {
             egui_extras::install_image_loaders(&cc.egui_ctx);

@@ -51,6 +51,8 @@ pub struct DungeonApp {
     // Annotation mode
     pub annotation_mode: bool,
     pub annotation_state: AnnotationModeState,
+    /// F8 help overlay mode.
+    pub help_mode: bool,
 
     /// Pending async file operation (save/load/export).
     pending_file_op: Option<std::sync::mpsc::Receiver<crate::io::save_load::FileOpResult>>,
@@ -121,6 +123,7 @@ impl Default for DungeonApp {
             last_server_push_hash: 0,
             annotation_mode: false,
             annotation_state: AnnotationModeState::default(),
+            help_mode: false,
             pending_file_op: None,
             pending_monster_db,
             history,
@@ -580,8 +583,16 @@ impl eframe::App for DungeonApp {
         let f7_pressed = ctx.input(|i| i.key_pressed(egui::Key::F7));
         if f7_pressed {
             self.annotation_mode = !self.annotation_mode;
+            self.help_mode = false;
             self.annotation_state.composing = None;
             self.annotation_state.viewing = None;
+        }
+
+        // Global key: F8 toggles help overlay
+        let f8_pressed = ctx.input(|i| i.key_pressed(egui::Key::F8));
+        if f8_pressed {
+            self.help_mode = !self.help_mode;
+            self.annotation_mode = false;
         }
 
         // Collect panel rects for annotation spotlight
@@ -1075,6 +1086,17 @@ impl eframe::App for DungeonApp {
             }
         }
 
+        // Help overlay (F8)
+        if self.help_mode {
+            let current_view = self.current_view_name();
+            crate::ui::help_overlay::help_overlay(
+                ctx,
+                &self.annotation_state.panel_rects,
+                &current_view,
+                self.presenting,
+            );
+        }
+
         // Track state changes for undo/redo
         let pointer_down = ctx.input(|i| i.pointer.any_down());
         self.history.track(&self.dungeon, pointer_down);
@@ -1113,7 +1135,7 @@ impl eframe::App for DungeonApp {
                 ctx.show_viewport_immediate(
                     egui::ViewportId::from_hash_of("player_viewport"),
                     egui::ViewportBuilder::default()
-                        .with_title("Dungeon Drafter - Player View")
+                        .with_title("Dungeon Mapper - Player View")
                         .with_inner_size([800.0, 600.0]),
                     |ctx, _class| {
                         player_view::player_viewport(
@@ -1246,7 +1268,7 @@ fn dump_annotations_file(annotations: &[crate::model::Annotation], dungeon: &Dun
     let unresolved: Vec<_> = annotations.iter().filter(|a| !a.resolved).collect();
 
     let mut contents = String::new();
-    contents.push_str("# Dungeon Drafter - Open Issues\n\n");
+    contents.push_str("# Dungeon Mapper - Open Issues\n\n");
     contents.push_str(&format!("Dungeon: {}\n\n", dungeon.name));
     if unresolved.is_empty() {
         contents.push_str("No open issues.\n");
