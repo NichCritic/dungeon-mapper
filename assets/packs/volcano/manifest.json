@@ -1,0 +1,91 @@
+{
+  "name": "Infernal Depths",
+  "description": "Scorched obsidian halls above churning magma",
+  "tile_size": 64,
+  "wall_face_height": 28,
+  "wall_face_width": 28,
+  "version": 2,
+  "layers": {
+    "floors": {
+      "description": "Base floor tiles, randomly selected per cell.",
+      "files": [
+        "floors/base_0.png",
+        "floors/base_1.png",
+        "floors/base_2.png",
+        "floors/base_3.png"
+      ],
+      "blend_mode": "opaque"
+    },
+    "variations": {
+      "description": "Alpha overlays for moss/frost/ember. Applied by proximity to features.",
+      "files": [
+        "variations/overlay_0.png",
+        "variations/overlay_1.png",
+        "variations/overlay_2.png",
+        "variations/overlay_3.png",
+        "variations/overlay_4.png",
+        "variations/overlay_5.png"
+      ],
+      "blend_mode": "alpha"
+    },
+    "cracks": {
+      "description": "Crack overlays, sparsely applied.",
+      "files": [
+        "cracks/crack_0.png",
+        "cracks/crack_1.png",
+        "cracks/crack_2.png"
+      ],
+      "blend_mode": "alpha"
+    },
+    "edges": {
+      "description": "Wall-proximity AO masks by direction.",
+      "files": {
+        "n": "edges/ao_n.png",
+        "s": "edges/ao_s.png",
+        "e": "edges/ao_e.png",
+        "w": "edges/ao_w.png",
+        "ne": "edges/ao_ne.png",
+        "nw": "edges/ao_nw.png",
+        "se": "edges/ao_se.png",
+        "sw": "edges/ao_sw.png"
+      },
+      "blend_mode": "alpha"
+    },
+    "walls": {
+      "description": "2.5D wall pieces. top = overhead view, face_s/face_e = visible depth faces, corners for joins.",
+      "files": {
+        "top": "walls/top.png",
+        "face_s": "walls/face_s.png",
+        "face_e": "walls/face_e.png",
+        "corner_outer": "walls/corner_outer.png",
+        "corner_inner": "walls/corner_inner.png"
+      },
+      "blend_mode": "opaque",
+      "note": "face_s is full_width x wall_face_height. face_e is wall_face_width x full_height. Renderer places these at cell edges."
+    },
+    "exterior": {
+      "description": "Void/exterior fill, tiled outside walls.",
+      "files": [
+        "exterior/void_0.png",
+        "exterior/void_1.png",
+        "exterior/void_2.png"
+      ],
+      "blend_mode": "opaque"
+    },
+    "grid": {
+      "description": "Subtle grid line overlay per cell.",
+      "files": [
+        "grid/grid.png"
+      ],
+      "blend_mode": "alpha"
+    },
+    "atmosphere": {
+      "description": "Light radial (4x tile size) and fog overlay.",
+      "files": {
+        "light": "atmosphere/light_radial.png",
+        "fog": "atmosphere/fog.png"
+      },
+      "blend_mode": "alpha"
+    }
+  }
+}
