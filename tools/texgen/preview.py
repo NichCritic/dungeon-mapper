@@ -164,9 +164,9 @@ THEMES = {
         'wall_top': (55, 50, 40),
         'wall_face_lit': (65, 60, 48),
         'wall_face_dark': (25, 22, 15),
-        'exterior': (22, 42, 18),
-        'exterior_accent': (12, 28, 10),
-        'exterior_detail': (30, 55, 22),
+        'exterior': (10, 22, 8),
+        'exterior_accent': (5, 12, 4),
+        'exterior_detail': (15, 30, 10),
         'shadow_color': (8, 12, 5),
         'stone_density': 0.7,
         'moss_coverage': 0.35,
@@ -182,9 +182,9 @@ THEMES = {
         'wall_top': (120, 135, 155),
         'wall_face_lit': (130, 148, 168),
         'wall_face_dark': (50, 65, 88),
-        'exterior': (38, 52, 72),
-        'exterior_accent': (22, 32, 52),
-        'exterior_detail': (50, 68, 90),
+        'exterior': (18, 28, 42),
+        'exterior_accent': (10, 16, 28),
+        'exterior_detail': (25, 38, 55),
         'shadow_color': (15, 22, 40),
         'stone_density': 0.6,
         'moss_coverage': 0.25,
@@ -200,9 +200,9 @@ THEMES = {
         'wall_top': (38, 28, 22),
         'wall_face_lit': (50, 38, 30),
         'wall_face_dark': (18, 12, 8),
-        'exterior': (18, 6, 4),
-        'exterior_accent': (55, 12, 4),
-        'exterior_detail': (80, 20, 8),
+        'exterior': (12, 4, 2),
+        'exterior_accent': (30, 8, 3),
+        'exterior_detail': (45, 12, 5),
         'shadow_color': (5, 2, 1),
         'stone_density': 1.0,
         'moss_coverage': 0.18,
@@ -215,48 +215,78 @@ THEMES = {
 # Continuous floor rendering (no tile stamping)
 # ---------------------------------------------------------------------------
 
-def render_continuous_floor(canvas_arr, floor_mask, theme):
-    """
-    Generate floor as one continuous image using multiple overlapping
-    Voronoi patterns at different scales for visual richness:
-    - Large flagstones (low density Voronoi)
-    - Medium block detail (higher density)
-    - Fine surface noise (fbm)
-    No tile boundaries, no duplicate tile problem.
-    """
-    print("    Floor (continuous)...", end='', flush=True)
+def generate_floor_tile(size, theme, seed):
+    """Generate a single unique floor tile on the fly."""
+    pn = VectorPerlinNoise(seed)
+    rng = np.random.RandomState(seed)
+
     base = np.array(theme['floor_base'], dtype=np.float64)
     accent = np.array(theme['floor_accent'], dtype=np.float64)
     mortar = np.array(theme['mortar'], dtype=np.float64)
+    n_cells = int(6 + rng.randint(6))  # 6-11 cells per tile for variety
+
+    # Voronoi for stone blocks
+    pts = rng.uniform(0, size, (n_cells, 2))
+    cell_vals = rng.uniform(0.2, 1.0, n_cells)
+    # Tile 3x3 for seamless edges
+    pts_tiled = []
+    vals_tiled = []
+    for dx in (-size, 0, size):
+        for dy in (-size, 0, size):
+            pts_tiled.append(pts + np.array([dx, dy]))
+            vals_tiled.append(cell_vals)
+    pts_all = np.concatenate(pts_tiled)
+    vals_all = np.concatenate(vals_tiled)
+
+    yy, xx = np.mgrid[0:size, 0:size]
+    coords = np.stack([xx.ravel(), yy.ravel()], axis=1).astype(np.float64)
+    dists = np.sqrt(((coords[:, None, :] - pts_all[None, :, :]) ** 2).sum(axis=2))
+    nearest = np.argmin(dists, axis=1)
+    cells = vals_all[nearest].reshape(size, size)
+    part = np.partition(dists, 2, axis=1)[:, :2]
+    part.sort(axis=1)
+    edges = (part[:, 1] - part[:, 0]).reshape(size, size)
+    mn, mx = edges.min(), edges.max()
+    if mx - mn > 1e-8:
+        edges = (edges - mn) / (mx - mn)
+
+    # Surface noise
+    x_scaled = xx.astype(np.float64) / size * 6.0
+    y_scaled = yy.astype(np.float64) / size * 6.0
+    surface = pn.fbm_2d(x_scaled, y_scaled, octaves=3)
+    surface = (surface - surface.min()) / (surface.max() - surface.min() + 1e-8)
+
+    tile = np.zeros((size, size, 4), dtype=np.float64)
+    t = cells
     contrast = theme['contrast']
-
-    # Large flagstones
-    cells_lg, edges_lg = continuous_voronoi(PX_H, PX_W, density=theme['stone_density'], seed=42)
-    # Medium blocks (higher density, different seed)
-    cells_md, edges_md = continuous_voronoi(PX_H, PX_W, density=theme['stone_density'] * 2.5, seed=43)
-    # Surface noise at multiple scales
-    surface_lg = continuous_noise(PX_H, PX_W, scale=0.8, octaves=4, seed=100)
-    surface_fine = continuous_noise(PX_H, PX_W, scale=3.0, octaves=3, seed=101)
-    surface_micro = continuous_noise(PX_H, PX_W, scale=8.0, octaves=2, seed=102)
-
-    # Blend cell values from both scales
-    cells = cells_lg * 0.6 + cells_md * 0.4
-
     for c in range(3):
-        # Base color from blended cell values
-        color = base[c] * cells + accent[c] * (1 - cells)
-        # Multi-scale surface variation
-        color += (surface_lg - 0.5) * contrast * 0.6
-        color += (surface_fine - 0.5) * contrast * 0.3
-        color += (surface_micro - 0.5) * contrast * 0.15
-        # Large flagstone mortar lines (thick, prominent)
-        mortar_lg = np.clip(1.0 - edges_lg * 3.5, 0, 1) ** 1.5
-        color = color * (1 - mortar_lg * 0.65) + mortar[c] * mortar_lg * 0.65
-        # Medium block mortar (thinner, subtler)
-        mortar_md = np.clip(1.0 - edges_md * 5.0, 0, 1) ** 2.0
-        color = color * (1 - mortar_md * 0.25) + mortar[c] * mortar_md * 0.25
-        canvas_arr[:, :, c] = np.where(floor_mask, np.clip(color, 0, 255), canvas_arr[:, :, c])
-    canvas_arr[:, :, 3] = np.where(floor_mask, 255, canvas_arr[:, :, 3])
+        color = base[c] * t + accent[c] * (1 - t)
+        color += (surface - 0.5) * contrast
+        # Mortar lines
+        mortar_mask = np.clip(1.0 - edges * 4.0, 0, 1) ** 1.5
+        color = color * (1 - mortar_mask * 0.7) + mortar[c] * mortar_mask * 0.7
+        tile[:, :, c] = np.clip(color, 0, 255)
+    tile[:, :, 3] = 255
+    return tile
+
+
+def stamp_unique_floors(canvas_arr, floor_mask, theme):
+    """Stamp a unique procedural tile for every floor cell. No repeats."""
+    print("    Floor tiles (128 unique)...", end='', flush=True)
+    # Count floor cells and pre-generate enough unique tiles
+    floor_cells = [(r, c) for r in range(ROWS) for c in range(COLS) if LAYOUT[r, c] == 1]
+    n_tiles = max(len(floor_cells), 128)
+    tiles = []
+    for i in range(n_tiles):
+        tiles.append(generate_floor_tile(TILE, theme, seed=1000 + i))
+
+    # Assign tiles to cells — just use sequential assignment (all unique)
+    rng = np.random.RandomState(42)
+    indices = list(range(n_tiles))
+    rng.shuffle(indices)
+    for idx, (r, c) in enumerate(floor_cells):
+        tile = tiles[indices[idx % n_tiles]]
+        canvas_arr[r*TILE:(r+1)*TILE, c*TILE:(c+1)*TILE] = tile
     print(" done")
 
 
@@ -492,7 +522,7 @@ def render_preview(theme_name, output_path):
     render_exterior(canvas_arr, floor_mask, theme)
     print(" done")
 
-    render_continuous_floor(canvas_arr, floor_mask, theme)
+    stamp_unique_floors(canvas_arr, floor_mask, theme)
 
     print("    Overlays...", end='', flush=True)
     render_overlays(canvas_arr, floor_mask, inner_dist, theme)
