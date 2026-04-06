@@ -212,27 +212,51 @@ THEMES = {
 
 
 # ---------------------------------------------------------------------------
-# Floor stamping
+# Continuous floor rendering (no tile stamping)
 # ---------------------------------------------------------------------------
 
-def stamp_floors(canvas_arr, pack_dir):
-    print("    Floor tiles...", end='', flush=True)
-    floors = []
-    for i in range(16):
-        p = pack_dir / 'floors' / f'base_{i}.png'
-        if p.exists():
-            img = Image.open(p).convert('RGBA').resize((TILE, TILE))
-            floors.append(np.array(img, dtype=np.float64))
-    if not floors:
-        print(" no tiles found")
-        return
-    rng = np.random.RandomState(42)
-    for r in range(ROWS):
-        for c in range(COLS):
-            if LAYOUT[r, c] != 1:
-                continue
-            tile = floors[rng.randint(len(floors))]
-            canvas_arr[r*TILE:(r+1)*TILE, c*TILE:(c+1)*TILE] = tile
+def render_continuous_floor(canvas_arr, floor_mask, theme):
+    """
+    Generate floor as one continuous image using multiple overlapping
+    Voronoi patterns at different scales for visual richness:
+    - Large flagstones (low density Voronoi)
+    - Medium block detail (higher density)
+    - Fine surface noise (fbm)
+    No tile boundaries, no duplicate tile problem.
+    """
+    print("    Floor (continuous)...", end='', flush=True)
+    base = np.array(theme['floor_base'], dtype=np.float64)
+    accent = np.array(theme['floor_accent'], dtype=np.float64)
+    mortar = np.array(theme['mortar'], dtype=np.float64)
+    contrast = theme['contrast']
+
+    # Large flagstones
+    cells_lg, edges_lg = continuous_voronoi(PX_H, PX_W, density=theme['stone_density'], seed=42)
+    # Medium blocks (higher density, different seed)
+    cells_md, edges_md = continuous_voronoi(PX_H, PX_W, density=theme['stone_density'] * 2.5, seed=43)
+    # Surface noise at multiple scales
+    surface_lg = continuous_noise(PX_H, PX_W, scale=0.8, octaves=4, seed=100)
+    surface_fine = continuous_noise(PX_H, PX_W, scale=3.0, octaves=3, seed=101)
+    surface_micro = continuous_noise(PX_H, PX_W, scale=8.0, octaves=2, seed=102)
+
+    # Blend cell values from both scales
+    cells = cells_lg * 0.6 + cells_md * 0.4
+
+    for c in range(3):
+        # Base color from blended cell values
+        color = base[c] * cells + accent[c] * (1 - cells)
+        # Multi-scale surface variation
+        color += (surface_lg - 0.5) * contrast * 0.6
+        color += (surface_fine - 0.5) * contrast * 0.3
+        color += (surface_micro - 0.5) * contrast * 0.15
+        # Large flagstone mortar lines (thick, prominent)
+        mortar_lg = np.clip(1.0 - edges_lg * 3.5, 0, 1) ** 1.5
+        color = color * (1 - mortar_lg * 0.65) + mortar[c] * mortar_lg * 0.65
+        # Medium block mortar (thinner, subtler)
+        mortar_md = np.clip(1.0 - edges_md * 5.0, 0, 1) ** 2.0
+        color = color * (1 - mortar_md * 0.25) + mortar[c] * mortar_md * 0.25
+        canvas_arr[:, :, c] = np.where(floor_mask, np.clip(color, 0, 255), canvas_arr[:, :, c])
+    canvas_arr[:, :, 3] = np.where(floor_mask, 255, canvas_arr[:, :, 3])
     print(" done")
 
 
@@ -310,28 +334,40 @@ def render_radial_lighting(canvas_arr, floor_mask, inner_dist, theme):
 
 
 def render_exterior(canvas_arr, floor_mask, theme):
-    """Exterior with Voronoi stone/terrain pattern for more visual interest."""
-    # Voronoi cells for structure
-    cells, edges = continuous_voronoi(PX_H, PX_W, density=0.4, seed=600)
-    # Noise for organic variation
-    n1 = continuous_noise(PX_H, PX_W, scale=0.8, octaves=4, seed=601)
-    n2 = continuous_noise(PX_H, PX_W, scale=4.0, octaves=3, seed=602)
+    """
+    Exterior with dense, fine-grained texture.
+    Multiple Voronoi scales for terrain-like complexity.
+    Higher contrast and more detail than before.
+    """
+    # Small-scale Voronoi for dense terrain texture (rocks, foliage, etc.)
+    cells_sm, edges_sm = continuous_voronoi(PX_H, PX_W, density=2.0, seed=600)
+    # Medium-scale for larger features
+    cells_md, edges_md = continuous_voronoi(PX_H, PX_W, density=0.5, seed=601)
+    # Multi-scale noise
+    n_coarse = continuous_noise(PX_H, PX_W, scale=0.6, octaves=4, seed=602)
+    n_fine = continuous_noise(PX_H, PX_W, scale=3.0, octaves=3, seed=603)
+    n_micro = continuous_noise(PX_H, PX_W, scale=8.0, octaves=2, seed=604)
 
     base = np.array(theme['exterior'], dtype=np.float64)
     accent = np.array(theme['exterior_accent'], dtype=np.float64)
     detail = np.array(theme['exterior_detail'], dtype=np.float64)
     void_mask = ~floor_mask
 
-    # Base color from cell values
     for c in range(3):
-        cell_color = base[c] * cells + accent[c] * (1 - cells)
-        # Add noise variation
-        variation = (n1 - 0.5) * 25 + (n2 - 0.5) * 12
-        # Darken Voronoi edges (mortar/crevice lines)
-        edge_darken = np.clip(1.0 - edges * 3.0, 0, 1) ** 1.5
-        color = cell_color + variation
-        # Blend in detail color at edges
-        color = color * (1 - edge_darken * 0.5) + detail[c] * 0.3 * edge_darken
+        # Blend base/accent at medium scale
+        color = base[c] * (0.4 + 0.6 * cells_md) + accent[c] * (0.6 - 0.6 * cells_md)
+        # Small-scale cell variation (the fine texture)
+        color += (cells_sm - 0.5) * 20
+        # Multi-scale noise
+        color += (n_coarse - 0.5) * 18
+        color += (n_fine - 0.5) * 12
+        color += (n_micro - 0.5) * 6
+        # Small Voronoi edges as dark crevice lines
+        edge_dark_sm = np.clip(1.0 - edges_sm * 5.0, 0, 1) ** 2.0
+        color = color * (1 - edge_dark_sm * 0.4) + accent[c] * 0.5 * edge_dark_sm
+        # Medium Voronoi edges as broader dark lines
+        edge_dark_md = np.clip(1.0 - edges_md * 3.0, 0, 1) ** 1.5
+        color = color * (1 - edge_dark_md * 0.3) + detail[c] * 0.4 * edge_dark_md
         canvas_arr[:, :, c] = np.where(void_mask, np.clip(color, 0, 255), canvas_arr[:, :, c])
     canvas_arr[:, :, 3] = 255
 
@@ -359,11 +395,14 @@ def render_walls(canvas_arr, floor_mask, theme):
     face_lit = np.array(theme['wall_face_lit'], dtype=np.float64)
     face_dark = np.array(theme['wall_face_dark'], dtype=np.float64)
 
-    # --- Voronoi stone texture for walls ---
+    # --- Voronoi stone texture for walls (higher density, more contrast) ---
     print("    Wall stone texture...", end='', flush=True)
-    wall_cells, wall_edges = continuous_voronoi(PX_H, PX_W, density=1.2, seed=700)
-    wall_stone_var = (wall_cells - 0.5) * 18
-    wall_mortar = np.clip(1.0 - wall_edges * 4.5, 0, 1) ** 1.5
+    wall_cells, wall_edges = continuous_voronoi(PX_H, PX_W, density=2.0, seed=700)
+    wall_cells2, wall_edges2 = continuous_voronoi(PX_H, PX_W, density=0.6, seed=701)
+    wall_stone_var = (wall_cells - 0.5) * 22 + (wall_cells2 - 0.5) * 10
+    wall_mortar = np.clip(1.0 - wall_edges * 4.0, 0, 1) ** 1.5
+    wall_mortar2 = np.clip(1.0 - wall_edges2 * 3.0, 0, 1) ** 1.5
+    wall_mortar = np.maximum(wall_mortar, wall_mortar2 * 0.6)  # combine both scales
     print(" done")
 
     # Total wall extent into void = border + face
@@ -440,7 +479,7 @@ def render_grid(canvas, floor_mask_arr):
 # Main
 # ---------------------------------------------------------------------------
 
-def render_preview(theme_name, pack_dir, output_path):
+def render_preview(theme_name, output_path):
     theme = THEMES[theme_name]
     print(f"\n  {theme['name']}:")
 
@@ -453,7 +492,7 @@ def render_preview(theme_name, pack_dir, output_path):
     render_exterior(canvas_arr, floor_mask, theme)
     print(" done")
 
-    stamp_floors(canvas_arr, pack_dir)
+    render_continuous_floor(canvas_arr, floor_mask, theme)
 
     print("    Overlays...", end='', flush=True)
     render_overlays(canvas_arr, floor_mask, inner_dist, theme)
@@ -499,8 +538,7 @@ def main():
 
     previews = []
     for name in themes:
-        pack = packs_dir / name
-        img = render_preview(name, pack, preview_dir / f'{name}_preview.png')
+        img = render_preview(name, preview_dir / f'{name}_preview.png')
         previews.append(img)
 
     if previews:
