@@ -1,3 +1,5 @@
+pub mod aoe;
+pub mod awareness;
 pub mod combat_log;
 pub mod combat_sim;
 pub mod combat_tracker;
@@ -59,6 +61,8 @@ pub struct PresentationState {
     pub defeated_encounters: HashSet<String>,
     /// When true, encounters sharing a room after a tick automatically fight (FFA).
     pub autobattle: bool,
+    /// Results of the last awareness check (stealth vs perception).
+    pub last_awareness_results: Vec<awareness::AwarenessResult>,
 }
 
 impl PresentationState {
@@ -80,6 +84,7 @@ impl PresentationState {
             party_room: None,
             defeated_encounters: HashSet::new(),
             autobattle: false,
+            last_awareness_results: Vec::new(),
         }
     }
 
@@ -183,6 +188,37 @@ impl PresentationState {
     }
 }
 
+/// BFS from a starting room, returning all room IDs with their hop distances.
+pub fn bfs_distances(start_room_id: &str, graph: &DungeonGraph) -> HashMap<String, u32> {
+    let mut visited: HashMap<String, u32> = HashMap::new();
+    let mut queue: VecDeque<(String, u32)> = VecDeque::new();
+
+    visited.insert(start_room_id.to_string(), 0);
+    queue.push_back((start_room_id.to_string(), 0));
+
+    while let Some((room_id, dist)) = queue.pop_front() {
+        for edge in &graph.connections {
+            let neighbor = if edge.source_room_id == room_id {
+                &edge.target_room_id
+            } else if edge.target_room_id == room_id {
+                &edge.source_room_id
+            } else {
+                continue;
+            };
+            // Skip secret doors — they are not discoverable by proximity
+            if edge.connection.connection_type == crate::model::ConnectionType::Secret {
+                continue;
+            }
+            if !visited.contains_key(neighbor.as_str()) {
+                visited.insert(neighbor.clone(), dist + 1);
+                queue.push_back((neighbor.clone(), dist + 1));
+            }
+        }
+    }
+
+    visited
+}
+
 /// BFS from a starting room, returning all room IDs reachable within `max_dist` hops.
 fn bfs_within_range(start_room_id: &str, max_dist: u32, graph: &DungeonGraph) -> HashSet<String> {
     let mut visited: HashMap<String, u32> = HashMap::new();
@@ -241,6 +277,7 @@ mod tests {
             annotations: Vec::new(),
             light_sources: Vec::new(),
             ambient_light: 0.0,
+            aoe_markers: Vec::new(),
         }
     }
 

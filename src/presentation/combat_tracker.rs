@@ -36,6 +36,7 @@ pub enum CombatantId {
 #[derive(Clone, Debug)]
 pub struct MonsterInstance {
     pub label: String,
+    pub ac: u8,
     pub max_hp: i32,
     pub current_hp: i32,
     pub temp_hp: i32,
@@ -45,6 +46,10 @@ pub struct MonsterInstance {
     pub dex_mod: i8,
     /// Parsed attacks from combat stats, populated during init.
     pub attacks: Vec<ParsedAttack>,
+    /// If true, rolls initiative with disadvantage (5.5e surprise).
+    pub surprised: bool,
+    /// If true, rolls initiative with advantage (hidden from all enemies).
+    pub hidden: bool,
 }
 
 /// Runtime state for a player character during combat.
@@ -58,6 +63,26 @@ pub struct PlayerCombatState {
     pub initiative: Option<i32>,
     pub initiative_modifier: i8,
     pub conditions: Vec<bool>,
+    /// If true, rolls initiative with disadvantage (5.5e surprise).
+    pub surprised: bool,
+    /// If true, rolls initiative with advantage (hidden from all enemies).
+    pub hidden: bool,
+}
+
+/// Roll 1d20 with advantage, disadvantage, or normal.
+/// If both advantage and disadvantage apply, they cancel out → normal roll.
+fn roll_with_adv_disadv(rng: &mut impl rand::Rng, advantage: bool, disadvantage: bool) -> i32 {
+    if advantage && !disadvantage {
+        let r1 = rng.gen_range(1..=20);
+        let r2 = rng.gen_range(1..=20);
+        r1.max(r2)
+    } else if disadvantage && !advantage {
+        let r1 = rng.gen_range(1..=20);
+        let r2 = rng.gen_range(1..=20);
+        r1.min(r2)
+    } else {
+        rng.gen_range(1..=20)
+    }
 }
 
 /// Tracks combat state for all active encounters.
@@ -112,6 +137,7 @@ impl CombatTracker {
                     };
                     instances.insert(id, MonsterInstance {
                         label,
+                        ac: stats.ac.unwrap_or(10),
                         max_hp: stats.max_hp,
                         current_hp: stats.max_hp,
                         temp_hp: 0,
@@ -120,6 +146,8 @@ impl CombatTracker {
                         is_dead: false,
                         dex_mod,
                         attacks: attacks.clone(),
+                        surprised: false,
+                        hidden: false,
                     });
                 }
             }
@@ -136,6 +164,8 @@ impl CombatTracker {
                 initiative: None,
                 initiative_modifier: pc.initiative_modifier,
                 conditions: vec![false; STANDARD_CONDITIONS.len()],
+                surprised: false,
+                hidden: false,
             });
         }
 
@@ -260,18 +290,40 @@ impl CombatTracker {
     }
 
     /// Roll initiative for all instances and players (1d20 + modifier).
+    /// Surprised → disadvantage (roll twice, take lower).
+    /// Hidden → advantage (roll twice, take higher).
+    /// Both → they cancel out, roll normally.
     pub fn roll_all_initiative(&mut self) {
-        use rand::Rng;
         let mut rng = rand::thread_rng();
         for inst in self.instances.values_mut() {
-            let roll = rng.gen_range(1..=20) + inst.dex_mod as i32;
-            inst.initiative = Some(roll);
+            let die = roll_with_adv_disadv(&mut rng, inst.hidden, inst.surprised);
+            inst.initiative = Some(die + inst.dex_mod as i32);
         }
         for pc in self.players.values_mut() {
-            let roll = rng.gen_range(1..=20) + pc.initiative_modifier as i32;
-            pc.initiative = Some(roll);
+            let die = roll_with_adv_disadv(&mut rng, pc.hidden, pc.surprised);
+            pc.initiative = Some(die + pc.initiative_modifier as i32);
         }
         self.sort_initiative();
+    }
+
+    /// Apply per-creature surprise from an awareness result.
+    /// Matches by label/name since instance IDs aren't known at awareness time.
+    /// Apply per-creature surprise and hidden states from an awareness result.
+    pub fn apply_awareness(&mut self, result: &crate::presentation::awareness::AwarenessResult) {
+        for inst in self.instances.values_mut() {
+            let awareness = result.monster_awareness(&inst.label);
+            if let Some(a) = awareness {
+                inst.surprised = a.surprised;
+                inst.hidden = a.hidden;
+            }
+        }
+        for pc in self.players.values_mut() {
+            let awareness = result.pc_awareness(&pc.name);
+            if let Some(a) = awareness {
+                pc.surprised = a.surprised;
+                pc.hidden = a.hidden;
+            }
+        }
     }
 
     /// Sort initiative order by initiative value (descending).
@@ -344,6 +396,33 @@ impl CombatTracker {
             }
         }
         (alive, dead)
+    }
+
+    /// Collect all living combatants as potential attack targets.
+    /// Returns (CombatantId, name, AC, hidden).
+    pub fn attack_targets(&self) -> Vec<(CombatantId, String, u8, bool)> {
+        let mut targets = Vec::new();
+        for (mid, inst) in &self.instances {
+            if !inst.is_dead {
+                targets.push((
+                    CombatantId::Monster(mid.clone()),
+                    inst.label.clone(),
+                    inst.ac,
+                    inst.hidden,
+                ));
+            }
+        }
+        for (pid, pc) in &self.players {
+            if pc.current_hp > 0 {
+                targets.push((
+                    CombatantId::Player(pid.clone()),
+                    pc.name.clone(),
+                    pc.ac,
+                    pc.hidden,
+                ));
+            }
+        }
+        targets
     }
 
     /// Get the display name for a combatant.
@@ -419,10 +498,12 @@ mod tests {
             log: CombatLog::new(),
         };
         tracker.instances.insert(id.clone(), MonsterInstance {
-            label: "Goblin".into(),            max_hp: 10, current_hp: 10, temp_hp: 0,
+            label: "Goblin".into(), ac: 12, max_hp: 10, current_hp: 10, temp_hp: 0,
             initiative: None, conditions: vec![false; STANDARD_CONDITIONS.len()],
             is_dead: false, dex_mod: 2,
             attacks: Vec::new(),
+            surprised: false,
+            hidden: false,
         });
         tracker
     }
@@ -455,10 +536,12 @@ mod tests {
             log: CombatLog::new(),
         };
         tracker.instances.insert(id.clone(), MonsterInstance {
-            label: "Goblin".into(),            max_hp: 10, current_hp: 10, temp_hp: 5,
+            label: "Goblin".into(), ac: 12, max_hp: 10, current_hp: 10, temp_hp: 5,
             initiative: None, conditions: vec![false; STANDARD_CONDITIONS.len()],
             is_dead: false, dex_mod: 2,
             attacks: Vec::new(),
+            surprised: false,
+            hidden: false,
         });
 
         tracker.apply_damage(&id, 7);
@@ -478,10 +561,12 @@ mod tests {
             log: CombatLog::new(),
         };
         tracker.instances.insert(id.clone(), MonsterInstance {
-            label: "Goblin".into(),            max_hp: 10, current_hp: 3, temp_hp: 0,
+            label: "Goblin".into(), ac: 12, max_hp: 10, current_hp: 3, temp_hp: 0,
             initiative: None, conditions: vec![false; STANDARD_CONDITIONS.len()],
             is_dead: false, dex_mod: 2,
             attacks: Vec::new(),
+            surprised: false,
+            hidden: false,
         });
 
         tracker.heal(&id, 5);
@@ -503,10 +588,12 @@ mod tests {
             log: CombatLog::new(),
         };
         tracker.instances.insert(id.clone(), MonsterInstance {
-            label: "Goblin".into(),            max_hp: 10, current_hp: 0, temp_hp: 0,
+            label: "Goblin".into(), ac: 12, max_hp: 10, current_hp: 0, temp_hp: 0,
             initiative: None, conditions: vec![false; STANDARD_CONDITIONS.len()],
             is_dead: true, dex_mod: 2,
             attacks: Vec::new(),
+            surprised: false,
+            hidden: false,
         });
 
         tracker.heal(&id, 5);
@@ -582,10 +669,12 @@ mod tests {
                 encounter_id: "e1".into(), monster_index: 0, instance: i,
             };
             tracker.instances.insert(id, MonsterInstance {
-                label: format!("Goblin #{}", i + 1),                max_hp: 10, current_hp: if i == 2 { 0 } else { 10 }, temp_hp: 0,
+                label: format!("Goblin #{}", i + 1), ac: 12, max_hp: 10, current_hp: if i == 2 { 0 } else { 10 }, temp_hp: 0,
                 initiative: None, conditions: vec![false; STANDARD_CONDITIONS.len()],
                 is_dead: i == 2, dex_mod: 2,
                 attacks: Vec::new(),
+                surprised: false,
+                hidden: false,
             });
         }
 
@@ -639,6 +728,9 @@ mod tests {
             attack_bonus: 5,
             damage_dice: "1d8 + 3".into(),
             notes: String::new(),
+            stealth_modifier: 0,
+            senses: Default::default(),
+            stealth_override: None,
         };
 
         let db = MonsterDatabase::empty();
@@ -669,6 +761,8 @@ mod tests {
             initiative: None,
             initiative_modifier: 1,
             conditions: vec![false; STANDARD_CONDITIONS.len()],
+            surprised: false,
+            hidden: false,
         });
 
         tracker.apply_damage_to(&CombatantId::Player("pc1".into()), 15);
@@ -692,6 +786,8 @@ mod tests {
             initiative: None,
             initiative_modifier: 1,
             conditions: vec![false; STANDARD_CONDITIONS.len()],
+            surprised: false,
+            hidden: false,
         });
 
         tracker.heal_combatant(&CombatantId::Player("pc1".into()), 10);
@@ -716,6 +812,8 @@ mod tests {
             initiative: None,
             initiative_modifier: 3,
             conditions: vec![false; STANDARD_CONDITIONS.len()],
+            surprised: false,
+            hidden: false,
         });
 
         assert_eq!(tracker.get_combatant_name(&CombatantId::Monster(id)), "Goblin");

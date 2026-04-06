@@ -976,7 +976,7 @@ impl eframe::App for DungeonApp {
                 if let Some(presentation) = &mut self.presentation {
                     presentation_view::presentation_view(
                         ui,
-                        &self.dungeon,
+                        &mut self.dungeon,
                         presentation,
                         &mut self.presentation_view_state,
                         &mut self.player_view_state,

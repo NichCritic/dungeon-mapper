@@ -41,6 +41,10 @@ pub struct PresentationViewState {
     pub selected_room: Option<String>,
     /// True while the DM is dragging the player viewport rectangle.
     dragging_player_viewport: bool,
+    /// Index of the AoE marker currently selected.
+    pub selected_aoe: Option<usize>,
+    /// True while dragging the selected AoE marker.
+    dragging_aoe: bool,
 }
 
 impl Default for PresentationViewState {
@@ -52,6 +56,8 @@ impl Default for PresentationViewState {
             single_combat: SingleCombatState::default(),
             selected_room: None,
             dragging_player_viewport: false,
+            selected_aoe: None,
+            dragging_aoe: false,
         }
     }
 }
@@ -91,6 +97,223 @@ fn presentation_input_hash(
     h.finish()
 }
 
+/// AoE marker controls in the sidebar.
+fn aoe_sidebar(
+    ui: &mut egui::Ui,
+    presentation: &PresentationState,
+    dungeon: &mut Dungeon,
+) {
+    use crate::presentation::aoe::{AoEMarker, AoEShape};
+
+    // Shape type selector
+    let shape_idx_id = egui::Id::new("aoe_shape_type");
+    let size_id = egui::Id::new("aoe_size_ft");
+    let width_id = egui::Id::new("aoe_width_ft");
+    let mut shape_idx: usize = ui.ctx().memory(|m| m.data.get_temp(shape_idx_id).unwrap_or(0usize));
+    let mut size_ft: i32 = ui.ctx().memory(|m| m.data.get_temp(size_id).unwrap_or(20i32));
+    let mut width_ft: i32 = ui.ctx().memory(|m| m.data.get_temp(width_id).unwrap_or(5i32));
+
+    let shape_labels = ["Circle", "Square", "Line"];
+    ui.horizontal(|ui| {
+        ui.label("Shape:");
+        egui::ComboBox::from_id_salt("aoe_shape_type")
+            .selected_text(shape_labels[shape_idx.min(2)])
+            .width(70.0)
+            .show_ui(ui, |ui| {
+                for (i, label) in shape_labels.iter().enumerate() {
+                    if ui.selectable_label(i == shape_idx, *label).clicked() {
+                        shape_idx = i;
+                    }
+                }
+            });
+        if shape_idx == 2 {
+            // Line: length + width
+            ui.label("L:");
+            crate::ui::canvas_common::num_input_i32(ui, &mut size_ft, 35.0);
+            ui.label("W:");
+            crate::ui::canvas_common::num_input_i32(ui, &mut width_ft, 30.0);
+            ui.label("ft");
+        } else {
+            // Circle radius or square side
+            let label = if shape_idx == 0 { "R:" } else { "Size:" };
+            ui.label(label);
+            crate::ui::canvas_common::num_input_i32(ui, &mut size_ft, 35.0);
+            ui.label("ft");
+        }
+    });
+    size_ft = size_ft.max(5);
+    width_ft = width_ft.max(5);
+    ui.ctx().memory_mut(|m| {
+        m.data.insert_temp(shape_idx_id, shape_idx);
+        m.data.insert_temp(size_id, size_ft);
+        m.data.insert_temp(width_id, width_ft);
+    });
+
+    ui.horizontal(|ui| {
+        if ui.button("Add").clicked() {
+            let room = presentation.party_room.as_ref()
+                .and_then(|rid| dungeon.layout.as_ref().and_then(|l| l.room_by_id(rid)));
+            let fallback = dungeon.layout.as_ref().and_then(|l| l.rooms.first());
+            if let Some(rl) = room.or(fallback) {
+                let cx = rl.x as f32 + rl.width as f32 / 2.0;
+                let cy = rl.y as f32 + rl.height as f32 / 2.0;
+                let color_id = egui::Id::new("aoe_color");
+                let color: [u8; 4] = ui.ctx().memory(|m| m.data.get_temp(color_id).unwrap_or([255, 60, 60, 100]));
+                let grid = |ft: i32| ft as f32 / 5.0;
+                let shape = match shape_idx {
+                    0 => AoEShape::Circle { radius: grid(size_ft) },
+                    1 => AoEShape::Square { size: grid(size_ft) },
+                    _ => AoEShape::Line { length: grid(size_ft), width: grid(width_ft) },
+                };
+                dungeon.aoe_markers.push(AoEMarker::new(shape, cx, cy, color));
+            }
+        }
+    });
+
+    // Color picker
+    ui.horizontal(|ui| {
+        ui.label("Color:");
+        let color_id = egui::Id::new("aoe_color");
+        let mut color: [u8; 4] = ui.ctx().memory(|m| m.data.get_temp(color_id).unwrap_or([255, 60, 60, 100]));
+        let mut c3 = [color[0] as f32 / 255.0, color[1] as f32 / 255.0, color[2] as f32 / 255.0];
+        if ui.color_edit_button_rgb(&mut c3).changed() {
+            color[0] = (c3[0] * 255.0) as u8;
+            color[1] = (c3[1] * 255.0) as u8;
+            color[2] = (c3[2] * 255.0) as u8;
+        }
+        ui.label("Alpha:");
+        let mut a = color[3] as i32;
+        if crate::ui::canvas_common::num_input_i32(ui, &mut a, 35.0) {
+            color[3] = a.clamp(0, 255) as u8;
+        }
+        ui.ctx().memory_mut(|m| m.data.insert_temp(color_id, color));
+    });
+
+    // List existing markers
+    if !dungeon.aoe_markers.is_empty() {
+        let mut remove_idx = None;
+        for (i, marker) in dungeon.aoe_markers.iter().enumerate() {
+            ui.horizontal(|ui| {
+                let c = egui::Color32::from_rgba_unmultiplied(
+                    marker.color[0], marker.color[1], marker.color[2], 255,
+                );
+                ui.colored_label(c, format!("{}", marker.shape.label()));
+                ui.label(format!("({:.0},{:.0})", marker.x, marker.y));
+                if ui.small_button("X").clicked() {
+                    remove_idx = Some(i);
+                }
+            });
+        }
+        if let Some(idx) = remove_idx {
+            dungeon.aoe_markers.remove(idx);
+        }
+        if ui.small_button("Clear All").clicked() {
+            dungeon.aoe_markers.clear();
+        }
+    }
+}
+
+/// Compute the advantage state for an attack given attacker/target hidden status.
+/// Attacker hidden → advantage. Target hidden → disadvantage.
+/// Both → cancel out to normal.
+fn compute_attack_advantage(attacker_hidden: bool, target_hidden: bool) -> dice::AdvantageState {
+    match (attacker_hidden, target_hidden) {
+        (true, true) => dice::AdvantageState::Normal, // cancel out
+        (true, false) => dice::AdvantageState::Advantage,
+        (false, true) => dice::AdvantageState::Disadvantage,
+        (false, false) => dice::AdvantageState::Normal,
+    }
+}
+
+/// Reusable UI for attack target selection and rolling.
+fn attack_target_ui(
+    ui: &mut egui::Ui,
+    attacks: &[crate::model::combat_stats::ParsedAttack],
+    attacker_name: &str,
+    attacker_hidden: bool,
+    attacker_cid: &CombatantId,
+    targets: &[(CombatantId, String, u8, bool)], // (id, name, ac, hidden)
+    id_salt: &str,
+    attack_actions: &mut Vec<(String, String, crate::model::combat_stats::ParsedAttack, u8, dice::AdvantageState, CombatantId)>,
+) {
+    if attacker_hidden {
+        ui.colored_label(
+            egui::Color32::from_rgb(100, 180, 255),
+            "Hidden (advantage on attacks)",
+        );
+    }
+
+    // Target selector (shared across all attacks for this attacker)
+    let target_idx_id = egui::Id::new(format!("target_idx_{}", id_salt));
+    let mut selected_idx: usize = ui.ctx().memory(|m| m.data.get_temp(target_idx_id).unwrap_or(0usize));
+    if selected_idx >= targets.len() && !targets.is_empty() {
+        selected_idx = 0;
+    }
+
+    if targets.is_empty() {
+        ui.label("No targets");
+        return;
+    }
+
+    let (_, ref target_name, target_ac, target_hidden) = targets[selected_idx];
+    let adv = compute_attack_advantage(attacker_hidden, target_hidden);
+    let adv_label = match adv {
+        dice::AdvantageState::Advantage => " [ADV]",
+        dice::AdvantageState::Disadvantage => " [DIS]",
+        dice::AdvantageState::Normal => "",
+    };
+
+    ui.horizontal(|ui| {
+        ui.label("Target:");
+        let display = format!("{} (AC {}){}", target_name, target_ac,
+            if target_hidden { " [hidden]" } else { "" });
+        egui::ComboBox::from_id_salt(format!("target_combo_{}", id_salt))
+            .selected_text(&display)
+            .width(160.0)
+            .show_ui(ui, |ui| {
+                for (i, (_, name, ac, hidden)) in targets.iter().enumerate() {
+                    let label = format!("{} (AC {}){}", name, ac,
+                        if *hidden { " [hidden]" } else { "" });
+                    if ui.selectable_label(i == selected_idx, &label).clicked() {
+                        selected_idx = i;
+                    }
+                }
+            });
+    });
+    ui.ctx().memory_mut(|m| m.data.insert_temp(target_idx_id, selected_idx));
+
+    for atk in attacks {
+        ui.horizontal(|ui| {
+            let btn_text = format!("{} (+{}){}", atk.name, atk.to_hit, adv_label);
+            if ui.button(&btn_text).clicked() {
+                attack_actions.push((
+                    attacker_name.to_string(),
+                    format!("{} (AC {})", target_name, target_ac),
+                    atk.clone(),
+                    target_ac,
+                    adv,
+                    attacker_cid.clone(),
+                ));
+            }
+        });
+    }
+}
+
+/// Get the display tag and color for a creature's awareness state.
+fn awareness_tag_color(
+    c: &crate::presentation::awareness::CreatureAwareness,
+    surprise_color: egui::Color32,
+    hidden_color: egui::Color32,
+    ok_color: egui::Color32,
+) -> (&'static str, egui::Color32) {
+    match (c.surprised, c.hidden) {
+        (true, true) => (" SURPRISED+HIDDEN", surprise_color), // edge case: cancel out on initiative
+        (true, false) => (" SURPRISED", surprise_color),
+        (false, true) => (" HIDDEN", hidden_color),
+        (false, false) => ("", ok_color),
+    }
+}
+
 /// Find the corridor under a grid position, returning the connection_id.
 fn corridor_at_grid(layout: &SpatialLayout, gx: i32, gy: i32) -> Option<String> {
     for corridor in &layout.corridors {
@@ -125,7 +348,7 @@ fn room_at_grid(layout: &SpatialLayout, gx: i32, gy: i32) -> Option<String> {
 /// The DM's presentation canvas showing the full map with visibility overlay.
 pub fn presentation_view(
     ui: &mut egui::Ui,
-    dungeon: &Dungeon,
+    dungeon: &mut Dungeon,
     presentation: &mut PresentationState,
     view_state: &mut PresentationViewState,
     player_view_state: &mut crate::ui::player_view::PlayerViewState,
@@ -205,6 +428,9 @@ pub fn presentation_view(
     // DM overlay (fog of war + door state indicators)
     render_dm_overlay(&painter, &transform, layout, dungeon, presentation);
 
+    // AoE markers (visible on DM view, with center crosshairs)
+    crate::presentation::aoe::render_aoe_markers(&painter, &transform, &dungeon.aoe_markers, true);
+
     // --- Player viewport rectangle ---
     // Compute the world-space rect the player currently sees from their view state.
     let pv_zoom = player_view_state.view.zoom;
@@ -256,17 +482,67 @@ pub fn presentation_view(
         }
     }
 
-    // Left-click: select room (only if not dragging viewport)
-    if response.clicked() {
+    // AoE: click to select, drag to move, Delete key to remove
+    if response.drag_started_by(egui::PointerButton::Primary) && !view_state.dragging_player_viewport {
         if let Some(pos) = response.interact_pointer_pos() {
-            let world = transform.screen_to_world(pos);
-            let gx = (world.x / GRID_PX).floor() as i32;
-            let gy = (world.y / GRID_PX).floor() as i32;
+            if let Some(idx) = crate::presentation::aoe::marker_at_screen_pos(pos, &transform, &dungeon.aoe_markers) {
+                view_state.selected_aoe = Some(idx);
+                view_state.dragging_aoe = true;
+            }
+        }
+    }
+    if view_state.dragging_aoe {
+        if response.dragged_by(egui::PointerButton::Primary) {
+            if let Some(idx) = view_state.selected_aoe {
+                let delta = response.drag_delta();
+                let world_dx = delta.x / (transform.zoom * GRID_PX);
+                let world_dy = delta.y / (transform.zoom * GRID_PX);
+                if idx < dungeon.aoe_markers.len() {
+                    dungeon.aoe_markers[idx].x += world_dx;
+                    dungeon.aoe_markers[idx].y += world_dy;
+                }
+            }
+        }
+    }
+    if response.drag_stopped() {
+        view_state.dragging_aoe = false;
+    }
 
-            if let Some(room_id) = room_at_grid(layout, gx, gy) {
-                view_state.selected_room = Some(room_id);
+    // Delete key removes selected AoE
+    if view_state.selected_aoe.is_some() {
+        if ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)) {
+            if let Some(idx) = view_state.selected_aoe.take() {
+                if idx < dungeon.aoe_markers.len() {
+                    dungeon.aoe_markers.remove(idx);
+                }
+            }
+        }
+    }
+
+    // Validate selected_aoe index
+    if let Some(idx) = view_state.selected_aoe {
+        if idx >= dungeon.aoe_markers.len() {
+            view_state.selected_aoe = None;
+        }
+    }
+
+    // Left-click: select room or AoE, deselect on empty space
+    if response.clicked() && !view_state.dragging_aoe {
+        if let Some(pos) = response.interact_pointer_pos() {
+            // Check AoE first
+            if let Some(idx) = crate::presentation::aoe::marker_at_screen_pos(pos, &transform, &dungeon.aoe_markers) {
+                view_state.selected_aoe = Some(idx);
             } else {
-                view_state.selected_room = None;
+                view_state.selected_aoe = None;
+                let world = transform.screen_to_world(pos);
+                let gx = (world.x / GRID_PX).floor() as i32;
+                let gy = (world.y / GRID_PX).floor() as i32;
+
+                if let Some(room_id) = room_at_grid(layout, gx, gy) {
+                    view_state.selected_room = Some(room_id);
+                } else {
+                    view_state.selected_room = None;
+                }
             }
         }
     }
@@ -284,6 +560,22 @@ pub fn presentation_view(
                 sel_rect, 0.0,
                 egui::Stroke::new(2.0, egui::Color32::from_rgb(100, 200, 255)),
                 egui::StrokeKind::Outside,
+            );
+        }
+    }
+
+    // Draw AoE selection highlight
+    if let Some(idx) = view_state.selected_aoe {
+        if let Some(marker) = dungeon.aoe_markers.get(idx) {
+            let center = transform.world_to_screen(egui::pos2(marker.x * GRID_PX, marker.y * GRID_PX));
+            let radius = match &marker.shape {
+                crate::presentation::aoe::AoEShape::Circle { radius } => *radius,
+                crate::presentation::aoe::AoEShape::Square { size } => *size / 2.0,
+                crate::presentation::aoe::AoEShape::Line { length, .. } => *length / 2.0,
+            } * GRID_PX * transform.zoom;
+            painter.circle_stroke(
+                center, radius + 3.0,
+                egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 255, 100)),
             );
         }
     }
@@ -598,6 +890,35 @@ fn party_section(
                             ui.label("Dmg:");
                             ui.add(egui::TextEdit::singleline(&mut pc.damage_dice).desired_width(80.0));
                         });
+                        ui.horizontal(|ui| {
+                            ui.label("Stealth:");
+                            let mut stealth_val = pc.stealth_modifier as i32;
+                            crate::ui::canvas_common::num_input_i32(ui, &mut stealth_val, 35.0);
+                            pc.stealth_modifier = stealth_val as i8;
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Roll:");
+                            let mut has_override = pc.stealth_override.is_some();
+                            if ui.checkbox(&mut has_override, "").changed() {
+                                if has_override {
+                                    pc.stealth_override = Some(10);
+                                } else {
+                                    pc.stealth_override = None;
+                                }
+                            }
+                            if let Some(ref mut val) = pc.stealth_override {
+                                let mut v = *val;
+                                crate::ui::canvas_common::num_input_i32(ui, &mut v, 35.0);
+                                *val = v;
+                            } else {
+                                ui.label("(auto)");
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut pc.senses.darkvision, "DV");
+                            ui.checkbox(&mut pc.senses.blindsight, "BS");
+                            ui.checkbox(&mut pc.senses.tremorsense, "TS");
+                        });
                         if ui.small_button("Remove").clicked() {
                             remove_pc_idx = Some(i);
                         }
@@ -764,7 +1085,7 @@ pub fn presentation_sidebar(
             .collect();
         if !room_encounters.is_empty() {
             ui.add_space(8.0);
-            ui.heading("Encounters");
+            ui.heading("Encounters Here");
             ui.separator();
             for enc in &room_encounters {
                 let type_marker = match enc.encounter_type {
@@ -774,18 +1095,178 @@ pub fn presentation_sidebar(
                 ui.label(format!("[{}] {}", type_marker, enc.name));
             }
             if !in_combat {
+                // Awareness check for encounters in this room (party also here)
+                if party_here && !dungeon.party.is_empty() {
+                    if ui.button("Awareness Check").clicked() {
+                        let mut results = Vec::new();
+                        for enc in &room_encounters {
+                            let result = crate::presentation::awareness::run_awareness_check(
+                                dungeon, enc, &sel_room_id, &sel_room_id, monster_db,
+                            );
+                            results.push(result);
+                        }
+                        presentation.last_awareness_results = results;
+                    }
+                }
+
                 let room_encounter_slice: Vec<crate::model::Encounter> = room_encounters.iter()
                     .map(|e| (*e).clone())
                     .collect();
+
+                // Start combat button, applying per-creature surprise from awareness
                 if ui.button(format!("Start Combat in {}", room_label)).clicked() {
-                    presentation.combat_tracker = Some(CombatTracker::init_with_party(
+                    let mut tracker = CombatTracker::init_with_party(
                         &room_encounter_slice,
                         monster_db,
                         &dungeon.custom_monsters,
                         combat_stats_cache,
                         &dungeon.party,
-                    ));
+                    );
+                    for result in &presentation.last_awareness_results {
+                        tracker.apply_awareness(result);
+                    }
+                    presentation.combat_tracker = Some(tracker);
+                    presentation.last_awareness_results.clear();
                 }
+            }
+        }
+
+        // Nearby encounters (not in this room but within detection range)
+        if !in_combat {
+            let distances = crate::presentation::bfs_distances(&sel_room_id, &dungeon.graph);
+            let mut nearby_encounters: Vec<(&crate::model::Encounter, u32, Option<f32>)> = Vec::new();
+            for enc in &dungeon.encounters {
+                if presentation.defeated_encounters.contains(&enc.id) { continue; }
+                let enc_room = presentation.encounter_room(enc).to_string();
+                if enc_room == sel_room_id { continue; }
+                if let Some(&hops) = distances.get(&enc_room) {
+                    let feet = dungeon.layout.as_ref()
+                        .and_then(|layout| crate::presentation::awareness::encounter_distance_feet(
+                            &sel_room_id, &enc_room, layout));
+                    nearby_encounters.push((enc, hops, feet));
+                }
+            }
+            nearby_encounters.sort_by_key(|(_, hops, _)| *hops);
+
+            if !nearby_encounters.is_empty() {
+                ui.add_space(8.0);
+                ui.heading("Nearby Encounters");
+                ui.separator();
+                for (enc, hops, feet) in &nearby_encounters {
+                    let dist_str = if let Some(ft) = feet {
+                        format!("{} room{}, ~{:.0} ft", hops, if *hops != 1 { "s" } else { "" }, ft)
+                    } else {
+                        format!("{} room{}", hops, if *hops != 1 { "s" } else { "" })
+                    };
+                    let type_marker = match enc.encounter_type {
+                        EncounterType::Static => "S",
+                        EncounterType::Wandering(_) => "W",
+                    };
+                    ui.horizontal(|ui| {
+                        ui.label(format!("[{}] {} ({})", type_marker, enc.name, dist_str));
+                        if party_here && !dungeon.party.is_empty() {
+                            let enc_room = presentation.encounter_room(enc).to_string();
+                            if ui.small_button("Check").on_hover_text("Run awareness check").clicked() {
+                                let result = crate::presentation::awareness::run_awareness_check(
+                                    dungeon, enc, &enc_room, &sel_room_id, monster_db,
+                                );
+                                // Replace any existing result for this encounter
+                                presentation.last_awareness_results.retain(|r| r.encounter_id != enc.id);
+                                presentation.last_awareness_results.push(result);
+                            }
+                        }
+                    });
+                }
+            }
+        }
+
+        // Awareness check results
+        if !presentation.last_awareness_results.is_empty() {
+            ui.add_space(8.0);
+            ui.heading("Awareness Results");
+            ui.separator();
+            if ui.small_button("Clear").clicked() {
+                presentation.last_awareness_results.clear();
+            }
+            let results = presentation.last_awareness_results.clone();
+            for result in &results {
+                egui::CollapsingHeader::new(&result.encounter_name)
+                    .id_salt(format!("awareness_{}", result.encounter_id))
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        // Distance & light
+                        if let Some(ft) = result.distance_feet {
+                            ui.label(format!("Distance: {} rooms, ~{:.0} ft", result.distance_rooms, ft));
+                        } else {
+                            ui.label(format!("Distance: {} rooms", result.distance_rooms));
+                        }
+                        ui.label(format!(
+                            "Light: encounter {}, party {}",
+                            result.encounter_light.label(),
+                            result.party_light.label(),
+                        ));
+
+                        let surprise_color = egui::Color32::from_rgb(255, 200, 50);
+                        let ok_color = egui::Color32::from_rgb(100, 255, 100);
+                        let hidden_color = egui::Color32::from_rgb(100, 180, 255);
+
+                        // Monster stealth rolls & state
+                        ui.add_space(4.0);
+                        ui.label("Monsters:");
+                        for m in &result.monsters {
+                            let (tag, color) = awareness_tag_color(m, surprise_color, hidden_color, ok_color);
+                            ui.colored_label(color, format!(
+                                "  {} - Stealth {} | PP {}{}",
+                                m.name, m.stealth_roll, m.passive_perception, tag,
+                            ));
+                        }
+
+                        // Party stealth rolls & state
+                        ui.add_space(4.0);
+                        ui.label("Party:");
+                        for pc in &result.party {
+                            let (tag, color) = awareness_tag_color(pc, surprise_color, hidden_color, ok_color);
+                            ui.colored_label(color, format!(
+                                "  {} - Stealth {} | PP {}{}",
+                                pc.name, pc.stealth_roll, pc.passive_perception, tag,
+                            ));
+                        }
+
+                        // Summary
+                        ui.add_space(4.0);
+                        let n_party_surprised = result.party.iter().filter(|c| c.surprised).count();
+                        let n_party_hidden = result.party.iter().filter(|c| c.hidden).count();
+                        let n_monster_surprised = result.monsters.iter().filter(|c| c.surprised).count();
+                        let n_monster_hidden = result.monsters.iter().filter(|c| c.hidden).count();
+
+                        if n_party_surprised > 0 {
+                            ui.colored_label(surprise_color, format!(
+                                "{}/{} PCs surprised (disadv. initiative)",
+                                n_party_surprised, result.party.len(),
+                            ));
+                        }
+                        if n_party_hidden > 0 {
+                            ui.colored_label(hidden_color, format!(
+                                "{}/{} PCs hidden (adv. initiative)",
+                                n_party_hidden, result.party.len(),
+                            ));
+                        }
+                        if n_monster_surprised > 0 {
+                            ui.colored_label(surprise_color, format!(
+                                "{}/{} monsters surprised (disadv. initiative)",
+                                n_monster_surprised, result.monsters.len(),
+                            ));
+                        }
+                        if n_monster_hidden > 0 {
+                            ui.colored_label(hidden_color, format!(
+                                "{}/{} monsters hidden (adv. initiative)",
+                                n_monster_hidden, result.monsters.len(),
+                            ));
+                        }
+                        if n_party_surprised + n_party_hidden + n_monster_surprised + n_monster_hidden == 0 {
+                            ui.label("No surprise or hidden - all aware");
+                        }
+                    });
             }
         }
 
@@ -955,7 +1436,10 @@ pub fn presentation_sidebar(
             let mut damage_actions: Vec<(CombatantId, i32)> = Vec::new();
             let mut heal_actions: Vec<(CombatantId, i32)> = Vec::new();
             let mut condition_toggles: Vec<(CombatantId, usize)> = Vec::new();
-            let mut attack_actions: Vec<(String, String, crate::model::combat_stats::ParsedAttack, u8)> = Vec::new();
+            let mut attack_actions: Vec<(String, String, crate::model::combat_stats::ParsedAttack, u8, dice::AdvantageState, CombatantId)> = Vec::new();
+
+            // Build target list for attack dropdowns (all living combatants)
+            let all_targets: Vec<(CombatantId, String, u8, bool)> = tracker.attack_targets();
 
             // Current turn info card
             if let Some(current_id) = tracker.current_combatant_id().cloned() {
@@ -1000,24 +1484,23 @@ pub fn presentation_sidebar(
                                 if !inst.attacks.is_empty() {
                                     let attacks_snapshot: Vec<_> = inst.attacks.clone();
                                     let attacker_name = inst.label.clone();
+                                    let attacker_hidden = inst.hidden;
+                                    let attacker_cid = current_id.clone();
+                                    if attacker_hidden {
+                                        ui.colored_label(
+                                            egui::Color32::from_rgb(100, 180, 255),
+                                            "Hidden (advantage on attacks)",
+                                        );
+                                    }
+                                    // Filter targets: exclude self
+                                    let targets: Vec<_> = all_targets.iter()
+                                        .filter(|(cid, _, _, _)| *cid != attacker_cid)
+                                        .cloned().collect();
                                     egui::CollapsingHeader::new("Actions")
                                         .id_salt("active_turn_attacks")
                                         .default_open(true)
                                         .show(ui, |ui| {
-                                            for atk in &attacks_snapshot {
-                                                let ac_id = egui::Id::new(format!("turn_ac_{}", atk.name));
-                                                let mut target_ac: u8 = ui.ctx().memory(|m| m.data.get_temp(ac_id).unwrap_or(10u8));
-                                                ui.horizontal(|ui| {
-                                                    let btn_text = format!("{} (+{})", atk.name, atk.to_hit);
-                                                    if ui.button(&btn_text).clicked() {
-                                                        attack_actions.push((attacker_name.clone(), format!("AC {}", target_ac), atk.clone(), target_ac));
-                                                    }
-                                                    ui.label("vs AC");
-                                                    let mut tac = target_ac as i32;
-                                                    if crate::ui::canvas_common::num_input_i32(ui, &mut tac, 35.0) { target_ac = tac as u8; }
-                                                });
-                                                ui.ctx().memory_mut(|m| m.data.insert_temp(ac_id, target_ac));
-                                            }
+                                            attack_target_ui(ui, &attacks_snapshot, &attacker_name, attacker_hidden, &attacker_cid, &targets, "turn", &mut attack_actions);
                                         });
                                 }
 
@@ -1385,24 +1868,17 @@ pub fn presentation_sidebar(
                                         if !inst.attacks.is_empty() {
                                             let attacks_snapshot: Vec<_> = inst.attacks.clone();
                                             let attacker_name = inst.label.clone();
+                                            let attacker_hidden = inst.hidden;
+                                            let attacker_cid = combatant_id.clone();
+                                            let targets: Vec<_> = all_targets.iter()
+                                                .filter(|(cid, _, _, _)| *cid != attacker_cid)
+                                                .cloned().collect();
+                                            let id_salt = format!("attacks_{}_{}_{}", inst_id.encounter_id, inst_id.monster_index, inst_id.instance);
                                             egui::CollapsingHeader::new("Attacks")
-                                                .id_salt(format!("attacks_{}_{}_{}", inst_id.encounter_id, inst_id.monster_index, inst_id.instance))
+                                                .id_salt(&id_salt)
                                                 .default_open(false)
                                                 .show(ui, |ui| {
-                                                    for atk in &attacks_snapshot {
-                                                        let ac_id = egui::Id::new(format!("ac_{}_{}_{}_{}", inst_id.encounter_id, inst_id.monster_index, inst_id.instance, atk.name));
-                                                        let mut target_ac: u8 = ui.ctx().memory(|m| m.data.get_temp(ac_id).unwrap_or(10u8));
-                                                        ui.horizontal(|ui| {
-                                                            let btn_text = format!("{} (+{})", atk.name, atk.to_hit);
-                                                            if ui.button(&btn_text).clicked() {
-                                                                attack_actions.push((attacker_name.clone(), format!("AC {}", target_ac), atk.clone(), target_ac));
-                                                            }
-                                                            ui.label("vs AC");
-                                                            let mut tac = target_ac as i32;
-                                                            if crate::ui::canvas_common::num_input_i32(ui, &mut tac, 35.0) { target_ac = tac as u8; }
-                                                        });
-                                                        ui.ctx().memory_mut(|m| m.data.insert_temp(ac_id, target_ac));
-                                                    }
+                                                    attack_target_ui(ui, &attacks_snapshot, &attacker_name, attacker_hidden, &attacker_cid, &targets, &id_salt, &mut attack_actions);
                                                 });
                                         }
                                     });
@@ -1425,11 +1901,31 @@ pub fn presentation_sidebar(
                 tracker.toggle_combatant_condition(&id, c_idx);
             }
             // Process attack rolls
-            for (attacker_name, target_desc, attack, target_ac) in attack_actions {
-                let result = dice::roll_attack(&attack, target_ac);
+            for (attacker_name, target_desc, attack, target_ac, advantage, attacker_cid) in attack_actions {
+                let result = dice::roll_attack_with_advantage(&attack, target_ac, advantage);
                 tracker.log.log_attack(&attacker_name, &target_desc, &attack.name, &result, Some(&attack));
+                // Attacking breaks hidden — you reveal yourself
+                match &attacker_cid {
+                    CombatantId::Monster(mid) => {
+                        if let Some(inst) = tracker.instances.get_mut(mid) {
+                            inst.hidden = false;
+                        }
+                    }
+                    CombatantId::Player(pid) => {
+                        if let Some(pc) = tracker.players.get_mut(pid) {
+                            pc.hidden = false;
+                        }
+                    }
+                }
             }
         }
+
+    ui.add_space(8.0);
+
+    // AoE markers
+    ui.heading("Area of Effect");
+    ui.separator();
+    aoe_sidebar(ui, presentation, dungeon);
 
     ui.add_space(8.0);
 

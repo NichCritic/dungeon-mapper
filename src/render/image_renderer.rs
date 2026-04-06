@@ -35,14 +35,16 @@ impl ImageRenderer {
 
 impl MapRenderer for ImageRenderer {
     fn fill_rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: [u8; 4]) {
-        let sx = self.px(x);
-        let sy = self.py(y);
-        let sw = (w * self.scale) as i32;
-        let sh = (h * self.scale) as i32;
+        let sx = self.px(x) as i64;
+        let sy = self.py(y) as i64;
+        let sw = (w * self.scale) as i64;
+        let sh = (h * self.scale) as i64;
         let pixel = Rgba(color);
+        let img_w = self.image.width() as i64;
+        let img_h = self.image.height() as i64;
 
-        for py in sy.max(0)..(sy + sh).min(self.image.height() as i32) {
-            for px in sx.max(0)..(sx + sw).min(self.image.width() as i32) {
+        for py in sy.max(0)..(sy + sh).min(img_h) {
+            for px in sx.max(0)..(sx + sw).min(img_w) {
                 self.image.put_pixel(px as u32, py as u32, pixel);
             }
         }
@@ -61,12 +63,14 @@ impl MapRenderer for ImageRenderer {
     }
 
     fn fill_circle(&mut self, cx: f32, cy: f32, r: f32, color: [u8; 4]) {
-        let scx = self.px(cx);
-        let scy = self.py(cy);
-        let sr = (r * self.scale) as i32;
+        let scx = self.px(cx) as i64;
+        let scy = self.py(cy) as i64;
+        let sr = (r * self.scale) as i64;
         let pixel = image::Rgba(color);
-        for py in (scy - sr).max(0)..(scy + sr).min(self.image.height() as i32) {
-            for px in (scx - sr).max(0)..(scx + sr).min(self.image.width() as i32) {
+        let w = self.image.width() as i64;
+        let h = self.image.height() as i64;
+        for py in (scy - sr).max(0)..(scy + sr).min(h) {
+            for px in (scx - sr).max(0)..(scx + sr).min(w) {
                 let dx = px - scx;
                 let dy = py - scy;
                 if dx * dx + dy * dy <= sr * sr {
@@ -77,15 +81,17 @@ impl MapRenderer for ImageRenderer {
     }
 
     fn stroke_circle(&mut self, cx: f32, cy: f32, r: f32, width: f32, color: [u8; 4]) {
-        let scx = self.px(cx);
-        let scy = self.py(cy);
-        let sr = (r * self.scale) as i32;
-        let sw = ((width * self.scale) / 2.0).max(1.0) as i32;
+        let scx = self.px(cx) as i64;
+        let scy = self.py(cy) as i64;
+        let sr = (r * self.scale) as i64;
+        let sw = ((width * self.scale) / 2.0).max(1.0) as i64;
         let pixel = image::Rgba(color);
         let r_inner = (sr - sw).max(0);
         let r_outer = sr + sw;
-        for py in (scy - r_outer).max(0)..(scy + r_outer).min(self.image.height() as i32) {
-            for px in (scx - r_outer).max(0)..(scx + r_outer).min(self.image.width() as i32) {
+        let w = self.image.width() as i64;
+        let h = self.image.height() as i64;
+        for py in (scy - r_outer).max(0)..(scy + r_outer).min(h) {
+            for px in (scx - r_outer).max(0)..(scx + r_outer).min(w) {
                 let dx = px - scx;
                 let dy = py - scy;
                 let d2 = dx * dx + dy * dy;
@@ -98,17 +104,19 @@ impl MapRenderer for ImageRenderer {
 
     fn draw_line(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, width: f32, color: [u8; 4]) {
         // Bresenham with thickness
-        let sx1 = self.px(x1);
-        let sy1 = self.py(y1);
-        let sx2 = self.px(x2);
-        let sy2 = self.py(y2);
-        let sw = ((width * self.scale) / 2.0).max(1.0) as i32;
+        let sx1 = self.px(x1) as i64;
+        let sy1 = self.py(y1) as i64;
+        let sx2 = self.px(x2) as i64;
+        let sy2 = self.py(y2) as i64;
+        let sw = ((width * self.scale) / 2.0).max(1.0) as i64;
         let pixel = Rgba(color);
+        let img_w = self.image.width() as i64;
+        let img_h = self.image.height() as i64;
 
         let dx = (sx2 - sx1).abs();
         let dy = (sy2 - sy1).abs();
-        let step_x = if sx1 < sx2 { 1 } else { -1 };
-        let step_y = if sy1 < sy2 { 1 } else { -1 };
+        let step_x: i64 = if sx1 < sx2 { 1 } else { -1 };
+        let step_y: i64 = if sy1 < sy2 { 1 } else { -1 };
         let mut err = dx - dy;
         let mut cx = sx1;
         let mut cy = sy1;
@@ -118,11 +126,7 @@ impl MapRenderer for ImageRenderer {
                 for ox in -sw..=sw {
                     let px = cx + ox;
                     let py = cy + oy;
-                    if px >= 0
-                        && py >= 0
-                        && px < self.image.width() as i32
-                        && py < self.image.height() as i32
-                    {
+                    if px >= 0 && py >= 0 && px < img_w && py < img_h {
                         self.image.put_pixel(px as u32, py as u32, pixel);
                     }
                 }

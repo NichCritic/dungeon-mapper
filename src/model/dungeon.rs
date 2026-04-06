@@ -35,6 +35,9 @@ pub struct Dungeon {
     /// Ambient light level (0.0 = dark, 1.0 = fully lit).
     #[serde(default)]
     pub ambient_light: f32,
+    /// Area-of-effect markers placed on the map.
+    #[serde(default)]
+    pub aoe_markers: Vec<crate::presentation::aoe::AoEMarker>,
 }
 
 impl Dungeon {
@@ -50,6 +53,7 @@ impl Dungeon {
             annotations: Vec::new(),
             light_sources: Vec::new(),
             ambient_light: 0.0,
+            aoe_markers: Vec::new(),
         }
     }
 }

@@ -508,6 +508,9 @@ mod tests {
                 notes: String::new(),
                 attack_bonus: 7,
                 damage_dice: "1d8 + 4".to_string(),
+                stealth_modifier: 1,
+                senses: Default::default(),
+                stealth_override: None,
             },
         ];
 

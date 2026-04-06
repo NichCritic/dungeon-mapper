@@ -150,6 +150,9 @@ pub fn player_viewport(
             ui.ctx().request_repaint();
         }
 
+        // AoE markers (live overlay on player view, no center crosshairs)
+        crate::presentation::aoe::render_aoe_markers(&painter, &transform, &dungeon.aoe_markers, false);
+
         // Live text overlay for visible room labels
         if !presentation.show_labels_player { return; }
         for rl in &layout.rooms {

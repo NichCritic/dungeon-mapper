@@ -110,11 +110,37 @@ fn roll_dice_crit(expr: &str, rng: &mut impl Rng) -> DiceResult {
     }
 }
 
+/// Whether an attack roll has advantage, disadvantage, or neither.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[allow(dead_code)]
+pub enum AdvantageState {
+    Normal,
+    Advantage,
+    Disadvantage,
+}
+
 /// Roll an attack using a ParsedAttack against a target AC.
 pub fn roll_attack(attack: &ParsedAttack, target_ac: u8) -> AttackResult {
+    roll_attack_with_advantage(attack, target_ac, AdvantageState::Normal)
+}
+
+/// Roll an attack with advantage/disadvantage on the attack roll.
+pub fn roll_attack_with_advantage(attack: &ParsedAttack, target_ac: u8, advantage: AdvantageState) -> AttackResult {
     let mut rng = rand::thread_rng();
 
-    let attack_roll = rng.gen_range(1..=20u32);
+    let attack_roll = match advantage {
+        AdvantageState::Normal => rng.gen_range(1..=20u32),
+        AdvantageState::Advantage => {
+            let r1 = rng.gen_range(1..=20u32);
+            let r2 = rng.gen_range(1..=20u32);
+            r1.max(r2)
+        }
+        AdvantageState::Disadvantage => {
+            let r1 = rng.gen_range(1..=20u32);
+            let r2 = rng.gen_range(1..=20u32);
+            r1.min(r2)
+        }
+    };
     let attack_total = attack_roll as i32 + attack.to_hit as i32;
     let is_crit = attack_roll == 20;
     let is_fumble = attack_roll == 1;
