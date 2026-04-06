@@ -156,21 +156,21 @@ def make_floor_mask():
 THEMES = {
     'jungle': {
         'name': 'Jungle Temple',
-        'floor_base': (82, 78, 68),
-        'floor_accent': (58, 53, 42),
-        'mortar': (42, 38, 28),
-        'moss_colors': [(40, 82, 30), (58, 105, 40), (48, 70, 35)],
-        'stain': (50, 45, 35),
-        'wall_top': (55, 50, 40),
-        'wall_face_lit': (65, 60, 48),
-        'wall_face_dark': (25, 22, 15),
-        'exterior': (10, 22, 8),
-        'exterior_accent': (5, 12, 4),
-        'exterior_detail': (15, 30, 10),
-        'shadow_color': (8, 12, 5),
+        'floor_base': (155, 142, 118),       # Warm tan sandstone
+        'floor_accent': (135, 122, 98),      # Slightly darker tan
+        'mortar': (65, 58, 42),              # Dark grout
+        'moss_colors': [(45, 85, 32), (62, 110, 42), (30, 55, 22)],
+        'stain': (90, 82, 60),              # Warm dirt stain
+        'wall_top': (75, 68, 52),
+        'wall_face_lit': (85, 78, 60),
+        'wall_face_dark': (30, 25, 18),
+        'exterior': (12, 25, 10),
+        'exterior_accent': (6, 14, 5),
+        'exterior_detail': (18, 35, 12),
+        'shadow_color': (20, 22, 15),
         'stone_density': 0.7,
-        'moss_coverage': 0.35,
-        'contrast': 35,
+        'moss_coverage': 0.45,
+        'contrast': 15,                      # Subtle tile variation
     },
     'ice': {
         'name': 'Frozen Caverns',
@@ -216,55 +216,40 @@ THEMES = {
 # ---------------------------------------------------------------------------
 
 def generate_floor_tile(size, theme, seed):
-    """Generate a single unique floor tile on the fly."""
+    """
+    Generate a simple, subtle floor tile. Mostly flat with gentle
+    color variation — the detail comes from grout and overlays,
+    not the tile surface itself.
+    """
     pn = VectorPerlinNoise(seed)
     rng = np.random.RandomState(seed)
 
     base = np.array(theme['floor_base'], dtype=np.float64)
     accent = np.array(theme['floor_accent'], dtype=np.float64)
-    mortar = np.array(theme['mortar'], dtype=np.float64)
-    n_cells = int(6 + rng.randint(6))  # 6-11 cells per tile for variety
-
-    # Voronoi for stone blocks
-    pts = rng.uniform(0, size, (n_cells, 2))
-    cell_vals = rng.uniform(0.2, 1.0, n_cells)
-    # Tile 3x3 for seamless edges
-    pts_tiled = []
-    vals_tiled = []
-    for dx in (-size, 0, size):
-        for dy in (-size, 0, size):
-            pts_tiled.append(pts + np.array([dx, dy]))
-            vals_tiled.append(cell_vals)
-    pts_all = np.concatenate(pts_tiled)
-    vals_all = np.concatenate(vals_tiled)
 
     yy, xx = np.mgrid[0:size, 0:size]
-    coords = np.stack([xx.ravel(), yy.ravel()], axis=1).astype(np.float64)
-    dists = np.sqrt(((coords[:, None, :] - pts_all[None, :, :]) ** 2).sum(axis=2))
-    nearest = np.argmin(dists, axis=1)
-    cells = vals_all[nearest].reshape(size, size)
-    part = np.partition(dists, 2, axis=1)[:, :2]
-    part.sort(axis=1)
-    edges = (part[:, 1] - part[:, 0]).reshape(size, size)
-    mn, mx = edges.min(), edges.max()
-    if mx - mn > 1e-8:
-        edges = (edges - mn) / (mx - mn)
-
-    # Surface noise
-    x_scaled = xx.astype(np.float64) / size * 6.0
-    y_scaled = yy.astype(np.float64) / size * 6.0
-    surface = pn.fbm_2d(x_scaled, y_scaled, octaves=3)
+    # Gentle surface variation (low frequency, low amplitude)
+    x_scaled = xx.astype(np.float64) / size * 3.0
+    y_scaled = yy.astype(np.float64) / size * 3.0
+    surface = pn.fbm_2d(x_scaled, y_scaled, octaves=2)
     surface = (surface - surface.min()) / (surface.max() - surface.min() + 1e-8)
 
+    # Very fine grain texture
+    x_fine = xx.astype(np.float64) / size * 10.0
+    y_fine = yy.astype(np.float64) / size * 10.0
+    fine = pn.fbm_2d(x_fine + 50, y_fine + 50, octaves=2)
+    fine = (fine - fine.min()) / (fine.max() - fine.min() + 1e-8)
+
+    # Random overall hue shift for this tile
+    hue_shift = rng.uniform(-0.15, 0.15)
+
     tile = np.zeros((size, size, 4), dtype=np.float64)
-    t = cells
-    contrast = theme['contrast']
+    t = 0.5 + hue_shift + (surface - 0.5) * 0.3
+    t = np.clip(t, 0, 1)
     for c in range(3):
         color = base[c] * t + accent[c] * (1 - t)
-        color += (surface - 0.5) * contrast
-        # Mortar lines
-        mortar_mask = np.clip(1.0 - edges * 4.0, 0, 1) ** 1.5
-        color = color * (1 - mortar_mask * 0.7) + mortar[c] * mortar_mask * 0.7
+        # Very subtle fine grain
+        color += (fine - 0.5) * 8
         tile[:, :, c] = np.clip(color, 0, 255)
     tile[:, :, 3] = 255
     return tile
@@ -272,21 +257,145 @@ def generate_floor_tile(size, theme, seed):
 
 def stamp_unique_floors(canvas_arr, floor_mask, theme):
     """Stamp a unique procedural tile for every floor cell. No repeats."""
-    print("    Floor tiles (128 unique)...", end='', flush=True)
-    # Count floor cells and pre-generate enough unique tiles
+    print("    Floor tiles...", end='', flush=True)
     floor_cells = [(r, c) for r in range(ROWS) for c in range(COLS) if LAYOUT[r, c] == 1]
     n_tiles = max(len(floor_cells), 128)
-    tiles = []
-    for i in range(n_tiles):
-        tiles.append(generate_floor_tile(TILE, theme, seed=1000 + i))
+    tiles = [generate_floor_tile(TILE, theme, seed=1000 + i) for i in range(n_tiles)]
 
-    # Assign tiles to cells — just use sequential assignment (all unique)
     rng = np.random.RandomState(42)
     indices = list(range(n_tiles))
     rng.shuffle(indices)
     for idx, (r, c) in enumerate(floor_cells):
         tile = tiles[indices[idx % n_tiles]]
         canvas_arr[r*TILE:(r+1)*TILE, c*TILE:(c+1)*TILE] = tile
+    print(" done")
+
+
+def render_grout(canvas_arr, floor_mask, theme):
+    """
+    Draw grout/mortar lines between floor tiles with varying width
+    and darkness. Each edge gets a slightly different width (1-3px)
+    seeded by position. Some edges get moss-filled grout.
+    """
+    print("    Grout lines...", end='', flush=True)
+    mortar = np.array(theme['mortar'], dtype=np.float64)
+    moss_colors = theme['moss_colors']
+    rng = np.random.RandomState(99)
+
+    for r in range(ROWS):
+        for c in range(COLS):
+            if LAYOUT[r, c] != 1:
+                continue
+            x0, y0 = c * TILE, r * TILE
+
+            # Determine grout properties seeded by position
+            h_seed = hash((r, c, 'h')) & 0xFFFF
+            v_seed = hash((r, c, 'v')) & 0xFFFF
+            h_rng = np.random.RandomState(h_seed)
+            v_rng = np.random.RandomState(v_seed)
+
+            # Bottom edge grout (if cell below is also floor)
+            h_width = h_rng.randint(1, 4)  # 1-3px
+            h_dark = 0.5 + h_rng.uniform(0, 0.4)  # darkness
+            h_mossy = h_rng.random() < theme['moss_coverage']
+
+            for dy in range(h_width):
+                py = y0 + TILE - 1 - dy
+                if py < 0 or py >= PX_H:
+                    continue
+                for px in range(x0, min(x0 + TILE, PX_W)):
+                    if not floor_mask[py, px]:
+                        continue
+                    t = h_dark * (1 - dy / max(h_width, 1) * 0.3)
+                    if h_mossy and len(moss_colors) > 0:
+                        mc = np.array(moss_colors[0], dtype=np.float64)
+                        for ch in range(3):
+                            canvas_arr[py, px, ch] = np.clip(
+                                canvas_arr[py, px, ch] * (1 - t * 0.5) + mc[ch] * t * 0.5, 0, 255)
+                    else:
+                        for ch in range(3):
+                            canvas_arr[py, px, ch] = np.clip(
+                                canvas_arr[py, px, ch] * (1 - t) + mortar[ch] * t, 0, 255)
+
+            # Right edge grout
+            v_width = v_rng.randint(1, 4)
+            v_dark = 0.5 + v_rng.uniform(0, 0.4)
+            v_mossy = v_rng.random() < theme['moss_coverage']
+
+            for dx in range(v_width):
+                px = x0 + TILE - 1 - dx
+                if px < 0 or px >= PX_W:
+                    continue
+                for py in range(y0, min(y0 + TILE, PX_H)):
+                    if not floor_mask[py, px]:
+                        continue
+                    t = v_dark * (1 - dx / max(v_width, 1) * 0.3)
+                    if v_mossy and len(moss_colors) > 0:
+                        mc = np.array(moss_colors[0], dtype=np.float64)
+                        for ch in range(3):
+                            canvas_arr[py, px, ch] = np.clip(
+                                canvas_arr[py, px, ch] * (1 - t * 0.5) + mc[ch] * t * 0.5, 0, 255)
+                    else:
+                        for ch in range(3):
+                            canvas_arr[py, px, ch] = np.clip(
+                                canvas_arr[py, px, ch] * (1 - t) + mortar[ch] * t, 0, 255)
+    print(" done")
+
+
+def render_vine_invasion(canvas_arr, floor_mask, inner_dist, theme):
+    """
+    Vines/foliage/frost/lava creeping from the exterior into the rooms
+    along the walls. Uses wall proximity + noise to create organic
+    tendrils that invade the floor space.
+    """
+    if theme['moss_coverage'] <= 0:
+        return
+    print("    Vine invasion...", end='', flush=True)
+    # Multiple noise scales for organic tendril shapes
+    n1 = continuous_noise(PX_H, PX_W, scale=1.5, octaves=4, seed=800)
+    n2 = continuous_noise(PX_H, PX_W, scale=4.0, octaves=3, seed=801)
+    n3 = continuous_noise(PX_H, PX_W, scale=0.5, octaves=2, seed=802)
+
+    # Invasion distance: how far vines reach from wall
+    max_invasion = TILE * 1.8
+    # Base invasion mask: strong near walls, fading inward
+    wall_prox = np.clip(1.0 - inner_dist / max_invasion, 0, 1)
+
+    # Shape the invasion with noise — creates tendril/finger shapes
+    tendril = wall_prox * (0.3 + 0.7 * n1) * (0.5 + 0.5 * n2)
+    # Large-scale variation: some areas have more invasion
+    tendril *= (0.2 + 0.8 * np.clip(n3 * 1.5, 0, 1))
+
+    # Threshold to get defined edges
+    vine_mask = np.clip((tendril - 0.25) * 4.0, 0, 1)
+    vine_mask[~floor_mask] = 0
+
+    # Use multiple moss colors for depth
+    colors = [np.array(mc, dtype=np.float64) for mc in theme['moss_colors']]
+    if not colors:
+        return
+
+    # Layer 1: base vine color (darkest)
+    alpha1 = vine_mask * 0.6
+    for c in range(3):
+        canvas_arr[:, :, c] += (colors[0][c] - canvas_arr[:, :, c]) * alpha1
+
+    # Layer 2: highlights on thicker parts
+    if len(colors) > 1:
+        highlight_mask = np.clip((tendril - 0.4) * 5.0, 0, 1) * vine_mask
+        alpha2 = highlight_mask * 0.4
+        for c in range(3):
+            canvas_arr[:, :, c] += (colors[1][c] - canvas_arr[:, :, c]) * alpha2
+
+    # Layer 3: dark edges/shadows on vine mass
+    if len(colors) > 2:
+        # Use the gradient at the edge of vine coverage for shadow
+        edge_dark = vine_mask * np.clip(1.0 - tendril * 2, 0, 1)
+        alpha3 = edge_dark * 0.3
+        dark = colors[2] * 0.5
+        for c in range(3):
+            canvas_arr[:, :, c] += (dark[c] - canvas_arr[:, :, c]) * alpha3
+
     print(" done")
 
 
@@ -523,17 +632,20 @@ def render_preview(theme_name, output_path):
     print(" done")
 
     stamp_unique_floors(canvas_arr, floor_mask, theme)
+    render_grout(canvas_arr, floor_mask, theme)
 
     print("    Overlays...", end='', flush=True)
     render_overlays(canvas_arr, floor_mask, inner_dist, theme)
     print(" done")
 
+    render_vine_invasion(canvas_arr, floor_mask, inner_dist, theme)
     render_ao(canvas_arr, floor_mask, inner_dist)
     render_radial_lighting(canvas_arr, floor_mask, inner_dist, theme)
     render_walls(canvas_arr, floor_mask, theme)
 
     canvas = Image.fromarray(np.clip(canvas_arr, 0, 255).astype(np.uint8), 'RGBA')
-    render_grid(canvas, floor_mask)
+    # No more grid overlay — grout lines replace it
+    # render_grid(canvas, floor_mask)
     canvas.save(output_path)
     print(f"  -> {output_path}")
     return canvas
