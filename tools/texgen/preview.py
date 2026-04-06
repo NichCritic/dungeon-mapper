@@ -342,20 +342,16 @@ def render_exterior(canvas_arr, floor_mask, theme):
 
 def render_walls(canvas_arr, floor_mask, theme):
     """
-    2.5D wall rendering — looking DOWN into rooms.
+    2.5D wall rendering — walls are OUTSIDE the floor extent.
 
-    Far walls (north, west) show their inner face INTO the floor area.
-    Near walls (south, east) show only the wall-top border.
-    This creates the illusion of recessed rooms, not elevated platforms.
-
-    - Wall top border: floor pixels within WALL_THICKNESS of any edge
-    - North inner face: floor pixels below a north edge, painted as
-      the far wall face receding downward (darker toward floor)
-    - West inner face: floor pixels right of a west edge, painted as
-      the far wall face receding rightward
-    - South/east edges: bright highlight (wall top catch light)
+    Wall top border and inner faces are drawn in the void, adjacent
+    to floor edges. The floor area stays full-size with no wall
+    intrusion. Inner faces extend from the wall top inward toward
+    the floor, creating a ledge/cliff effect seen from above.
     """
-    inner_dist = distance_transform_edt(floor_mask)
+    void_mask = ~floor_mask
+    # Distance from floor edge into the void
+    void_dist = distance_transform_edt(void_mask)
     wall_noise = continuous_noise(PX_H, PX_W, scale=2.0, octaves=2,
                                   seed=hash(theme['name']) & 0xFFFF)
 
@@ -363,119 +359,63 @@ def render_walls(canvas_arr, floor_mask, theme):
     face_lit = np.array(theme['wall_face_lit'], dtype=np.float64)
     face_dark = np.array(theme['wall_face_dark'], dtype=np.float64)
 
-    # --- Voronoi stone texture for wall faces ---
-    # Generate a separate stone pattern for the walls so faces have block detail
+    # --- Voronoi stone texture for walls ---
     print("    Wall stone texture...", end='', flush=True)
     wall_cells, wall_edges = continuous_voronoi(PX_H, PX_W, density=1.2, seed=700)
-    wall_stone_var = (wall_cells - 0.5) * 18  # per-block color variation
-    wall_mortar = np.clip(1.0 - wall_edges * 4.5, 0, 1) ** 1.5  # mortar lines
+    wall_stone_var = (wall_cells - 0.5) * 18
+    wall_mortar = np.clip(1.0 - wall_edges * 4.5, 0, 1) ** 1.5
     print(" done")
 
-    # --- Wall top border (all edges) ---
-    # Flat stone surface, no gradient. Textured with noise + stone blocks.
-    print("    Wall borders...", end='', flush=True)
-    border_mask = floor_mask & (inner_dist <= WALL_THICKNESS)
-    noise_var = (wall_noise - 0.5) * 10
-    for c in range(3):
-        # Flat color with noise texture, no brightness gradient
-        base_val = wall_top[c] + noise_var + wall_stone_var
-        # Darken mortar lines
-        base_val = base_val * (1 - wall_mortar * 0.4) + (wall_top[c] * 0.5) * wall_mortar * 0.4
-        canvas_arr[:, :, c] = np.where(
-            border_mask, np.clip(base_val, 0, 255), canvas_arr[:, :, c])
+    # Total wall extent into void = border + face
+    total_wall = WALL_THICKNESS + WALL_FACE_HEIGHT
+
+    # --- Inner faces first (furthest from floor, drawn behind wall top) ---
+    # These are void pixels near the floor edge, beyond the wall top border.
+    # Face goes from WALL_THICKNESS to WALL_THICKNESS + WALL_FACE_HEIGHT
+    # away from the floor edge, getting darker as it recedes.
+    print("    Inner faces...", end='', flush=True)
+
+    # Find floor edges (void pixels adjacent to floor)
+    # void_dist == 1 means immediately adjacent to floor
+    # Wall top occupies void_dist 1..WALL_THICKNESS
+    # Face occupies void_dist WALL_THICKNESS+1..total_wall
+
+    for d in range(WALL_FACE_HEIGHT):
+        dist_val = WALL_THICKNESS + 1 + d
+        face_band = void_mask & (void_dist >= dist_val - 0.5) & (void_dist < dist_val + 0.5)
+        # t=0 at top of face (near wall border), t=1 at bottom (deep)
+        t = (d / WALL_FACE_HEIGHT) ** 0.7
+        base = face_lit * (1 - t) + face_dark * t
+        for c in range(3):
+            color = base[c] + np.where(face_band, wall_stone_var * (1 - t * 0.5), 0)
+            color = color * (1 - wall_mortar * 0.3 * (1 - t)) + face_dark[c] * wall_mortar * 0.3 * (1 - t)
+            color += np.where(face_band, (wall_noise - 0.5) * 8 * (1 - t), 0)
+            canvas_arr[:, :, c] = np.where(
+                face_band, np.clip(color, 0, 255), canvas_arr[:, :, c])
     print(" done")
 
-    # --- Dark edge line between wall top and inner face (all 4 edges) ---
+    # --- Dark crease line between wall top and inner face ---
     print("    Edge creases...", end='', flush=True)
-    north_edge = np.zeros((PX_H, PX_W), dtype=bool)
-    north_edge[1:, :] = floor_mask[1:, :] & ~floor_mask[:-1, :]
-    west_edge = np.zeros((PX_H, PX_W), dtype=bool)
-    west_edge[:, 1:] = floor_mask[:, 1:] & ~floor_mask[:, :-1]
-    south_edge_c = np.zeros((PX_H, PX_W), dtype=bool)
-    south_edge_c[:-1, :] = floor_mask[:-1, :] & ~floor_mask[1:, :]
-    east_edge_c = np.zeros((PX_H, PX_W), dtype=bool)
-    east_edge_c[:, :-1] = floor_mask[:, :-1] & ~floor_mask[:, 1:]
-
     crease_color = face_dark * 0.7
     for d in range(2):
         a = 0.6 * (1 - d * 0.4)
-        offset = WALL_THICKNESS + d
-        # North crease (shift down)
-        crease = np.zeros((PX_H, PX_W), dtype=bool)
-        if offset < PX_H:
-            crease[offset:, :] = north_edge[:-offset, :]
-        crease &= floor_mask
-        for c in range(3):
-            canvas_arr[:, :, c] = np.where(crease,
-                np.clip(canvas_arr[:, :, c] * (1 - a) + crease_color[c] * a, 0, 255),
-                canvas_arr[:, :, c])
-        # West crease (shift right)
-        crease = np.zeros((PX_H, PX_W), dtype=bool)
-        if offset < PX_W:
-            crease[:, offset:] = west_edge[:, :-offset]
-        crease &= floor_mask
-        for c in range(3):
-            canvas_arr[:, :, c] = np.where(crease,
-                np.clip(canvas_arr[:, :, c] * (1 - a) + crease_color[c] * a, 0, 255),
-                canvas_arr[:, :, c])
-        # South crease (shift up)
-        crease = np.zeros((PX_H, PX_W), dtype=bool)
-        if offset < PX_H:
-            crease[:-offset, :] = south_edge_c[offset:, :]
-        crease &= floor_mask
-        for c in range(3):
-            canvas_arr[:, :, c] = np.where(crease,
-                np.clip(canvas_arr[:, :, c] * (1 - a) + crease_color[c] * a, 0, 255),
-                canvas_arr[:, :, c])
-        # East crease (shift left)
-        crease = np.zeros((PX_H, PX_W), dtype=bool)
-        if offset < PX_W:
-            crease[:, :-offset] = east_edge_c[:, offset:]
-        crease &= floor_mask
+        dist_val = WALL_THICKNESS + d
+        crease = void_mask & (void_dist >= dist_val + 0.5) & (void_dist < dist_val + 1.5)
         for c in range(3):
             canvas_arr[:, :, c] = np.where(crease,
                 np.clip(canvas_arr[:, :, c] * (1 - a) + crease_color[c] * a, 0, 255),
                 canvas_arr[:, :, c])
     print(" done")
 
-    # --- All four inner faces (uniform lighting, radial handles depth) ---
-    print("    Inner faces...", end='', flush=True)
-    # South edge (void below) and East edge (void right) also get faces now
-    south_edge = np.zeros((PX_H, PX_W), dtype=bool)
-    south_edge[:-1, :] = floor_mask[:-1, :] & ~floor_mask[1:, :]
-    east_edge = np.zeros((PX_H, PX_W), dtype=bool)
-    east_edge[:, :-1] = floor_mask[:, :-1] & ~floor_mask[:, 1:]
-
-    edges = [
-        ('n', north_edge, 'y', 1),   # shift down into floor
-        ('w', west_edge,  'x', 1),   # shift right into floor
-        ('s', south_edge, 'y', -1),  # shift up into floor
-        ('e', east_edge,  'x', -1),  # shift left into floor
-    ]
-
-    for name, edge, axis, direction in edges:
-        for d in range(WALL_FACE_HEIGHT):
-            target = np.zeros((PX_H, PX_W), dtype=bool)
-            offset = WALL_THICKNESS + 2 + d
-            if axis == 'y':
-                if direction > 0 and offset < PX_H:
-                    target[offset:, :] = edge[:-offset, :]
-                elif direction < 0 and offset < PX_H:
-                    target[:-offset, :] = edge[offset:, :]
-            else:
-                if direction > 0 and offset < PX_W:
-                    target[:, offset:] = edge[:, :-offset]
-                elif direction < 0 and offset < PX_W:
-                    target[:, :-offset] = edge[:, offset:]
-            paint_mask = target & floor_mask
-            t = (d / WALL_FACE_HEIGHT) ** 0.7
-            base = face_lit * (1 - t) + face_dark * t
-            for c in range(3):
-                color = base[c] + np.where(paint_mask, wall_stone_var * (1 - t * 0.5), 0)
-                color = color * (1 - wall_mortar * 0.3 * (1 - t)) + face_dark[c] * wall_mortar * 0.3 * (1 - t)
-                color += np.where(paint_mask, (wall_noise - 0.5) * 8 * (1 - t), 0)
-                canvas_arr[:, :, c] = np.where(
-                    paint_mask, np.clip(color, 0, 255), canvas_arr[:, :, c])
+    # --- Wall top border (void pixels closest to floor edge) ---
+    print("    Wall borders...", end='', flush=True)
+    border_mask = void_mask & (void_dist <= WALL_THICKNESS)
+    noise_var = (wall_noise - 0.5) * 10
+    for c in range(3):
+        base_val = wall_top[c] + noise_var + wall_stone_var
+        base_val = base_val * (1 - wall_mortar * 0.4) + (wall_top[c] * 0.5) * wall_mortar * 0.4
+        canvas_arr[:, :, c] = np.where(
+            border_mask, np.clip(base_val, 0, 255), canvas_arr[:, :, c])
     print(" done")
 
 
