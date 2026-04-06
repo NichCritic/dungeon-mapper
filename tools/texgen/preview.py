@@ -393,78 +393,95 @@ def step_grout_cracked(ctx, width_range=(1, 2), glow_chance=0.15):
 # ===================================================================
 
 def step_vine_tendrils(ctx, reach=1.8, density=0.45):
-    """Organic vine tendrils creeping from exterior into rooms."""
-    n1 = noise(PX_H, PX_W, scale=1.5, octaves=4, seed=800)
-    n2 = noise(PX_H, PX_W, scale=4.0, octaves=3, seed=801)
-    n3 = noise(PX_H, PX_W, scale=0.5, octaves=2, seed=802)
+    """Organic vine tendrils creeping from exterior into rooms.
+    Uses fine-scale noise for thin tendril shapes, not fat blobs."""
+    # Fine detail for thin tendril shapes
+    n_shape = noise(PX_H, PX_W, scale=4.0, octaves=4, seed=800)
+    n_detail = noise(PX_H, PX_W, scale=8.0, octaves=3, seed=801)
+    # Medium for tendril routing/clustering
+    n_route = noise(PX_H, PX_W, scale=1.5, octaves=2, seed=802)
 
     prox = np.clip(1.0 - ctx.inner_dist / (TILE * reach), 0, 1)
-    tendril = prox * (0.3 + 0.7 * n1) * (0.5 + 0.5 * n2) * (0.2 + 0.8 * np.clip(n3 * 1.5, 0, 1))
-    vine_mask = np.clip((tendril - 0.25) * 4.0, 0, 1)
+    # Thin tendrils: high-freq noise shaped by proximity and routing
+    tendril = prox * (0.2 + 0.8 * n_shape) * (0.5 + 0.5 * n_detail)
+    tendril *= (0.3 + 0.7 * np.clip(n_route * 1.5, 0, 1))
+    # Sharper threshold for thinner features
+    vine_mask = np.clip((tendril - 0.3) * 5.0, 0, 1)
     vine_mask[ctx.void_mask] = 0
 
     colors = [np.array(mc, dtype=np.float64) for mc in ctx.theme['moss_colors']]
     if not colors: return
-    ctx.blend(colors[0], vine_mask * 0.6, ctx.floor_mask)
+    ctx.blend(colors[0], vine_mask * 0.55, ctx.floor_mask)
     if len(colors) > 1:
-        highlight = np.clip((tendril - 0.4) * 5.0, 0, 1) * vine_mask
-        ctx.blend(colors[1], highlight * 0.4, ctx.floor_mask)
+        # Fine highlights only on densest vine areas
+        highlight = np.clip((tendril - 0.45) * 8.0, 0, 1) * vine_mask
+        ctx.blend(colors[1], highlight * 0.35, ctx.floor_mask)
     if len(colors) > 2:
-        edge_shadow = vine_mask * np.clip(1.0 - tendril * 2, 0, 1)
-        ctx.blend(colors[2] * 0.5, edge_shadow * 0.3, ctx.floor_mask)
+        edge_shadow = vine_mask * np.clip(1.0 - tendril * 2.5, 0, 1)
+        ctx.blend(colors[2] * 0.5, edge_shadow * 0.25, ctx.floor_mask)
 
 
 def step_frost_creep(ctx, reach=1.2, density=0.3):
-    """Crystalline frost spreading from cold walls. Feathery, branching."""
-    # Higher frequency noise for crystalline/feathery look
-    n1 = noise(PX_H, PX_W, scale=2.5, octaves=4, seed=810)
-    n2 = noise(PX_H, PX_W, scale=6.0, octaves=3, seed=811)
-    n3 = noise(PX_H, PX_W, scale=1.0, octaves=2, seed=812)
+    """Crystalline frost spreading from cold walls. Fine feathery detail."""
+    # Very high frequency for crystalline/feathery branching
+    n_crystal = noise(PX_H, PX_W, scale=6.0, octaves=4, seed=810)
+    n_fine = noise(PX_H, PX_W, scale=12.0, octaves=3, seed=811)
+    # Medium for which areas get frost
+    n_zone = noise(PX_H, PX_W, scale=1.5, octaves=2, seed=812)
 
     prox = np.clip(1.0 - ctx.inner_dist / (TILE * reach), 0, 1)
-    # Crystalline: sharper threshold, more on/off
-    crystal = prox * n1 * (0.6 + 0.4 * n2)
-    crystal *= (0.3 + 0.7 * np.clip(n3 * 1.5, 0, 1))
-    frost = np.clip((crystal - 0.15) * 6.0, 0, 1)  # sharper edges
+    crystal = prox * n_crystal * (0.5 + 0.5 * n_fine)
+    crystal *= (0.3 + 0.7 * np.clip(n_zone * 1.5, 0, 1))
+    # Very sharp threshold for crisp frost edges
+    frost = np.clip((crystal - 0.18) * 8.0, 0, 1)
     frost[ctx.void_mask] = 0
 
     colors = [np.array(mc, dtype=np.float64) for mc in ctx.theme['moss_colors']]
     if not colors: return
-    # Frost is lighter, not darker — additive feel
-    ctx.blend(colors[0], frost * 0.35, ctx.floor_mask)
+    ctx.blend(colors[0], frost * 0.3, ctx.floor_mask)
     if len(colors) > 1:
-        # Bright rime highlights on thickest frost
-        rime = np.clip((crystal - 0.3) * 8.0, 0, 1) * frost
-        ctx.blend(colors[1], rime * 0.3, ctx.floor_mask)
+        rime = np.clip((crystal - 0.35) * 10.0, 0, 1) * frost
+        ctx.blend(colors[1], rime * 0.25, ctx.floor_mask)
 
 
-def step_lava_seep(ctx, reach=1.5, intensity=0.6, crack_density=1.8):
-    """Lava seeping through cracks near walls. Glowing cores, dark edges."""
-    # Use Voronoi cracks for lava channels
+def step_lava_seep(ctx, reach=1.5, intensity=0.6, crack_density=4.0):
+    """Lava seeping through fine cracks near walls. Thin glowing lines."""
+    # High-density Voronoi for fine crack network (not huge cells)
     _, crack_edges = voronoi(PX_H, PX_W, density=crack_density, seed=820)
-    cracks = np.clip(1.0 - crack_edges * 4.0, 0, 1) ** 2
+    cracks = np.clip(1.0 - crack_edges * 6.0, 0, 1) ** 2.5  # thinner lines
+
+    # Secondary even finer cracks
+    _, crack_edges2 = voronoi(PX_H, PX_W, density=crack_density * 2.5, seed=822)
+    cracks2 = np.clip(1.0 - crack_edges2 * 8.0, 0, 1) ** 3
 
     prox = np.clip(1.0 - ctx.inner_dist / (TILE * reach), 0, 1)
-    n_variation = noise(PX_H, PX_W, scale=0.6, octaves=3, seed=821)
+    n_variation = noise(PX_H, PX_W, scale=1.5, octaves=3, seed=821)
 
-    # Lava flows in cracks near walls
+    # Primary lava cracks near walls
     lava = cracks * prox * (0.4 + 0.6 * n_variation)
-    lava_mask = np.clip(lava * 3.0, 0, 1)
+    lava_mask = np.clip(lava * 4.0, 0, 1)
+    # Secondary fine cracks (subtler)
+    lava2 = cracks2 * prox * 0.5
+    lava_mask2 = np.clip(lava2 * 3.0, 0, 1)
     lava_mask[ctx.void_mask] = 0
+    lava_mask2[ctx.void_mask] = 0
 
     colors = [np.array(mc, dtype=np.float64) for mc in ctx.theme['moss_colors']]
     if not colors: return
 
-    # Dark scorch around lava
-    scorch = np.clip(prox * 1.5, 0, 1) * 0.2
+    # Subtle scorch around lava areas
+    scorch = np.clip(prox * 1.2, 0, 1) * 0.15
     ctx.darken(scorch, ctx.floor_mask)
 
-    # Hot lava glow (bright core)
-    ctx.blend(colors[0], lava_mask * intensity * 0.5, ctx.floor_mask)
-    # Bright highlights in the crack centers
+    # Fine secondary cracks (dim glow)
+    if len(colors) > 2:
+        ctx.blend(colors[2], lava_mask2 * intensity * 0.3, ctx.floor_mask)
+    # Primary lava glow
+    ctx.blend(colors[0], lava_mask * intensity * 0.45, ctx.floor_mask)
+    # Bright core highlights (only in strongest cracks)
     if len(colors) > 1:
-        bright = np.clip((lava - 0.3) * 5.0, 0, 1)
-        ctx.blend(colors[1], bright * intensity * 0.4, ctx.floor_mask)
+        bright = np.clip((lava - 0.35) * 6.0, 0, 1)
+        ctx.blend(colors[1], bright * intensity * 0.35, ctx.floor_mask)
 
 
 # ===================================================================
@@ -472,29 +489,32 @@ def step_lava_seep(ctx, reach=1.5, intensity=0.6, crack_density=1.8):
 # ===================================================================
 
 def step_stains_organic(ctx, coverage=0.3):
-    """Warm dirt/water stains."""
+    """Warm dirt/water stains — medium scale, below tiles."""
     stain = np.array(ctx.theme['stain'], dtype=np.float64)
-    n = noise(PX_H, PX_W, scale=0.4, octaves=4, seed=300)
-    alpha = np.clip(n * 1.8 - 0.6, 0, 1) ** 1.2 * coverage
+    n = noise(PX_H, PX_W, scale=0.8, octaves=3, seed=300)
+    detail = noise(PX_H, PX_W, scale=3.0, octaves=2, seed=301)
+    alpha = np.clip(n * 1.8 - 0.6, 0, 1) ** 1.2 * (0.7 + 0.3 * detail) * coverage
     ctx.blend(stain, alpha, ctx.floor_mask)
 
 
 def step_stains_soot(ctx, coverage=0.25):
-    """Dark scorch/soot stains — volcano theme."""
+    """Dark scorch/soot stains — medium-fine scale."""
     stain = np.array(ctx.theme['stain'], dtype=np.float64)
-    n = noise(PX_H, PX_W, scale=0.5, octaves=3, seed=305)
-    alpha = np.clip(n * 2.0 - 0.7, 0, 1) ** 1.5 * coverage
+    n = noise(PX_H, PX_W, scale=1.2, octaves=3, seed=305)
+    detail = noise(PX_H, PX_W, scale=4.0, octaves=2, seed=306)
+    alpha = np.clip(n * 2.0 - 0.7, 0, 1) ** 1.5 * (0.6 + 0.4 * detail) * coverage
     ctx.blend(stain, alpha, ctx.floor_mask)
 
 
-def step_cracks_fine(ctx, density=1.5):
-    """Fine crack network."""
+def step_cracks_fine(ctx, density=3.0):
+    """Fine crack network — high density Voronoi for thin hairline cracks."""
     _, edges = voronoi(PX_H, PX_W, density=density, seed=400)
-    cracks = np.clip(1.0 - edges * 5.0, 0, 1) ** 3
-    sparse = noise(PX_H, PX_W, scale=0.5, octaves=2, seed=401)
+    cracks = np.clip(1.0 - edges * 7.0, 0, 1) ** 3  # thinner lines
+    # Sparsify with medium noise (some areas cracked, some clean)
+    sparse = noise(PX_H, PX_W, scale=0.8, octaves=2, seed=401)
     cracks *= np.clip(sparse * 2.5 - 1.0, 0, 1)
     mortar = np.array(ctx.theme['mortar'], dtype=np.float64) * 0.6
-    ctx.blend(mortar, cracks * 0.4, ctx.floor_mask)
+    ctx.blend(mortar, cracks * 0.35, ctx.floor_mask)
 
 
 # ===================================================================
