@@ -12,7 +12,19 @@
         "floors/base_0.png",
         "floors/base_1.png",
         "floors/base_2.png",
-        "floors/base_3.png"
+        "floors/base_3.png",
+        "floors/base_4.png",
+        "floors/base_5.png",
+        "floors/base_6.png",
+        "floors/base_7.png",
+        "floors/base_8.png",
+        "floors/base_9.png",
+        "floors/base_10.png",
+        "floors/base_11.png",
+        "floors/base_12.png",
+        "floors/base_13.png",
+        "floors/base_14.png",
+        "floors/base_15.png"
       ],
       "blend_mode": "opaque"
     },

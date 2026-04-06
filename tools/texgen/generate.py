@@ -678,9 +678,9 @@ def generate_pack(theme_name, size, output_dir):
     for d in dirs:
         (pack_dir / d).mkdir(parents=True, exist_ok=True)
 
-    # --- Floor base tiles (4 variants) ---
+    # --- Floor base tiles (16 variants for less repetition) ---
     print("  Floors...", end='', flush=True)
-    for i in range(4):
+    for i in range(16):
         generate_floor_base(size, theme, variant=i).save(pack_dir / 'floors' / f'base_{i}.png')
     print(" done")
 
@@ -739,7 +739,7 @@ def generate_pack(theme_name, size, output_dir):
         'layers': {
             'floors': {
                 'description': 'Base floor tiles, randomly selected per cell.',
-                'files': [f'floors/base_{i}.png' for i in range(4)],
+                'files': [f'floors/base_{i}.png' for i in range(16)],
                 'blend_mode': 'opaque',
             },
             'variations': {

@@ -218,7 +218,7 @@ THEMES = {
 def stamp_floors(canvas_arr, pack_dir):
     print("    Floor tiles...", end='', flush=True)
     floors = []
-    for i in range(4):
+    for i in range(16):
         p = pack_dir / 'floors' / f'base_{i}.png'
         if p.exists():
             img = Image.open(p).convert('RGBA').resize((TILE, TILE))
@@ -322,18 +322,29 @@ def render_shadows(canvas_arr, floor_mask, theme):
 
 
 def render_exterior(canvas_arr, floor_mask, theme):
-    n1 = continuous_noise(PX_H, PX_W, scale=0.8, octaves=4, seed=600)
-    n2 = continuous_noise(PX_H, PX_W, scale=3.0, octaves=3, seed=601)
+    """Exterior with Voronoi stone/terrain pattern for more visual interest."""
+    # Voronoi cells for structure
+    cells, edges = continuous_voronoi(PX_H, PX_W, density=0.4, seed=600)
+    # Noise for organic variation
+    n1 = continuous_noise(PX_H, PX_W, scale=0.8, octaves=4, seed=601)
+    n2 = continuous_noise(PX_H, PX_W, scale=4.0, octaves=3, seed=602)
+
     base = np.array(theme['exterior'], dtype=np.float64)
     accent = np.array(theme['exterior_accent'], dtype=np.float64)
     detail = np.array(theme['exterior_detail'], dtype=np.float64)
     void_mask = ~floor_mask
+
+    # Base color from cell values
     for c in range(3):
-        canvas_arr[:, :, c] = np.where(
-            void_mask,
-            np.clip(base[c] * n1 + accent[c] * (1 - n1) +
-                    (detail[c] - base[c]) * n2 * 0.3 + (n2 - 0.5) * 15, 0, 255),
-            canvas_arr[:, :, c])
+        cell_color = base[c] * cells + accent[c] * (1 - cells)
+        # Add noise variation
+        variation = (n1 - 0.5) * 25 + (n2 - 0.5) * 12
+        # Darken Voronoi edges (mortar/crevice lines)
+        edge_darken = np.clip(1.0 - edges * 3.0, 0, 1) ** 1.5
+        color = cell_color + variation
+        # Blend in detail color at edges
+        color = color * (1 - edge_darken * 0.5) + detail[c] * 0.3 * edge_darken
+        canvas_arr[:, :, c] = np.where(void_mask, np.clip(color, 0, 255), canvas_arr[:, :, c])
     canvas_arr[:, :, 3] = 255
 
 
@@ -343,10 +354,18 @@ def render_exterior(canvas_arr, floor_mask, theme):
 
 def render_walls(canvas_arr, floor_mask, theme):
     """
-    Vectorized wall rendering:
-    - Wall top border: floor pixels within WALL_THICKNESS of edge
-    - South faces: void pixels below floor south-edges
-    - East faces: void pixels right of floor east-edges
+    2.5D wall rendering — looking DOWN into rooms.
+
+    Far walls (north, west) show their inner face INTO the floor area.
+    Near walls (south, east) show only the wall-top border.
+    This creates the illusion of recessed rooms, not elevated platforms.
+
+    - Wall top border: floor pixels within WALL_THICKNESS of any edge
+    - North inner face: floor pixels below a north edge, painted as
+      the far wall face receding downward (darker toward floor)
+    - West inner face: floor pixels right of a west edge, painted as
+      the far wall face receding rightward
+    - South/east edges: bright highlight (wall top catch light)
     """
     inner_dist = distance_transform_edt(floor_mask)
     wall_noise = continuous_noise(PX_H, PX_W, scale=2.0, octaves=2,
@@ -356,10 +375,9 @@ def render_walls(canvas_arr, floor_mask, theme):
     face_lit = np.array(theme['wall_face_lit'], dtype=np.float64)
     face_dark = np.array(theme['wall_face_dark'], dtype=np.float64)
 
-    # --- Wall top border ---
+    # --- Wall top border (all edges) ---
     print("    Wall borders...", end='', flush=True)
     border_mask = floor_mask & (inner_dist <= WALL_THICKNESS)
-    # Gradient: outer edge (dist=1) darker, inner edge (dist=WALL_THICKNESS) lighter
     t = np.clip(inner_dist / WALL_THICKNESS, 0, 1)
     noise_var = (wall_noise - 0.5) * 12
     for c in range(3):
@@ -369,20 +387,22 @@ def render_walls(canvas_arr, floor_mask, theme):
             canvas_arr[:, :, c])
     print(" done")
 
-    # --- South faces (vectorized) ---
-    print("    South faces...", end='', flush=True)
-    # Find south edges: floor pixel with void pixel below
-    south_edge = np.zeros((PX_H, PX_W), dtype=bool)
-    south_edge[:-1, :] = floor_mask[:-1, :] & ~floor_mask[1:, :]
+    # --- North inner face (far wall, looking down) ---
+    # These are floor pixels just below a north void edge.
+    # Painted inside the floor, below the wall-top border.
+    print("    North faces...", end='', flush=True)
+    north_edge = np.zeros((PX_H, PX_W), dtype=bool)
+    north_edge[1:, :] = floor_mask[1:, :] & ~floor_mask[:-1, :]
 
-    # For each south-edge pixel, paint WALL_FACE_HEIGHT pixels downward
-    for dy in range(1, WALL_FACE_HEIGHT + 1):
-        # Shift the edge mask down by dy
-        target_y = np.zeros((PX_H, PX_W), dtype=bool)
-        target_y[dy:, :] = south_edge[:-dy, :] if dy < PX_H else False
-        # Only paint into void
-        paint_mask = target_y & ~floor_mask
-        t = (dy / WALL_FACE_HEIGHT) ** 0.6
+    for dy in range(WALL_FACE_HEIGHT):
+        target = np.zeros((PX_H, PX_W), dtype=bool)
+        # Shift north_edge down by (WALL_THICKNESS + dy)
+        offset = WALL_THICKNESS + dy
+        if offset < PX_H:
+            target[offset:, :] = north_edge[:-offset, :]
+        paint_mask = target & floor_mask
+        # Gradient: top of face (near wall border) is lit, bottom is dark
+        t = (dy / WALL_FACE_HEIGHT) ** 0.7
         noise_val = np.where(paint_mask, (wall_noise - 0.5) * 10, 0)
         for c in range(3):
             color = face_lit[c] * (1 - t) + face_dark[c] * t
@@ -392,60 +412,63 @@ def render_walls(canvas_arr, floor_mask, theme):
                 canvas_arr[:, :, c])
     print(" done")
 
-    # --- East faces (vectorized) ---
-    print("    East faces...", end='', flush=True)
-    east_edge = np.zeros((PX_H, PX_W), dtype=bool)
-    east_edge[:, :-1] = floor_mask[:, :-1] & ~floor_mask[:, 1:]
+    # --- West inner face (far wall, looking down) ---
+    print("    West faces...", end='', flush=True)
+    west_edge = np.zeros((PX_H, PX_W), dtype=bool)
+    west_edge[:, 1:] = floor_mask[:, 1:] & ~floor_mask[:, :-1]
 
-    for dx in range(1, WALL_FACE_HEIGHT + 1):
-        target_x = np.zeros((PX_H, PX_W), dtype=bool)
-        target_x[:, dx:] = east_edge[:, :-dx] if dx < PX_W else False
-        paint_mask = target_x & ~floor_mask
-        t = (dx / WALL_FACE_HEIGHT) ** 0.6
+    for dx in range(WALL_FACE_HEIGHT):
+        target = np.zeros((PX_H, PX_W), dtype=bool)
+        offset = WALL_THICKNESS + dx
+        if offset < PX_W:
+            target[:, offset:] = west_edge[:, :-offset]
+        paint_mask = target & floor_mask
+        t = (dx / WALL_FACE_HEIGHT) ** 0.7
         noise_val = np.where(paint_mask, (wall_noise - 0.5) * 8, 0)
         for c in range(3):
-            # East face dimmer
-            color = (face_lit[c] * 0.8) * (1 - t) + face_dark[c] * t
+            # West face slightly dimmer (less direct light)
+            color = (face_lit[c] * 0.85) * (1 - t) + face_dark[c] * t
             canvas_arr[:, :, c] = np.where(
                 paint_mask,
                 np.clip(color + noise_val, 0, 255),
                 canvas_arr[:, :, c])
     print(" done")
 
-    # --- NW highlight ---
-    print("    NW highlights...", end='', flush=True)
-    highlight = np.clip(np.array(wall_top) * 1.4, 0, 255)
-    # North edges of floor (void above)
-    north_edge = np.zeros((PX_H, PX_W), dtype=bool)
-    north_edge[1:, :] = floor_mask[1:, :] & ~floor_mask[:-1, :]
-    # West edges of floor (void left)
-    west_edge = np.zeros((PX_H, PX_W), dtype=bool)
-    west_edge[:, 1:] = floor_mask[:, 1:] & ~floor_mask[:, :-1]
+    # --- SE highlight on near walls (south/east edges catch light) ---
+    print("    SE highlights...", end='', flush=True)
+    highlight = np.clip(np.array(wall_top) * 1.3, 0, 255)
+    # South edges of floor (void below)
+    south_edge = np.zeros((PX_H, PX_W), dtype=bool)
+    south_edge[:-1, :] = floor_mask[:-1, :] & ~floor_mask[1:, :]
+    # East edges of floor (void right)
+    east_edge = np.zeros((PX_H, PX_W), dtype=bool)
+    east_edge[:, :-1] = floor_mask[:, :-1] & ~floor_mask[:, 1:]
 
     for d in range(2):
-        a = 0.35 * (1 - d / 2)
-        # North highlight: paint d pixels below north edge
+        a = 0.3 * (1 - d / 2)
+        # South highlight: paint d pixels above south edge
         if d == 0:
-            n_mask = north_edge & floor_mask
+            s_mask = south_edge & floor_mask
         else:
-            n_mask = np.zeros_like(north_edge)
-            n_mask[1:, :] = north_edge[:-1, :]
-            n_mask &= floor_mask
+            s_mask = np.zeros_like(south_edge)
+            s_mask[:-1, :] = south_edge[1:, :]
+            s_mask &= floor_mask
         for c in range(3):
             canvas_arr[:, :, c] = np.where(
-                n_mask,
+                s_mask,
                 np.clip(canvas_arr[:, :, c] * (1 - a) + highlight[c] * a, 0, 255),
                 canvas_arr[:, :, c])
 
+        # East highlight
         if d == 0:
-            w_mask = west_edge & floor_mask
+            e_mask = east_edge & floor_mask
         else:
-            w_mask = np.zeros_like(west_edge)
-            w_mask[:, 1:] = west_edge[:, :-1]
-            w_mask &= floor_mask
+            e_mask = np.zeros_like(east_edge)
+            e_mask[:, :-1] = east_edge[:, 1:]
+            e_mask &= floor_mask
         for c in range(3):
             canvas_arr[:, :, c] = np.where(
-                w_mask,
+                e_mask,
                 np.clip(canvas_arr[:, :, c] * (1 - a) + highlight[c] * a, 0, 255),
                 canvas_arr[:, :, c])
     print(" done")
@@ -502,6 +525,20 @@ def render_preview(theme_name, pack_dir, output_path):
     return canvas
 
 
+def backup_previous(preview_dir, themes):
+    """Save existing previews as 'previous_*' for A/B comparison."""
+    backed_up = False
+    for name in themes + ['comparison']:
+        src = preview_dir / f'{name}_preview.png' if name != 'comparison' else preview_dir / 'comparison.png'
+        dst = preview_dir / f'previous_{name}_preview.png' if name != 'comparison' else preview_dir / 'previous_comparison.png'
+        if src.exists():
+            import shutil
+            shutil.copy2(src, dst)
+            backed_up = True
+    if backed_up:
+        print("  Backed up previous previews as previous_*")
+
+
 def main():
     import time
     t0 = time.time()
@@ -511,6 +548,10 @@ def main():
     preview_dir.mkdir(parents=True, exist_ok=True)
 
     themes = ['jungle', 'ice', 'volcano']
+
+    # Always backup previous renders before overwriting
+    backup_previous(preview_dir, themes)
+
     previews = []
     for name in themes:
         pack = packs_dir / name
