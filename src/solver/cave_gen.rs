@@ -61,7 +61,7 @@ fn cellular_automata(
             if x == 0 || y == 0 || x == w - 1 || y == h - 1 {
                 cells[y * w + x] = false; // border = wall
             } else {
-                cells[y * w + x] = rng.gen::<f32>() < density;
+                cells[y * w + x] = rng.r#gen::<f32>() < density;
             }
         }
     }

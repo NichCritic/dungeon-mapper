@@ -1707,7 +1707,7 @@ fn monster_workshop_window(
             }
 
             // Preview
-            if let (Some(ref a), Some(ref b)) = (&monster_a, &monster_b) {
+            if let (Some(a), Some(b)) = (&monster_a, &monster_b) {
                 ui.separator();
                 ui.label(egui::RichText::new("Preview").strong().size(14.0));
                 let merged = merge_monsters(a, b, &config);
