@@ -11,6 +11,7 @@ mod render;
 mod server;
 mod solver;
 mod ui;
+mod updater;
 mod util;
 
 fn main() -> eframe::Result {

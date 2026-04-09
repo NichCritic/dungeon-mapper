@@ -1,6 +1,16 @@
 use crate::model::Dungeon;
 
-pub fn status_bar(ui: &mut egui::Ui, dungeon: &Dungeon, zoom: f32, saved: bool, rendering: &[&str]) {
+pub enum UpdateState<'a> {
+    None,
+    Available(&'a str),
+    Applying,
+    Applied,
+    Error(&'a str),
+}
+
+/// Returns true if the update label was clicked.
+pub fn status_bar(ui: &mut egui::Ui, dungeon: &Dungeon, zoom: f32, saved: bool, rendering: &[&str], update: UpdateState) -> bool {
+    let mut update_clicked = false;
     ui.horizontal(|ui| {
         if saved {
             ui.colored_label(egui::Color32::from_rgb(100, 200, 100), "\u{2713} Saved");
@@ -23,7 +33,33 @@ pub fn status_bar(ui: &mut egui::Ui, dungeon: &Dungeon, zoom: f32, saved: bool, 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.colored_label(egui::Color32::from_rgb(130, 130, 130), "F8: Help");
             ui.separator();
+            match update {
+                UpdateState::Available(version) => {
+                    if ui.colored_label(
+                        egui::Color32::from_rgb(100, 220, 255),
+                        format!("Update: v{}", version),
+                    ).on_hover_text("Click to update").clicked() {
+                        update_clicked = true;
+                    }
+                    ui.separator();
+                }
+                UpdateState::Applying => {
+                    ui.colored_label(egui::Color32::from_rgb(220, 200, 100), "Updating...");
+                    ui.separator();
+                }
+                UpdateState::Applied => {
+                    ui.colored_label(egui::Color32::from_rgb(100, 255, 100), "Updated! Restart to apply.");
+                    ui.separator();
+                }
+                UpdateState::Error(e) => {
+                    ui.colored_label(egui::Color32::from_rgb(255, 100, 100), "Update failed")
+                        .on_hover_text(e);
+                    ui.separator();
+                }
+                UpdateState::None => {}
+            }
             ui.label(format!("Zoom: {:.0}%", zoom * 100.0));
         });
     });
+    update_clicked
 }

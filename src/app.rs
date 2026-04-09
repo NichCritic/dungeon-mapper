@@ -4,6 +4,7 @@ use crate::model::combat_stats::CombatStatsCache;
 use crate::model::Dungeon;
 use crate::presentation::PresentationState;
 use crate::server::PresentationServer;
+use crate::updater;
 use crate::ui::annotations::{self, AnnotationModeState};
 use crate::ui::decor_view::{self, DecorViewState};
 use crate::ui::encounters_view::{self, EncountersViewState};
@@ -76,6 +77,14 @@ pub struct DungeonApp {
     autosave_due: bool,
     /// Committed hash from previous frame, used to detect new commits for auto-save.
     last_autosave_hash: u64,
+    // Auto-update
+    pending_update_check: Option<std::sync::mpsc::Receiver<updater::UpdateStatus>>,
+    available_update: Option<updater::UpdateInfo>,
+    pending_update_apply: Option<std::sync::mpsc::Receiver<updater::ApplyStatus>>,
+    update_applied: bool,
+    update_error: Option<String>,
+    show_update_dialog: bool,
+
     /// Hash of dungeon state used for render pre-warming debounce.
     last_prewarm_hash: u64,
     /// When the prewarm hash last changed (for debounce).
@@ -131,6 +140,12 @@ impl Default for DungeonApp {
             help_mode: false,
             pending_file_op: None,
             pending_monster_db,
+            pending_update_check: updater::check_for_update(),
+            available_update: None,
+            pending_update_apply: None,
+            update_applied: false,
+            update_error: None,
+            show_update_dialog: false,
             history,
             current_file: None,
             last_saved_hash: initial_hash,
@@ -549,6 +564,37 @@ impl eframe::App for DungeonApp {
             }
         }
 
+        // Poll update check
+        if let Some(rx) = &self.pending_update_check {
+            if let Ok(status) = rx.try_recv() {
+                match status {
+                    updater::UpdateStatus::Available(info) => {
+                        self.available_update = Some(info);
+                    }
+                    updater::UpdateStatus::Error(e) => {
+                        eprintln!("Update check error: {}", e);
+                    }
+                    updater::UpdateStatus::NoUpdate => {}
+                }
+                self.pending_update_check = None;
+            }
+        }
+
+        // Poll update apply
+        if let Some(rx) = &self.pending_update_apply {
+            if let Ok(status) = rx.try_recv() {
+                match status {
+                    updater::ApplyStatus::Success => {
+                        self.update_applied = true;
+                    }
+                    updater::ApplyStatus::Error(e) => {
+                        self.update_error = Some(e);
+                    }
+                }
+                self.pending_update_apply = None;
+            }
+        }
+
         // Pre-warm render caches for all views (debounced, runs before UI so status bar sees pending state)
         self.prewarm_render_caches(ctx);
 
@@ -800,7 +846,21 @@ impl eframe::App for DungeonApp {
             }
             ui.horizontal(|ui| {
                 let saved = self.history.committed_hash() == self.last_saved_hash;
-                crate::ui::status_bar::status_bar(ui, &self.dungeon, zoom, saved, &stale_renders);
+                let update_state = if self.update_applied {
+                    crate::ui::status_bar::UpdateState::Applied
+                } else if self.pending_update_apply.is_some() {
+                    crate::ui::status_bar::UpdateState::Applying
+                } else if let Some(ref e) = self.update_error {
+                    crate::ui::status_bar::UpdateState::Error(e)
+                } else if let Some(ref info) = self.available_update {
+                    crate::ui::status_bar::UpdateState::Available(&info.version)
+                } else {
+                    crate::ui::status_bar::UpdateState::None
+                };
+                let update_clicked = crate::ui::status_bar::status_bar(ui, &self.dungeon, zoom, saved, &stale_renders, update_state);
+                if update_clicked {
+                    self.show_update_dialog = true;
+                }
                 if self.presenting {
                     ui.separator();
                     if let Some(server) = &self.server {
@@ -814,6 +874,50 @@ impl eframe::App for DungeonApp {
             });
         });
         self.annotation_state.panel_rects.push(status_response.response.rect);
+
+        // Update confirmation dialog
+        if self.show_update_dialog {
+            if let Some(info) = &self.available_update {
+                let mut open = true;
+                let version = info.version.clone();
+                let notes = info.release_notes.clone();
+                let download_url = info.download_url.clone();
+                let sig_url = info.sig_url.clone();
+                egui::Window::new(format!("Update to v{}", version))
+                    .id(egui::Id::new("update_dialog"))
+                    .open(&mut open)
+                    .collapsible(false)
+                    .default_size([400.0, 300.0])
+                    .show(ctx, |ui| {
+                        ui.label(format!("A new version is available: v{}", version));
+                        ui.label(format!("Current version: v{}", env!("CARGO_PKG_VERSION")));
+                        if !notes.is_empty() {
+                            ui.add_space(8.0);
+                            ui.label("Release notes:");
+                            egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+                                ui.label(&notes);
+                            });
+                        }
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("Update Now").clicked() {
+                                self.pending_update_apply = Some(
+                                    updater::download_and_apply(download_url.clone(), sig_url.clone())
+                                );
+                                self.show_update_dialog = false;
+                            }
+                            if ui.button("Later").clicked() {
+                                self.show_update_dialog = false;
+                            }
+                        });
+                    });
+                if !open {
+                    self.show_update_dialog = false;
+                }
+            } else {
+                self.show_update_dialog = false;
+            }
+        }
 
         // Combat log panel (bottom, only during presentation with active combat)
         if self.presenting {

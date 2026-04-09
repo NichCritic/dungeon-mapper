@@ -2,3 +2,4 @@
 Cargo.lock
 /5etools-src
 .claude/
+signing-key.secret

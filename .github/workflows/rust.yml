@@ -19,6 +19,8 @@ jobs:
           sudo apt-get install -y libgtk-3-dev libxdo-dev libatk1.0-dev libglib2.0-dev
 
       - name: Build
+        env:
+          UPDATE_PUBLIC_KEY: ${{ secrets.UPDATE_PUBLIC_KEY }}
         run: cargo build --release
 
       - name: Upload Linux binary
@@ -39,6 +41,8 @@ jobs:
           rustup target add x86_64-pc-windows-gnu
 
       - name: Build for Windows
+        env:
+          UPDATE_PUBLIC_KEY: ${{ secrets.UPDATE_PUBLIC_KEY }}
         run: cargo build --release --target x86_64-pc-windows-gnu
 
       - name: Upload Windows binary
@@ -67,6 +71,18 @@ jobs:
           name: dungeon-mapper-windows
           path: artifacts/windows
 
+      - name: Build signing tool
+        run: cargo build --release --bin keygen
+
+      - name: Sign binaries
+        env:
+          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+        run: |
+          echo "$SIGNING_KEY" > /tmp/signing.key
+          ./target/release/keygen --sign artifacts/linux/dungeon-mapper --key /tmp/signing.key
+          ./target/release/keygen --sign artifacts/windows/dungeon-mapper.exe --key /tmp/signing.key
+          rm /tmp/signing.key
+
       - name: Get version
         id: version
         run: |
@@ -82,4 +98,6 @@ jobs:
           generate_release_notes: true
           files: |
             artifacts/linux/dungeon-mapper
+            artifacts/linux/dungeon-mapper.sig
             artifacts/windows/dungeon-mapper.exe
+            artifacts/windows/dungeon-mapper.exe.sig

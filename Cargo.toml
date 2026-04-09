@@ -1,7 +1,7 @@
 [package]
 name = "dungeon-mapper"
-version = "0.1.0"
-edition = "2021"
+version = "0.2.0"
+edition = "2026"
 
 [dependencies]
 eframe = "0.31"
@@ -17,3 +17,15 @@ uuid = { version = "1", features = ["v4"] }
 rand = "0.8"
 regex = "1"
 tungstenite = "0.24"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"], default-features = false }
+self-replace = "1"
+semver = "1"
+
+[[bin]]
+name = "dungeon-mapper"
+path = "src/main.rs"
+
+[[bin]]
+name = "keygen"
+path = "tools/keygen.rs"
