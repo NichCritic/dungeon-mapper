@@ -1,4 +1,4 @@
-# Dungeon Drafter - Open Issues
+# Dungeon Mapper - Open Issues
 
 Dungeon: Untitled Dungeon
 
@@ -24,17 +24,17 @@ Dungeon: Untitled Dungeon
 
 ## Issue 3
 
-- **ID:** 8704ca9a-d382-4b64-84a9-2803437cedb9
-- **Description:** Move to the encounters section
+- **ID:** a7f14638-5670-43cd-adf3-de61fec720ab
+- **Description:** In the encounters menu I should be able to view the encounters, the creatures and their current status, add new creatures, and modify the number of creatures. I should also be able to preset  statuses and values such as initiative roll per monster before starting combat
 - **View:** Presentation
-- **Screen position:** (0.864, 0.083) [fraction of window]
-- **Created:** day-20548 03:38:24 UTC
+- **Screen position:** (0.914, 0.230) [fraction of window]
+- **Created:** day-20550 21:18:58 UTC
 
 ## Issue 4
 
-- **ID:** 4feecfed-7f9f-4f71-ab7c-89db9ed6b1b9
-- **Description:** Also should have a reset stats
+- **ID:** e105cc2d-b1a2-43df-bafc-b6b2f8a66532
+- **Description:** When I  right click on a room, that room's menu should remain open and not change, even if I hover over other rooms
 - **View:** Presentation
-- **Screen position:** (0.899, 0.652) [fraction of window]
-- **Created:** day-20548 03:42:54 UTC
+- **Screen position:** (0.230, 0.806) [fraction of window]
+- **Created:** day-20550 21:20:47 UTC
 

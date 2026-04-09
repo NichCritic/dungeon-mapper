@@ -43,6 +43,9 @@ pub struct DungeonApp {
     pub presentation_view_state: PresentationViewState,
     pub player_viewport_open: bool,
     pub player_view_state: PlayerViewState,
+    pub combat_window_open: bool,
+    /// True after the player viewport has been shown at least once (avoids re-applying initial size every frame).
+    player_viewport_initialized: bool,
     pub server: Option<PresentationServer>,
     pub server_port: u16,
     /// Hash of the last PNG pushed to the server, to avoid redundant updates.
@@ -118,6 +121,8 @@ impl Default for DungeonApp {
             presentation_view_state: PresentationViewState::default(),
             player_viewport_open: false,
             player_view_state: PlayerViewState::default(),
+            combat_window_open: false,
+            player_viewport_initialized: false,
             server: None,
             server_port: 8080,
             last_server_push_hash: 0,
@@ -682,6 +687,8 @@ impl eframe::App for DungeonApp {
                     if ui.button("Stop Presenting").clicked() {
                         self.presenting = false;
                         self.player_viewport_open = false;
+                        self.player_viewport_initialized = false;
+                        self.combat_window_open = false;
                         if let Some(server) = &mut self.server {
                             server.stop();
                         }
@@ -815,7 +822,7 @@ impl eframe::App for DungeonApp {
                     if !tracker.log.entries.is_empty() {
                         egui::TopBottomPanel::bottom("combat_log_panel")
                             .resizable(true)
-                            .default_height(120.0)
+                            .default_height(150.0)
                             .min_height(60.0)
                             .show(ctx, |ui| {
                                 ui.heading("Combat Log");
@@ -834,9 +841,21 @@ impl eframe::App for DungeonApp {
             }
         }
 
+        // Combat tracker floating window (when popped out of sidebar)
+        if self.presenting && self.combat_window_open {
+            if let Some(presentation) = &mut self.presentation {
+                presentation_view::combat_tracker_window(
+                    ctx,
+                    presentation,
+                    &self.dungeon,
+                    &mut self.combat_window_open,
+                );
+            }
+        }
+
         // Right sidebar
         let sidebar_response = egui::SidePanel::right("properties")
-            .default_width(250.0)
+            .default_width(320.0)
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     if self.presenting {
@@ -849,6 +868,7 @@ impl eframe::App for DungeonApp {
                                 &mut self.presentation_view_state,
                                 &mut self.player_view_state,
                                 &mut self.player_viewport_open,
+                                &mut self.combat_window_open,
                                 &mut server_action,
                                 &self.monster_db,
                                 &mut self.combat_stats_cache,
@@ -1132,11 +1152,15 @@ impl eframe::App for DungeonApp {
         // Player viewport (second window)
         if self.presenting && self.player_viewport_open {
             if let Some(presentation) = &self.presentation {
+                let mut builder = egui::ViewportBuilder::default()
+                    .with_title("Dungeon Mapper - Player View");
+                if !self.player_viewport_initialized {
+                    builder = builder.with_inner_size([800.0, 600.0]);
+                    self.player_viewport_initialized = true;
+                }
                 ctx.show_viewport_immediate(
                     egui::ViewportId::from_hash_of("player_viewport"),
-                    egui::ViewportBuilder::default()
-                        .with_title("Dungeon Mapper - Player View")
-                        .with_inner_size([800.0, 600.0]),
+                    builder,
                     |ctx, _class| {
                         player_view::player_viewport(
                             ctx,

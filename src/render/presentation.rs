@@ -213,10 +213,11 @@ fn render_player_view_generic(
         render_grid(renderer, &visible_floor);
     }
 
-    // Room decor (visible rooms only)
+    // Room decor and elevation sections (visible rooms only)
     for rl in &layout.rooms {
         let vis = presentation.room_visibility(&rl.room_id);
         if *vis != Visibility::Visible { continue; }
+        crate::render::themed::render_elevation_sections(renderer, rl, graph, theme);
         render_decor(renderer, rl, graph, theme);
     }
 

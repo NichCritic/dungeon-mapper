@@ -179,6 +179,81 @@ impl CombatTracker {
         }
     }
 
+    /// Add an encounter's monsters to an already-running combat.
+    pub fn add_encounter(
+        &mut self,
+        encounter: &Encounter,
+        monster_db: &MonsterDatabase,
+        custom_monsters: &[CustomMonster],
+        cache: &mut CombatStatsCache,
+    ) {
+        for (m_idx, em) in encounter.monsters.iter().enumerate() {
+            let monster = resolve_monster(&em.monster_ref, monster_db, custom_monsters);
+            let Some(monster) = monster else { continue };
+
+            let stats = parse_combat_stats(monster);
+            let dex_mod = (monster.dex_score as i8 - 10) / 2;
+
+            match &em.monster_ref {
+                MonsterRef::Base { .. } => { cache.get_or_parse(monster); }
+                MonsterRef::Custom { id } | MonsterRef::Merged { id } => {
+                    cache.get_or_parse_custom(id, monster);
+                }
+            }
+
+            let attacks = stats.attacks.clone();
+
+            for i in 0..em.count as usize {
+                let id = MonsterInstanceId {
+                    encounter_id: encounter.id.clone(),
+                    monster_index: m_idx,
+                    instance: i,
+                };
+                // Skip if this instance already exists (e.g. encounter already in combat)
+                if self.instances.contains_key(&id) { continue; }
+                let label = if em.count > 1 {
+                    format!("{} #{}", monster.name, i + 1)
+                } else {
+                    monster.name.clone()
+                };
+                self.instances.insert(id, MonsterInstance {
+                    label,
+                    ac: stats.ac.unwrap_or(10),
+                    max_hp: stats.max_hp,
+                    current_hp: stats.max_hp,
+                    temp_hp: 0,
+                    initiative: None,
+                    conditions: vec![false; STANDARD_CONDITIONS.len()],
+                    is_dead: false,
+                    dex_mod,
+                    attacks: attacks.clone(),
+                    surprised: false,
+                    hidden: false,
+                });
+            }
+        }
+        // Re-sort initiative if order already exists
+        if !self.initiative_order.is_empty() {
+            self.sort_initiative();
+        }
+    }
+
+    /// Toggle hidden status on any combatant.
+    pub fn toggle_hidden(&mut self, id: &CombatantId) {
+        match id {
+            CombatantId::Monster(mid) => {
+                if let Some(inst) = self.instances.get_mut(mid) {
+                    inst.hidden = !inst.hidden;
+                }
+            }
+            CombatantId::Player(pid) => {
+                if let Some(pc) = self.players.get_mut(pid) {
+                    pc.hidden = !pc.hidden;
+                }
+            }
+        }
+    }
+
     /// Apply damage to a monster instance. Temp HP absorbs first.
     #[cfg(test)]
     pub fn init(

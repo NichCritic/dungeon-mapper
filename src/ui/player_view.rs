@@ -11,6 +11,8 @@ pub struct PlayerViewState {
     pub render_cache: BackgroundRenderCache,
     /// Canvas size from the last frame, used by sidebar for centering.
     pub canvas_size: egui::Vec2,
+    /// When true, pan and zoom are disabled on the player view.
+    pub locked: bool,
 }
 
 impl Default for PlayerViewState {
@@ -19,6 +21,7 @@ impl Default for PlayerViewState {
             view: ViewState::default(),
             render_cache: BackgroundRenderCache::default(),
             canvas_size: egui::Vec2::ZERO,
+            locked: false,
         }
     }
 }
@@ -78,6 +81,13 @@ pub fn player_viewport(
     presentation: &PresentationState,
     state: &mut PlayerViewState,
 ) {
+    // F11 toggles fullscreen
+    let f11 = ctx.input(|i| i.key_pressed(egui::Key::F11));
+    if f11 {
+        let is_fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!is_fullscreen));
+    }
+
     egui::CentralPanel::default().show(ctx, |ui| {
         let (response, painter) = ui.allocate_painter(
             ui.available_size(),
@@ -88,7 +98,9 @@ pub fn player_viewport(
         let bg = dungeon.theme.bg_color;
         painter.rect_filled(rect, 0.0, egui::Color32::from_rgba_unmultiplied(bg[0], bg[1], bg[2], bg[3]));
 
-        handle_pan_zoom(&response, &mut state.view);
+        if !state.locked {
+            handle_pan_zoom(&response, &mut state.view);
+        }
         state.canvas_size = rect.size();
         let transform = ViewTransform::new(state.view.offset, state.view.zoom, rect);
 

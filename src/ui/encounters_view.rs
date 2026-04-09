@@ -797,7 +797,7 @@ fn monte_carlo_window(
 }
 
 /// Floating monster browser window.
-fn monster_browser_window(
+pub fn monster_browser_window(
     ctx: &egui::Context,
     dungeon: &mut Dungeon,
     monster_db: &MonsterDatabase,
