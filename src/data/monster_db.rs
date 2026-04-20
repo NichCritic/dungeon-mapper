@@ -473,6 +473,9 @@ fn replace_text_in_value(val: &mut Value, find: &str, replace: &str, case_insens
     }
 }
 
+/// Source codes for 2024-revised core rulebooks.
+pub const SOURCES_2024: &[&str] = &["XMM", "XPHB", "XDMG"];
+
 /// Filter criteria for searching the monster database.
 #[derive(Default)]
 pub struct MonsterFilter {
@@ -482,6 +485,8 @@ pub struct MonsterFilter {
     pub size: Option<String>,
     pub monster_type: Option<String>,
     pub source: Option<String>,
+    /// When true, only include monsters from 2024-revised sources.
+    pub only_2024: bool,
 }
 
 impl MonsterFilter {
@@ -520,9 +525,14 @@ impl MonsterFilter {
         }
 
         if let Some(ref source) = self.source {
-            if monster.source != *source {
+            let source_lower = source.to_lowercase();
+            if !monster.source.to_lowercase().contains(&source_lower) {
                 return false;
             }
+        }
+
+        if self.only_2024 && !SOURCES_2024.contains(&monster.source.as_str()) {
+            return false;
         }
 
         true
@@ -535,6 +545,7 @@ impl MonsterFilter {
             || self.size.is_some()
             || self.monster_type.is_some()
             || self.source.is_some()
+            || self.only_2024
     }
 }
 

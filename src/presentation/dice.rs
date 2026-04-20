@@ -112,7 +112,6 @@ fn roll_dice_crit(expr: &str, rng: &mut impl Rng) -> DiceResult {
 
 /// Whether an attack roll has advantage, disadvantage, or neither.
 #[derive(Clone, Copy, Debug, PartialEq)]
-#[allow(dead_code)]
 pub enum AdvantageState {
     Normal,
     Advantage,
@@ -146,7 +145,7 @@ pub fn roll_attack_with_advantage(attack: &ParsedAttack, target_ac: u8, advantag
     let is_fumble = attack_roll == 1;
     let hit = is_crit || (!is_fumble && attack_total >= target_ac as i32);
 
-    let (damage, extra_damage) = if hit {
+    let (damage, extra_damage) = if hit && !attack.damage_dice.is_empty() {
         let dmg = if is_crit {
             roll_dice_crit(&attack.damage_dice, &mut rng)
         } else {

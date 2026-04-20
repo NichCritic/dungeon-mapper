@@ -257,16 +257,18 @@ pub fn run_combat_ffa(groups: &[Vec<SimCombatant>]) -> SimResult {
 }
 
 /// Build SimCombatants from an encounter definition.
+/// If `hp_overrides` is provided, uses stored current HP for each monster instance.
 pub fn build_combatants_from_encounter(
     encounter: &Encounter,
     db: &MonsterDatabase,
     custom: &[CustomMonster],
     cache: &mut CombatStatsCache,
     side: usize,
+    hp_overrides: Option<&std::collections::HashMap<String, i32>>,
 ) -> Vec<SimCombatant> {
     let mut combatants = Vec::new();
 
-    for em in &encounter.monsters {
+    for (m_idx, em) in encounter.monsters.iter().enumerate() {
         let Some(monster) = resolve_monster(&em.monster_ref, db, custom) else {
             continue;
         };
@@ -280,10 +282,15 @@ pub fn build_combatants_from_encounter(
                 monster.name.clone()
             };
 
+            let current_hp = hp_overrides
+                .and_then(|m| m.get(&format!("{}/{}/{}", encounter.id, m_idx, i)))
+                .copied()
+                .unwrap_or(stats.max_hp);
+
             combatants.push(SimCombatant {
                 name: label,
                 max_hp: stats.max_hp,
-                current_hp: stats.max_hp,
+                current_hp,
                 ac: stats.ac.unwrap_or(10),
                 initiative_mod: 0, // Could extract DEX mod but keep simple
                 attacks: stats.attacks.clone(),

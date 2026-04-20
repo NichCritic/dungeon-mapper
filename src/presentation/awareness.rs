@@ -346,17 +346,7 @@ pub fn run_awareness_check(
     }
 }
 
-impl AwarenessResult {
-    /// Look up a PC's awareness state by name.
-    pub fn pc_awareness(&self, name: &str) -> Option<&CreatureAwareness> {
-        self.party.iter().find(|c| c.name == name)
-    }
 
-    /// Look up a monster's awareness state by label (e.g. "Goblin #1").
-    pub fn monster_awareness(&self, label: &str) -> Option<&CreatureAwareness> {
-        self.monsters.iter().find(|c| c.name == label)
-    }
-}
 
 #[cfg(test)]
 mod tests {

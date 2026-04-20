@@ -157,7 +157,7 @@ mod tests {
     #[test]
     fn test_cycle_room_visibility() {
         let graph = test_graph();
-        let dungeon = Dungeon { name: "test".into(), graph, layout: None, theme: Theme::default(), encounters: Vec::new(), custom_monsters: Vec::new(), party: Vec::new(), annotations: Vec::new(), light_sources: Vec::new(), ambient_light: 0.0, aoe_markers: Vec::new() };
+        let dungeon = Dungeon { name: "test".into(), graph, layout: None, theme: Theme::default(), encounters: Vec::new(), custom_monsters: Vec::new(), party: Vec::new(), annotations: Vec::new(), light_sources: Vec::new(), ambient_light: 0.0, aoe_markers: Vec::new(), session: Default::default() };
         let mut state = PresentationState::new_from_dungeon(&dungeon);
         let room_id = &dungeon.graph.rooms[0].id;
 
@@ -173,7 +173,7 @@ mod tests {
     #[test]
     fn test_corridor_hidden_when_door_closed() {
         let graph = test_graph();
-        let dungeon = Dungeon { name: "test".into(), graph, layout: None, theme: Theme::default(), encounters: Vec::new(), custom_monsters: Vec::new(), party: Vec::new(), annotations: Vec::new(), light_sources: Vec::new(), ambient_light: 0.0, aoe_markers: Vec::new() };
+        let dungeon = Dungeon { name: "test".into(), graph, layout: None, theme: Theme::default(), encounters: Vec::new(), custom_monsters: Vec::new(), party: Vec::new(), annotations: Vec::new(), light_sources: Vec::new(), ambient_light: 0.0, aoe_markers: Vec::new(), session: Default::default() };
         let mut state = PresentationState::new_from_dungeon(&dungeon);
         let conn_id = &dungeon.graph.connections[0].connection.id;
         let src_id = &dungeon.graph.connections[0].source_room_id;
@@ -190,7 +190,7 @@ mod tests {
     #[test]
     fn test_corridor_hidden_when_both_rooms_hidden() {
         let graph = test_graph();
-        let dungeon = Dungeon { name: "test".into(), graph, layout: None, theme: Theme::default(), encounters: Vec::new(), custom_monsters: Vec::new(), party: Vec::new(), annotations: Vec::new(), light_sources: Vec::new(), ambient_light: 0.0, aoe_markers: Vec::new() };
+        let dungeon = Dungeon { name: "test".into(), graph, layout: None, theme: Theme::default(), encounters: Vec::new(), custom_monsters: Vec::new(), party: Vec::new(), annotations: Vec::new(), light_sources: Vec::new(), ambient_light: 0.0, aoe_markers: Vec::new(), session: Default::default() };
         let mut state = PresentationState::new_from_dungeon(&dungeon);
         let conn_id = &dungeon.graph.connections[0].connection.id;
 
@@ -202,7 +202,7 @@ mod tests {
     #[test]
     fn test_toggle_door() {
         let graph = test_graph();
-        let dungeon = Dungeon { name: "test".into(), graph, layout: None, theme: Theme::default(), encounters: Vec::new(), custom_monsters: Vec::new(), party: Vec::new(), annotations: Vec::new(), light_sources: Vec::new(), ambient_light: 0.0, aoe_markers: Vec::new() };
+        let dungeon = Dungeon { name: "test".into(), graph, layout: None, theme: Theme::default(), encounters: Vec::new(), custom_monsters: Vec::new(), party: Vec::new(), annotations: Vec::new(), light_sources: Vec::new(), ambient_light: 0.0, aoe_markers: Vec::new(), session: Default::default() };
         let mut state = PresentationState::new_from_dungeon(&dungeon);
         let conn_id = &dungeon.graph.connections[0].connection.id;
 
@@ -216,7 +216,7 @@ mod tests {
     #[test]
     fn test_reveal_room_and_adjacent() {
         let graph = test_graph();
-        let dungeon = Dungeon { name: "test".into(), graph, layout: None, theme: Theme::default(), encounters: Vec::new(), custom_monsters: Vec::new(), party: Vec::new(), annotations: Vec::new(), light_sources: Vec::new(), ambient_light: 0.0, aoe_markers: Vec::new() };
+        let dungeon = Dungeon { name: "test".into(), graph, layout: None, theme: Theme::default(), encounters: Vec::new(), custom_monsters: Vec::new(), party: Vec::new(), annotations: Vec::new(), light_sources: Vec::new(), ambient_light: 0.0, aoe_markers: Vec::new(), session: Default::default() };
         let mut state = PresentationState::new_from_dungeon(&dungeon);
         let room_b_id = &dungeon.graph.rooms[1].id;
 
@@ -235,7 +235,7 @@ mod tests {
     #[test]
     fn test_corridor_visibility_explored() {
         let graph = test_graph();
-        let dungeon = Dungeon { name: "test".into(), graph, layout: None, theme: Theme::default(), encounters: Vec::new(), custom_monsters: Vec::new(), party: Vec::new(), annotations: Vec::new(), light_sources: Vec::new(), ambient_light: 0.0, aoe_markers: Vec::new() };
+        let dungeon = Dungeon { name: "test".into(), graph, layout: None, theme: Theme::default(), encounters: Vec::new(), custom_monsters: Vec::new(), party: Vec::new(), annotations: Vec::new(), light_sources: Vec::new(), ambient_light: 0.0, aoe_markers: Vec::new(), session: Default::default() };
         let mut state = PresentationState::new_from_dungeon(&dungeon);
         let conn_id = &dungeon.graph.connections[0].connection.id;
         let src_id = &dungeon.graph.connections[0].source_room_id;
@@ -251,7 +251,7 @@ mod tests {
     #[test]
     fn test_corridor_visibility_explored_both_sides() {
         let graph = test_graph();
-        let dungeon = Dungeon { name: "test".into(), graph, layout: None, theme: Theme::default(), encounters: Vec::new(), custom_monsters: Vec::new(), party: Vec::new(), annotations: Vec::new(), light_sources: Vec::new(), ambient_light: 0.0, aoe_markers: Vec::new() };
+        let dungeon = Dungeon { name: "test".into(), graph, layout: None, theme: Theme::default(), encounters: Vec::new(), custom_monsters: Vec::new(), party: Vec::new(), annotations: Vec::new(), light_sources: Vec::new(), ambient_light: 0.0, aoe_markers: Vec::new(), session: Default::default() };
         let mut state = PresentationState::new_from_dungeon(&dungeon);
         let conn_id = &dungeon.graph.connections[0].connection.id;
         let src_id = &dungeon.graph.connections[0].source_room_id;
@@ -267,7 +267,7 @@ mod tests {
     #[test]
     fn test_open_room_doors() {
         let graph = test_graph();
-        let dungeon = Dungeon { name: "test".into(), graph, layout: None, theme: Theme::default(), encounters: Vec::new(), custom_monsters: Vec::new(), party: Vec::new(), annotations: Vec::new(), light_sources: Vec::new(), ambient_light: 0.0, aoe_markers: Vec::new() };
+        let dungeon = Dungeon { name: "test".into(), graph, layout: None, theme: Theme::default(), encounters: Vec::new(), custom_monsters: Vec::new(), party: Vec::new(), annotations: Vec::new(), light_sources: Vec::new(), ambient_light: 0.0, aoe_markers: Vec::new(), session: Default::default() };
         let mut state = PresentationState::new_from_dungeon(&dungeon);
         let room_b_id = &dungeon.graph.rooms[1].id;
 
@@ -282,7 +282,7 @@ mod tests {
     #[test]
     fn test_close_room_doors() {
         let graph = test_graph();
-        let dungeon = Dungeon { name: "test".into(), graph, layout: None, theme: Theme::default(), encounters: Vec::new(), custom_monsters: Vec::new(), party: Vec::new(), annotations: Vec::new(), light_sources: Vec::new(), ambient_light: 0.0, aoe_markers: Vec::new() };
+        let dungeon = Dungeon { name: "test".into(), graph, layout: None, theme: Theme::default(), encounters: Vec::new(), custom_monsters: Vec::new(), party: Vec::new(), annotations: Vec::new(), light_sources: Vec::new(), ambient_light: 0.0, aoe_markers: Vec::new(), session: Default::default() };
         let mut state = PresentationState::new_from_dungeon(&dungeon);
         let room_b_id = &dungeon.graph.rooms[1].id;
 
@@ -305,7 +305,7 @@ mod tests {
         let room_id = room.id.clone();
         graph.add_room(room);
 
-        let dungeon = Dungeon { name: "test".into(), graph, layout: None, theme: Theme::default(), encounters: Vec::new(), custom_monsters: Vec::new(), party: Vec::new(), annotations: Vec::new(), light_sources: Vec::new(), ambient_light: 0.0, aoe_markers: Vec::new() };
+        let dungeon = Dungeon { name: "test".into(), graph, layout: None, theme: Theme::default(), encounters: Vec::new(), custom_monsters: Vec::new(), party: Vec::new(), annotations: Vec::new(), light_sources: Vec::new(), ambient_light: 0.0, aoe_markers: Vec::new(), session: Default::default() };
         let mut state = PresentationState::new_from_dungeon(&dungeon);
 
         reveal_room_and_adjacent(&room_id, &mut state, &dungeon.graph);

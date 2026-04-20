@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 
 use super::{Annotation, CustomMonster, DungeonGraph, Encounter, PlayerCharacter, SpatialLayout, Theme};
@@ -10,6 +11,32 @@ pub struct LightSource {
     pub radius: f32,
     pub intensity: f32,
     pub color: [u8; 3],
+}
+
+/// Persisted session state — runtime presentation data that survives between sessions.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct SessionState {
+    /// Per-room visibility: "hidden", "explored", or "visible".
+    #[serde(default)]
+    pub room_visibility: HashMap<String, String>,
+    /// Open door connection IDs.
+    #[serde(default)]
+    pub doors_open: HashSet<String>,
+    /// Current positions of encounters: encounter_id -> room_id.
+    #[serde(default)]
+    pub encounter_positions: HashMap<String, String>,
+    /// Encounter IDs that have been fully defeated.
+    #[serde(default)]
+    pub defeated_encounters: HashSet<String>,
+    /// Per-monster current HP: key is "encounter_id/monster_idx/instance", value is current HP.
+    #[serde(default)]
+    pub encounter_hp: HashMap<String, i32>,
+    /// Which room the party token is in (None = not placed).
+    #[serde(default)]
+    pub party_room: Option<String>,
+    /// Whether autobattle is enabled.
+    #[serde(default)]
+    pub autobattle: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -38,6 +65,9 @@ pub struct Dungeon {
     /// Area-of-effect markers placed on the map.
     #[serde(default)]
     pub aoe_markers: Vec<crate::presentation::aoe::AoEMarker>,
+    /// Persisted session state (fog of war, encounter positions, HP, etc.).
+    #[serde(default)]
+    pub session: SessionState,
 }
 
 impl Dungeon {
@@ -54,6 +84,7 @@ impl Dungeon {
             light_sources: Vec::new(),
             ambient_light: 0.0,
             aoe_markers: Vec::new(),
+            session: SessionState::default(),
         }
     }
 }

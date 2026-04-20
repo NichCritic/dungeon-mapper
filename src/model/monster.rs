@@ -454,7 +454,7 @@ pub fn strip_5e_markup(text: &str) -> String {
 
             // Transform based on tag
             match tag.as_str() {
-                "atk" => {} // skip attack type markers
+                "atk" | "atkr" => {} // skip attack type markers
                 "hit" => {
                     result.push('+');
                     result.push_str(&content);
@@ -463,7 +463,12 @@ pub fn strip_5e_markup(text: &str) -> String {
                     result.push_str("DC ");
                     result.push_str(&content);
                 }
-                "h" => {} // hit marker, skip
+                "h" | "actSaveFail" | "actSaveSuccess" => {} // hit/save result markers, skip
+                "actSave" => {
+                    // {@actSave wis} -> "WIS save"
+                    result.push_str(&content.to_uppercase());
+                    result.push_str(" save");
+                }
                 "recharge" => {
                     result.push_str(&format!("(Recharge {})", content));
                 }

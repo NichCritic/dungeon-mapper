@@ -160,6 +160,13 @@ impl Default for DungeonApp {
 }
 
 impl DungeonApp {
+    /// Sync presentation state into dungeon.session so it persists on save.
+    fn sync_session(&mut self) {
+        if let Some(pres) = &self.presentation {
+            self.dungeon.session = pres.snapshot_session(&self.dungeon);
+        }
+    }
+
     fn graph_hash(&self) -> u64 {
         use std::hash::{Hash, Hasher};
         use std::collections::hash_map::DefaultHasher;
@@ -619,6 +626,7 @@ impl eframe::App for DungeonApp {
         }
         // Ctrl+S: save to current file or open Save As dialog
         if save_pressed && self.pending_file_op.is_none() {
+            self.sync_session();
             if let Some(path) = &self.current_file {
                 self.pending_file_op = Some(
                     crate::io::save_load::save_dungeon_to_path(&self.dungeon, path.clone()),
@@ -674,6 +682,7 @@ impl eframe::App for DungeonApp {
                     }
                     if ui.button("Save  Ctrl+S").clicked() {
                         if self.pending_file_op.is_none() {
+                            self.sync_session();
                             if let Some(path) = &self.current_file {
                                 self.pending_file_op = Some(
                                     crate::io::save_load::save_dungeon_to_path(&self.dungeon, path.clone()),
@@ -688,6 +697,7 @@ impl eframe::App for DungeonApp {
                     }
                     if ui.button("Save As...").clicked() {
                         if self.pending_file_op.is_none() {
+                            self.sync_session();
                             self.pending_file_op = Some(crate::io::save_load::save_dungeon_async(&self.dungeon));
                         }
                         ui.close_menu();
@@ -1239,6 +1249,7 @@ impl eframe::App for DungeonApp {
             && self.pending_file_op.is_none()
             && committed_hash != self.last_autosave_hash
         {
+            self.sync_session();
             let path = self.current_file.clone().unwrap();
             self.pending_file_op = Some(
                 crate::io::save_load::save_dungeon_to_path(&self.dungeon, path),

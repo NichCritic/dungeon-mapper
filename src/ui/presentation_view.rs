@@ -216,6 +216,22 @@ fn aoe_sidebar(
 /// Compute the advantage state for an attack given attacker/target hidden status.
 /// Attacker hidden → advantage. Target hidden → disadvantage.
 /// Both → cancel out to normal.
+/// Extract the attack count from a multiattack summary for the header label.
+fn parse_multiattack_header_count(text: &str) -> usize {
+    let lower = text.to_lowercase();
+    let words = [("two", 2), ("three", 3), ("four", 4), ("five", 5), ("six", 6)];
+    for (word, n) in words {
+        if lower.contains(word) { return n; }
+    }
+    // Try a digit
+    for word in lower.split_whitespace() {
+        if let Ok(n) = word.parse::<usize>() {
+            if n > 1 { return n; }
+        }
+    }
+    2 // default for multiattack
+}
+
 fn compute_attack_advantage(attacker_hidden: bool, target_hidden: bool) -> dice::AdvantageState {
     match (attacker_hidden, target_hidden) {
         (true, true) => dice::AdvantageState::Normal, // cancel out
@@ -250,37 +266,70 @@ fn attack_target_ui(
         selected_idx = 0;
     }
 
-    if targets.is_empty() {
-        ui.label("No targets");
-        return;
-    }
+    let has_targets = !targets.is_empty();
+    let (target_name, target_ac, target_hidden) = if has_targets {
+        let (_, ref name, ac, hidden) = targets[selected_idx];
+        (name.clone(), ac, hidden)
+    } else {
+        ("(no target)".to_string(), 0u8, false)
+    };
+    let auto_adv = compute_attack_advantage(attacker_hidden, target_hidden);
 
-    let (_, ref target_name, target_ac, target_hidden) = targets[selected_idx];
-    let adv = compute_attack_advantage(attacker_hidden, target_hidden);
+    // Manual advantage/disadvantage override (0 = auto, 1 = advantage, 2 = disadvantage)
+    let adv_override_id = egui::Id::new(format!("adv_override_{}", id_salt));
+    let mut adv_override: u8 = ui.ctx().memory(|m| m.data.get_temp(adv_override_id).unwrap_or(0u8));
+
+    let adv = match adv_override {
+        1 => dice::AdvantageState::Advantage,
+        2 => dice::AdvantageState::Disadvantage,
+        _ => auto_adv,
+    };
     let adv_label = match adv {
         dice::AdvantageState::Advantage => " [ADV]",
         dice::AdvantageState::Disadvantage => " [DIS]",
         dice::AdvantageState::Normal => "",
     };
 
-    ui.horizontal(|ui| {
-        ui.label("Target:");
-        let display = format!("{} (AC {}){}", target_name, target_ac,
-            if target_hidden { " [hidden]" } else { "" });
-        egui::ComboBox::from_id_salt(format!("target_combo_{}", id_salt))
-            .selected_text(&display)
-            .width(160.0)
-            .show_ui(ui, |ui| {
-                for (i, (_, name, ac, hidden)) in targets.iter().enumerate() {
-                    let label = format!("{} (AC {}){}", name, ac,
-                        if *hidden { " [hidden]" } else { "" });
-                    if ui.selectable_label(i == selected_idx, &label).clicked() {
-                        selected_idx = i;
+    if has_targets {
+        ui.horizontal(|ui| {
+            ui.label("Target:");
+            let display = format!("{} (AC {}){}", target_name, target_ac,
+                if target_hidden { " [hidden]" } else { "" });
+            egui::ComboBox::from_id_salt(format!("target_combo_{}", id_salt))
+                .selected_text(&display)
+                .width(160.0)
+                .show_ui(ui, |ui| {
+                    for (i, (_, name, ac, hidden)) in targets.iter().enumerate() {
+                        let label = format!("{} (AC {}){}", name, ac,
+                            if *hidden { " [hidden]" } else { "" });
+                        if ui.selectable_label(i == selected_idx, &label).clicked() {
+                            selected_idx = i;
+                        }
                     }
-                }
-            });
+                });
+        });
+        ui.ctx().memory_mut(|m| m.data.insert_temp(target_idx_id, selected_idx));
+    }
+
+    ui.horizontal(|ui| {
+        let mut force_adv = adv_override == 1;
+        let mut force_dis = adv_override == 2;
+        if ui.checkbox(&mut force_adv, "Advantage").changed() {
+            adv_override = if force_adv { 1 } else { 0 };
+        }
+        if ui.checkbox(&mut force_dis, "Disadvantage").changed() {
+            adv_override = if force_dis { 2 } else { 0 };
+        }
+        if adv_override == 0 && auto_adv != dice::AdvantageState::Normal {
+            let auto_label = match auto_adv {
+                dice::AdvantageState::Advantage => "(auto: advantage)",
+                dice::AdvantageState::Disadvantage => "(auto: disadvantage)",
+                dice::AdvantageState::Normal => "",
+            };
+            ui.colored_label(egui::Color32::from_rgb(150, 150, 150), auto_label);
+        }
     });
-    ui.ctx().memory_mut(|m| m.data.insert_temp(target_idx_id, selected_idx));
+    ui.ctx().memory_mut(|m| m.data.insert_temp(adv_override_id, adv_override));
 
     for atk in attacks {
         ui.horizontal(|ui| {
@@ -288,7 +337,7 @@ fn attack_target_ui(
             if ui.button(&btn_text).clicked() {
                 attack_actions.push((
                     attacker_name.to_string(),
-                    format!("{} (AC {})", target_name, target_ac),
+                    if has_targets { format!("{} (AC {})", target_name, target_ac) } else { "(no target)".to_string() },
                     atk.clone(),
                     target_ac,
                     adv,
@@ -686,7 +735,7 @@ fn zoom_for_one_inch_square(ctx: &egui::Context, screen_diagonal_inches: f32) ->
 /// After a tick, apply hazards and run FFA battles in rooms with multiple encounters.
 fn run_autobattles(
     presentation: &mut PresentationState,
-    dungeon: &Dungeon,
+    dungeon: &mut Dungeon,
     monster_db: &MonsterDatabase,
     combat_stats_cache: &mut CombatStatsCache,
 ) {
@@ -783,6 +832,7 @@ fn run_autobattles(
             let enc = &dungeon.encounters[enc_idx];
             let combatants = combat_sim::build_combatants_from_encounter(
                 enc, monster_db, &dungeon.custom_monsters, combat_stats_cache, side,
+                Some(&dungeon.session.encounter_hp),
             );
             if !combatants.is_empty() {
                 groups.push(combatants);
@@ -793,13 +843,28 @@ fn run_autobattles(
 
         let result = combat_sim::run_combat_ffa(&groups);
 
-        // Mark wiped-out encounters as defeated
+        // Persist per-monster HP and mark wiped-out encounters as defeated
         for (side, &enc_idx) in side_to_enc.iter().enumerate() {
-            let all_dead = result.combatants.iter()
+            let enc = &dungeon.encounters[enc_idx];
+            let side_results: Vec<&combat_sim::SimCombatantResult> = result.combatants.iter()
                 .filter(|c| c.side == side)
-                .all(|c| c.current_hp <= 0);
+                .collect();
+
+            // Map results back to monster indices/instances (same order as build_combatants_from_encounter)
+            let mut result_idx = 0;
+            for (m_idx, em) in enc.monsters.iter().enumerate() {
+                for instance in 0..em.count {
+                    if result_idx < side_results.len() {
+                        let key = format!("{}/{}/{}", enc.id, m_idx, instance);
+                        dungeon.session.encounter_hp.insert(key, side_results[result_idx].current_hp);
+                        result_idx += 1;
+                    }
+                }
+            }
+
+            let all_dead = side_results.iter().all(|c| c.current_hp <= 0);
             if all_dead {
-                presentation.defeated_encounters.insert(dungeon.encounters[enc_idx].id.clone());
+                presentation.defeated_encounters.insert(enc.id.clone());
             }
         }
     }
@@ -959,6 +1024,7 @@ fn combat_tracker_ui(
     let mut heal_actions: Vec<(CombatantId, i32)> = Vec::new();
     let mut condition_toggles: Vec<(CombatantId, usize)> = Vec::new();
     let mut attack_actions: Vec<(String, String, crate::model::combat_stats::ParsedAttack, u8, dice::AdvantageState, CombatantId)> = Vec::new();
+    let mut ability_actions: Vec<(String, crate::model::combat_stats::ParsedAbility)> = Vec::new();
     let mut hidden_toggles: Vec<CombatantId> = Vec::new();
 
     // Build target list for attack dropdowns (all living combatants)
@@ -1002,9 +1068,11 @@ fn combat_tracker_ui(
                             }
                         });
 
-                        // Attacks
-                        if !inst.attacks.is_empty() {
+                        // Actions (attacks + save-based abilities)
+                        if !inst.attacks.is_empty() || !inst.abilities.is_empty() {
                             let attacks_snapshot: Vec<_> = inst.attacks.clone();
+                            let abilities_snapshot: Vec<_> = inst.abilities.clone();
+                            let multiattack = inst.multiattack_text.clone();
                             let attacker_name = inst.label.clone();
                             let attacker_hidden = inst.hidden;
                             let attacker_cid = current_id.clone();
@@ -1017,12 +1085,34 @@ fn combat_tracker_ui(
                             let targets: Vec<_> = all_targets.iter()
                                 .filter(|(cid, _, _, _)| *cid != attacker_cid)
                                 .cloned().collect();
-                            egui::CollapsingHeader::new("Actions")
+                            let header = if !multiattack.is_empty() {
+                                format!("Actions ({}x)", inst.attacks.len().max(inst.abilities.len()).max(
+                                    // Use parsed multiattack count from the text
+                                    parse_multiattack_header_count(&multiattack)
+                                ))
+                            } else {
+                                "Actions".to_string()
+                            };
+                            let header_resp = egui::CollapsingHeader::new(&header)
                                 .id_salt("active_turn_attacks")
                                 .default_open(true)
                                 .show(ui, |ui| {
                                     attack_target_ui(ui, &attacks_snapshot, &attacker_name, attacker_hidden, &attacker_cid, &targets, "turn", &mut attack_actions);
+                                    for ability in &abilities_snapshot {
+                                        ui.separator();
+                                        let btn_label = if ability.save_dc.is_some() {
+                                            format!("{} (DC {})", ability.name, ability.save_dc.unwrap())
+                                        } else {
+                                            ability.name.clone()
+                                        };
+                                        if ui.button(&btn_label).on_hover_text(&ability.description).clicked() {
+                                            ability_actions.push((attacker_name.clone(), ability.clone()));
+                                        }
+                                    }
                                 });
+                            if !multiattack.is_empty() {
+                                header_resp.header_response.on_hover_text(&multiattack);
+                            }
                         }
 
                         // Stat block pop-out button
@@ -1397,8 +1487,8 @@ fn combat_tracker_ui(
                                     }
                                 });
 
-                                // Attacks section
-                                if !inst.attacks.is_empty() {
+                                // Actions (attacks + save-based abilities)
+                                if !inst.attacks.is_empty() || !inst.abilities.is_empty() {
                                     let attacks_snapshot: Vec<_> = inst.attacks.clone();
                                     let attacker_name = inst.label.clone();
                                     let attacker_hidden = inst.hidden;
@@ -1407,12 +1497,28 @@ fn combat_tracker_ui(
                                         .filter(|(cid, _, _, _)| *cid != attacker_cid)
                                         .cloned().collect();
                                     let id_salt = format!("attacks_{}_{}_{}", inst_id.encounter_id, inst_id.monster_index, inst_id.instance);
-                                    egui::CollapsingHeader::new("Attacks")
-                                        .id_salt(&id_salt)
-                                        .default_open(false)
-                                        .show(ui, |ui| {
-                                            attack_target_ui(ui, &attacks_snapshot, &attacker_name, attacker_hidden, &attacker_cid, &targets, &id_salt, &mut attack_actions);
-                                        });
+                                    let label = if !inst.multiattack_text.is_empty() {
+                                        format!("Actions ({}x):", parse_multiattack_header_count(&inst.multiattack_text))
+                                    } else {
+                                        "Actions:".to_string()
+                                    };
+                                    let label_resp = ui.label(&label);
+                                    if !inst.multiattack_text.is_empty() {
+                                        label_resp.on_hover_text(&inst.multiattack_text);
+                                    }
+                                    if !inst.attacks.is_empty() {
+                                        attack_target_ui(ui, &attacks_snapshot, &attacker_name, attacker_hidden, &attacker_cid, &targets, &id_salt, &mut attack_actions);
+                                    }
+                                    for ability in &inst.abilities {
+                                        let btn_label = if ability.save_dc.is_some() {
+                                            format!("{} (DC {})", ability.name, ability.save_dc.unwrap())
+                                        } else {
+                                            ability.name.clone()
+                                        };
+                                        if ui.small_button(&btn_label).on_hover_text(&ability.description).clicked() {
+                                            ability_actions.push((inst.label.clone(), ability.clone()));
+                                        }
+                                    }
                                 }
                             });
                         });
@@ -1422,6 +1528,43 @@ fn combat_tracker_ui(
                 });
         }
     });
+
+    // Combat log
+    ui.separator();
+    egui::CollapsingHeader::new("Combat Log")
+        .id_salt("combat_log_panel")
+        .default_open(false)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                if ui.button("Save Log").clicked() {
+                    let text = tracker.log.export_text();
+                    std::thread::spawn(move || {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .set_file_name("combat_log.txt")
+                            .add_filter("Text", &["txt"])
+                            .save_file()
+                        {
+                            let _ = std::fs::write(path, text);
+                        }
+                    });
+                }
+                if ui.button("Clear Log").clicked() {
+                    tracker.log.entries.clear();
+                }
+            });
+            egui::ScrollArea::vertical()
+                .id_salt("combat_log_scroll")
+                .max_height(300.0)
+                .stick_to_bottom(true)
+                .show(ui, |ui| {
+                    for entry in &tracker.log.entries {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(entry.color[0], entry.color[1], entry.color[2]),
+                            &entry.text,
+                        );
+                    }
+                });
+        });
 
     // Apply deferred actions
     for (id, dmg) in damage_actions {
@@ -1452,6 +1595,11 @@ fn combat_tracker_ui(
                 }
             }
         }
+    }
+
+    // Process ability actions
+    for (user_name, ability) in ability_actions {
+        tracker.log.log_ability(&user_name, &ability);
     }
 }
 
@@ -1655,107 +1803,51 @@ pub fn presentation_sidebar(
             ui.heading("Encounters Here");
             ui.separator();
 
-            // Collect display info first, then render with mutable access
-            struct MonsterDisplayInfo {
-                m_idx: usize,
-                name: String,
-                ac: Option<u8>,
-                hp: Option<i32>,
-            }
-            struct EncDisplayInfo {
-                enc_idx: usize,
-                type_marker: &'static str,
-                name: String,
-                monsters: Vec<MonsterDisplayInfo>,
-            }
-            let enc_infos: Vec<EncDisplayInfo> = room_encounter_indices.iter().map(|&i| {
-                let enc = &dungeon.encounters[i];
+            for &enc_idx in &room_encounter_indices {
+                let enc = &dungeon.encounters[enc_idx];
                 let type_marker = match enc.encounter_type {
                     EncounterType::Static => "S",
                     EncounterType::Wandering(_) => "W",
                 };
-                let monsters: Vec<MonsterDisplayInfo> = enc.monsters.iter().enumerate().map(|(m_idx, em)| {
+                let monster_count: u32 = enc.monsters.iter().map(|m| m.count).sum();
+                let monster_summary: String = enc.monsters.iter().map(|em| {
                     let monster = crate::presentation::combat_tracker::resolve_monster(
                         &em.monster_ref, monster_db, &dungeon.custom_monsters,
                     );
                     let name = monster.map(|m| m.name.clone()).unwrap_or_else(|| "?".to_string());
-                    let stats = monster.map(|m| crate::model::combat_stats::parse_combat_stats(m));
-                    let ac = stats.as_ref().and_then(|s| s.ac);
-                    let hp = stats.as_ref().map(|s| s.max_hp);
-                    MonsterDisplayInfo { m_idx, name, ac, hp }
-                }).collect();
-                EncDisplayInfo { enc_idx: i, type_marker, name: enc.name.clone(), monsters }
-            }).collect();
+                    if em.count > 1 { format!("{}x {}", em.count, name) } else { name }
+                }).collect::<Vec<_>>().join(", ");
 
-            for info in &enc_infos {
-                ui.label(format!("[{}] {}", info.type_marker, info.name));
-                for minfo in &info.monsters {
-                    ui.horizontal(|ui| {
-                        let stats_str = match (minfo.ac, minfo.hp) {
-                            (Some(ac), Some(hp)) => format!("  {} (AC {} HP {}) x", minfo.name, ac, hp),
-                            _ => format!("  {} x", minfo.name),
-                        };
-                        ui.label(&stats_str);
-                        let mut count = dungeon.encounters[info.enc_idx].monsters[minfo.m_idx].count;
-                        if crate::ui::canvas_common::num_input_u32(ui, &mut count, 35.0) {
-                            dungeon.encounters[info.enc_idx].monsters[minfo.m_idx].count = count;
-                        }
-                    });
-                }
-                if ui.small_button("+ Add Monster").clicked() {
-                    ui.ctx().memory_mut(|mem| {
-                        mem.data.insert_temp(egui::Id::new("monster_browser_open"), true);
-                        mem.data.insert_temp(egui::Id::new("monster_browser_target"), info.enc_idx);
+                ui.horizontal(|ui| {
+                    let label = format!("[{}] {}", type_marker, enc.name);
+                    if ui.selectable_label(false, &label).clicked() {
+                        ui.ctx().memory_mut(|mem| {
+                            mem.data.insert_temp(egui::Id::new("combat_prep_open"), true);
+                            mem.data.insert_temp(egui::Id::new("combat_prep_target"), enc.id.clone());
+                        });
+                    }
+                });
+                if monster_count > 0 {
+                    ui.indent(format!("enc_monsters_{}", enc_idx), |ui| {
+                        ui.label(&monster_summary);
                     });
                 }
             }
 
-            // Rebuild room_encounters for Start Combat / Add to Combat buttons
-            let room_encounters: Vec<&crate::model::Encounter> = room_encounter_indices.iter()
-                .map(|&i| &dungeon.encounters[i])
-                .collect();
-            if !in_combat {
-                // Awareness check for encounters in this room (party also here)
-                if party_here && !dungeon.party.is_empty() {
-                    if ui.button("Awareness Check").clicked() {
-                        let mut results = Vec::new();
-                        for enc in &room_encounters {
-                            let result = crate::presentation::awareness::run_awareness_check(
-                                dungeon, enc, &sel_room_id, &sel_room_id, monster_db,
-                            );
-                            results.push(result);
-                        }
-                        presentation.last_awareness_results = results;
+            // Awareness check for encounters in this room (party also here)
+            if !in_combat && party_here && !dungeon.party.is_empty() {
+                if ui.button("Awareness Check").clicked() {
+                    let room_encounters: Vec<&crate::model::Encounter> = room_encounter_indices.iter()
+                        .map(|&i| &dungeon.encounters[i])
+                        .collect();
+                    let mut results = Vec::new();
+                    for enc in &room_encounters {
+                        let result = crate::presentation::awareness::run_awareness_check(
+                            dungeon, enc, &sel_room_id, &sel_room_id, monster_db,
+                        );
+                        results.push(result);
                     }
-                }
-
-                let room_encounter_slice: Vec<crate::model::Encounter> = room_encounters.iter()
-                    .map(|e| (*e).clone())
-                    .collect();
-
-                // Start combat button, applying per-creature surprise from awareness
-                if ui.button(format!("Start Combat in {}", room_label)).clicked() {
-                    let mut tracker = CombatTracker::init_with_party(
-                        &room_encounter_slice,
-                        monster_db,
-                        &dungeon.custom_monsters,
-                        combat_stats_cache,
-                        &dungeon.party,
-                    );
-                    for result in &presentation.last_awareness_results {
-                        tracker.apply_awareness(result);
-                    }
-                    presentation.combat_tracker = Some(tracker);
-                    presentation.last_awareness_results.clear();
-                }
-            } else {
-                // Add encounters to existing combat
-                if ui.button("Add to Combat").clicked() {
-                    if let Some(tracker) = &mut presentation.combat_tracker {
-                        for enc in &room_encounters {
-                            tracker.add_encounter(enc, monster_db, &dungeon.custom_monsters, combat_stats_cache);
-                        }
-                    }
+                    presentation.last_awareness_results = results;
                 }
             }
         }
@@ -1992,8 +2084,9 @@ pub fn presentation_sidebar(
                 if ui.button("Reset Pos").on_hover_text("Return all encounters to home rooms").clicked() {
                     presentation.reset_encounter_positions(dungeon);
                 }
-                if ui.button("Reset Stats").on_hover_text("Clear all defeated encounters").clicked() {
+                if ui.button("Reset Stats").on_hover_text("Clear all defeated encounters and restore HP").clicked() {
                     presentation.defeated_encounters.clear();
+                    dungeon.session.encounter_hp.clear();
                 }
             });
             ui.checkbox(&mut presentation.autobattle, "Autobattle")
@@ -2022,28 +2115,11 @@ pub fn presentation_sidebar(
                                     EncounterType::Static => "S",
                                     EncounterType::Wandering(_) => "W",
                                 };
-                                ui.label(format!("[{}] {}", type_marker, enc.name));
-                            }
-                            let room_encounter_slice: Vec<crate::model::Encounter> = room_encs.iter()
-                                .map(|e| (*e).clone())
-                                .collect();
-                            if !in_combat {
-                                if ui.button(format!("Start Combat in {}", room_label)).clicked() {
-                                    presentation.combat_tracker = Some(CombatTracker::init_with_party(
-                                        &room_encounter_slice,
-                                        monster_db,
-                                        &dungeon.custom_monsters,
-                                        combat_stats_cache,
-                                        &dungeon.party,
-                                    ));
-                                }
-                            } else {
-                                if ui.button("Add to Combat").clicked() {
-                                    if let Some(tracker) = &mut presentation.combat_tracker {
-                                        for enc in &room_encounter_slice {
-                                            tracker.add_encounter(enc, monster_db, &dungeon.custom_monsters, combat_stats_cache);
-                                        }
-                                    }
+                                if ui.selectable_label(false, format!("[{}] {}", type_marker, enc.name)).clicked() {
+                                    ui.ctx().memory_mut(|mem| {
+                                        mem.data.insert_temp(egui::Id::new("combat_prep_open"), true);
+                                        mem.data.insert_temp(egui::Id::new("combat_prep_target"), enc.id.clone());
+                                    });
                                 }
                             }
                         });
@@ -2115,10 +2191,11 @@ pub fn presentation_sidebar(
         }
     }
 
-    // Sync player view to DM's current view center
-    if ui.button("Sync player to DM view").on_hover_text("Center the player view on what the DM is looking at").clicked() {
+    // Sync player view to match the DM's view exactly (position and zoom)
+    if ui.button("Sync player to DM view").on_hover_text("Match the player view to exactly what the DM sees").clicked() {
         let dm_center_world_x = (view_state.canvas_size.x / 2.0 - view_state.view.offset.x) / view_state.view.zoom;
         let dm_center_world_y = (view_state.canvas_size.y / 2.0 - view_state.view.offset.y) / view_state.view.zoom;
+        player_view_state.view.zoom = view_state.view.zoom;
         player_view_state.view.center_on(dm_center_world_x, dm_center_world_y, player_view_state.canvas_size);
     }
 
@@ -2252,12 +2329,12 @@ pub fn presentation_sidebar(
                 if ui.button("Simulate 1v1").clicked() {
                     let side_a = if let SimSide::Encounter(idx) = &sim.side_a {
                         if let Some(enc) = dungeon.encounters.get(*idx) {
-                            build_combatants_from_encounter(enc, monster_db, &dungeon.custom_monsters, combat_stats_cache, 0)
+                            build_combatants_from_encounter(enc, monster_db, &dungeon.custom_monsters, combat_stats_cache, 0, None)
                         } else { Vec::new() }
                     } else { Vec::new() };
                     let side_b = if let SimSide::Encounter(idx) = &sim.side_b {
                         if let Some(enc) = dungeon.encounters.get(*idx) {
-                            build_combatants_from_encounter(enc, monster_db, &dungeon.custom_monsters, combat_stats_cache, 1)
+                            build_combatants_from_encounter(enc, monster_db, &dungeon.custom_monsters, combat_stats_cache, 1, None)
                         } else { Vec::new() }
                     } else { Vec::new() };
                     if !side_a.is_empty() && !side_b.is_empty() {
@@ -2269,7 +2346,7 @@ pub fn presentation_sidebar(
                     for (side, (idx, _)) in room_enc_indices.iter().enumerate() {
                         if let Some(enc) = dungeon.encounters.get(*idx) {
                             let combatants = build_combatants_from_encounter(
-                                enc, monster_db, &dungeon.custom_monsters, combat_stats_cache, side,
+                                enc, monster_db, &dungeon.custom_monsters, combat_stats_cache, side, None,
                             );
                             if !combatants.is_empty() {
                                 groups.push(combatants);
@@ -2353,7 +2430,7 @@ pub fn presentation_sidebar(
                 SimSide::Party => build_combatants_from_party(&dungeon.party, 0),
                 SimSide::Encounter(idx) => {
                     if let Some(enc) = dungeon.encounters.get(*idx) {
-                        build_combatants_from_encounter(enc, monster_db, &dungeon.custom_monsters, combat_stats_cache, 0)
+                        build_combatants_from_encounter(enc, monster_db, &dungeon.custom_monsters, combat_stats_cache, 0, None)
                     } else { Vec::new() }
                 }
             };
@@ -2361,7 +2438,7 @@ pub fn presentation_sidebar(
                 SimSide::Party => build_combatants_from_party(&dungeon.party, 1),
                 SimSide::Encounter(idx) => {
                     if let Some(enc) = dungeon.encounters.get(*idx) {
-                        build_combatants_from_encounter(enc, monster_db, &dungeon.custom_monsters, combat_stats_cache, 1)
+                        build_combatants_from_encounter(enc, monster_db, &dungeon.custom_monsters, combat_stats_cache, 1, None)
                     } else { Vec::new() }
                 }
             };
@@ -2465,12 +2542,360 @@ pub fn presentation_sidebar(
 
     ui.add_space(8.0);
 
-    // Monster browser window (shared with encounters view, driven by egui temp memory)
+    // Pop-out windows
+    combat_prep_window(ui.ctx(), dungeon, presentation, monster_db, combat_stats_cache);
+    crate::ui::encounters_view::encounter_editor_window(ui.ctx(), dungeon, monster_db, &mut None);
     crate::ui::encounters_view::monster_browser_window(ui.ctx(), dungeon, monster_db, &mut None);
 
     // Web server controls
     ui.heading("Web Server");
     ui.separator();
+}
+
+/// Combat preparation window — lets the DM preview and configure an encounter
+/// before starting or adding to combat. Shows monsters with pre-rolled initiative,
+/// surprise/hidden toggles, and condition presets.
+fn combat_prep_window(
+    ctx: &egui::Context,
+    dungeon: &mut Dungeon,
+    presentation: &mut PresentationState,
+    monster_db: &MonsterDatabase,
+    combat_stats_cache: &mut CombatStatsCache,
+) {
+    let mut open: bool = ctx.memory(|mem|
+        mem.data.get_temp(egui::Id::new("combat_prep_open")).unwrap_or(false)
+    );
+    let target_id: Option<String> = ctx.memory(|mem|
+        mem.data.get_temp(egui::Id::new("combat_prep_target"))
+    );
+
+    if !open { return; }
+    let Some(enc_id) = target_id else { return; };
+
+    let Some(enc_idx) = dungeon.encounters.iter().position(|e| e.id == enc_id) else {
+        ctx.memory_mut(|mem| {
+            mem.data.insert_temp(egui::Id::new("combat_prep_open"), false);
+        });
+        return;
+    };
+
+    let in_combat = presentation.combat_tracker.is_some();
+    let title = format!("Prep: {}", dungeon.encounters[enc_idx].name);
+
+    // Build monster info for display. We use a temp storage key per encounter
+    // to hold pre-rolled initiatives and preset statuses.
+    let prep_id = egui::Id::new(format!("combat_prep_data_{}", enc_id));
+
+    // CombatPrepData stored as JSON in temp memory
+    let mut prep: CombatPrepData = ctx.memory(|mem|
+        mem.data.get_temp(prep_id).unwrap_or_default()
+    );
+
+    // Resolve monsters for this encounter
+    struct MonsterInfo {
+        name: String,
+        ac: u8,
+        max_hp: i32,
+        dex_mod: i8,
+        count: u32,
+        m_idx: usize,
+    }
+    let monster_infos: Vec<MonsterInfo> = dungeon.encounters[enc_idx].monsters.iter().enumerate().map(|(m_idx, em)| {
+        let monster = crate::presentation::combat_tracker::resolve_monster(
+            &em.monster_ref, monster_db, &dungeon.custom_monsters,
+        );
+        let (name, ac, max_hp, dex_mod) = if let Some(m) = monster {
+            let stats = crate::model::combat_stats::parse_combat_stats(m);
+            (m.name.clone(), stats.ac.unwrap_or(10), stats.max_hp, (m.dex_score as i8 - 10) / 2)
+        } else {
+            ("?".to_string(), 10, 1, 0)
+        };
+        MonsterInfo { name, ac, max_hp, dex_mod, count: em.count, m_idx }
+    }).collect();
+
+    // Ensure prep data has entries for all monster instances
+    let mut expected_keys: Vec<String> = Vec::new();
+    for info in &monster_infos {
+        for i in 0..info.count {
+            let key = format!("{}_{}", info.m_idx, i);
+            expected_keys.push(key.clone());
+            if !prep.monsters.contains_key(&key) {
+                // Check for stored HP from autobattle results
+                let session_hp_key = format!("{}/{}/{}", enc_id, info.m_idx, i);
+                let stored_hp = dungeon.session.encounter_hp.get(&session_hp_key).copied();
+                prep.monsters.insert(key, CombatPrepMonster {
+                    initiative: None,
+                    hp: stored_hp,
+                    surprised: false,
+                    hidden: false,
+                    conditions: Vec::new(),
+                });
+            }
+        }
+    }
+    // Remove stale entries
+    prep.monsters.retain(|k, _| expected_keys.contains(k));
+
+    let mut close_requested = false;
+
+    egui::Window::new(title)
+        .id(egui::Id::new("combat_prep_window"))
+        .open(&mut open)
+        .default_size([420.0, 500.0])
+        .resizable(true)
+        .show(ctx, |ui| {
+            let enc = &dungeon.encounters[enc_idx];
+
+            // Encounter info
+            let type_label = match enc.encounter_type {
+                EncounterType::Static => "Static",
+                EncounterType::Wandering(_) => "Wandering",
+            };
+            ui.label(format!("Type: {}", type_label));
+            let room_label = dungeon.graph.room_by_id(&enc.home_room_id)
+                .map(|r| r.label.as_str())
+                .unwrap_or("?");
+            ui.label(format!("Room: {}", room_label));
+
+            ui.separator();
+
+            // Roll All Initiative button
+            ui.horizontal(|ui| {
+                if ui.button("Roll All Initiative").clicked() {
+                    let mut rng = rand::thread_rng();
+                    use rand::Rng;
+                    for info in &monster_infos {
+                        for i in 0..info.count {
+                            let key = format!("{}_{}", info.m_idx, i);
+                            if let Some(pm) = prep.monsters.get_mut(&key) {
+                                let die = if pm.hidden && !pm.surprised {
+                                    let r1: i32 = rng.gen_range(1..=20);
+                                    let r2: i32 = rng.gen_range(1..=20);
+                                    r1.max(r2)
+                                } else if pm.surprised && !pm.hidden {
+                                    let r1: i32 = rng.gen_range(1..=20);
+                                    let r2: i32 = rng.gen_range(1..=20);
+                                    r1.min(r2)
+                                } else {
+                                    rng.gen_range(1..=20)
+                                };
+                                pm.initiative = Some(die + info.dex_mod as i32);
+                            }
+                        }
+                    }
+                }
+                if ui.button("Clear Initiative").clicked() {
+                    for pm in prep.monsters.values_mut() {
+                        pm.initiative = None;
+                    }
+                }
+            });
+
+            ui.add_space(4.0);
+
+            // Monster list
+            egui::ScrollArea::vertical().id_salt("combat_prep_monsters").show(ui, |ui| {
+                for info in &monster_infos {
+                    for i in 0..info.count {
+                        let key = format!("{}_{}", info.m_idx, i);
+                        let label = if info.count > 1 {
+                            format!("{} #{}", info.name, i + 1)
+                        } else {
+                            info.name.clone()
+                        };
+
+                        ui.push_id(&key, |ui| {
+                            ui.group(|ui| {
+                                // Header row: name, AC, HP
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new(&label).strong());
+                                    ui.label(format!("AC {}", info.ac));
+                                    if let Some(pm) = prep.monsters.get_mut(&key) {
+                                        ui.label("HP:");
+                                        let mut hp_val = pm.hp.unwrap_or(info.max_hp);
+                                        if crate::ui::canvas_common::num_input_i32(ui, &mut hp_val, 45.0) {
+                                            pm.hp = Some(hp_val);
+                                        }
+                                        ui.label(format!("/ {}", info.max_hp));
+                                    }
+                                });
+
+                                if let Some(pm) = prep.monsters.get_mut(&key) {
+                                    ui.horizontal(|ui| {
+                                        // Initiative
+                                        ui.label("Init:");
+                                        let mut init_val = pm.initiative.unwrap_or(0) as i32;
+                                        if crate::ui::canvas_common::num_input_i32(ui, &mut init_val, 35.0) {
+                                            pm.initiative = Some(init_val);
+                                        }
+                                        if pm.initiative.is_none() {
+                                            ui.colored_label(
+                                                egui::Color32::from_rgb(150, 150, 150),
+                                                "(not rolled)",
+                                            );
+                                        }
+
+                                        // Surprise / Hidden toggles
+                                        ui.checkbox(&mut pm.surprised, "Surprised");
+                                        ui.checkbox(&mut pm.hidden, "Hidden");
+                                    });
+
+                                    // Conditions
+                                    ui.horizontal_wrapped(|ui| {
+                                        for &cond in STANDARD_CONDITIONS {
+                                            let has = pm.conditions.contains(&cond.to_string());
+                                            if ui.selectable_label(has, cond).clicked() {
+                                                if has {
+                                                    pm.conditions.retain(|c| c != cond);
+                                                } else {
+                                                    pm.conditions.push(cond.to_string());
+                                                }
+                                            }
+                                        }
+                                    });
+                                }
+                            });
+                        });
+                    }
+                }
+            });
+
+            ui.separator();
+
+            // Action buttons
+            ui.horizontal(|ui| {
+                if in_combat {
+                    if ui.button("Add to Combat").clicked() {
+                        if let Some(tracker) = &mut presentation.combat_tracker {
+                            let enc = &dungeon.encounters[enc_idx];
+                            tracker.log.log_info(format!("--- Adding: {} ---", enc.name));
+                            tracker.add_encounter(enc, monster_db, &dungeon.custom_monsters, combat_stats_cache);
+                            apply_prep_to_tracker(tracker, &enc.id, &prep);
+                            // Log and apply pre-rolled initiative
+                            apply_prep_initiative(tracker, &enc.id, &prep);
+                            if !tracker.initiative_order.is_empty() {
+                                tracker.sort_initiative();
+                            }
+                        }
+                        close_requested = true;
+                    }
+                } else {
+                    if ui.button("Start Combat").clicked() {
+                        let enc_slice = &dungeon.encounters[enc_idx..enc_idx+1];
+                        let mut tracker = CombatTracker::init_with_party(
+                            enc_slice,
+                            monster_db,
+                            &dungeon.custom_monsters,
+                            combat_stats_cache,
+                            &dungeon.party,
+                        );
+                        // Log awareness results if any
+                        for result in &presentation.last_awareness_results {
+                            tracker.log.log_info(format!("--- Awareness: {} ---", result.encounter_name));
+                            for m in &result.monsters {
+                                tracker.log.log_stealth(&m.name, m.stealth_roll);
+                            }
+                            for pc in &result.party {
+                                tracker.log.log_stealth(&pc.name, pc.stealth_roll);
+                            }
+                        }
+                        // Apply prep data (surprise, hidden, conditions, pre-rolled initiative)
+                        apply_prep_to_tracker(&mut tracker, &enc_id, &prep);
+                        apply_prep_initiative(&mut tracker, &enc_id, &prep);
+                        // Roll initiative — skips any that already have a preset value
+                        tracker.roll_all_initiative();
+                        presentation.combat_tracker = Some(tracker);
+                        presentation.last_awareness_results.clear();
+                        close_requested = true;
+                    }
+                }
+
+                if ui.button("Edit Encounter").clicked() {
+                    ctx.memory_mut(|mem| {
+                        mem.data.insert_temp(egui::Id::new("encounter_editor_open"), true);
+                        mem.data.insert_temp(egui::Id::new("encounter_editor_target"), enc_id.clone());
+                    });
+                }
+            });
+        });
+
+    if close_requested {
+        open = false;
+    }
+
+    // Persist state
+    ctx.memory_mut(|mem| {
+        mem.data.insert_temp(egui::Id::new("combat_prep_open"), open);
+        mem.data.insert_temp(prep_id, prep);
+    });
+}
+
+/// Per-monster prep data for the combat prep window.
+#[derive(Clone, Debug, Default)]
+struct CombatPrepMonster {
+    initiative: Option<i32>,
+    hp: Option<i32>,
+    surprised: bool,
+    hidden: bool,
+    conditions: Vec<String>,
+}
+
+/// Prep data for all monsters in an encounter, keyed by "monsterIdx_instanceIdx".
+#[derive(Clone, Debug, Default)]
+struct CombatPrepData {
+    monsters: HashMap<String, CombatPrepMonster>,
+}
+
+use std::collections::HashMap;
+
+/// Apply surprise, hidden, and condition presets from prep data to a combat tracker.
+fn apply_prep_to_tracker(tracker: &mut CombatTracker, enc_id: &str, prep: &CombatPrepData) {
+    for (key, pm) in &prep.monsters {
+        // Parse key "mIdx_instance"
+        let parts: Vec<&str> = key.split('_').collect();
+        if parts.len() != 2 { continue; }
+        let m_idx: usize = parts[0].parse().unwrap_or(0);
+        let instance: usize = parts[1].parse().unwrap_or(0);
+        let mid = MonsterInstanceId {
+            encounter_id: enc_id.to_string(),
+            monster_index: m_idx,
+            instance,
+        };
+        if let Some(inst) = tracker.instances.get_mut(&mid) {
+            inst.surprised = pm.surprised;
+            inst.hidden = pm.hidden;
+            if let Some(hp) = pm.hp {
+                inst.current_hp = hp;
+            }
+            // Apply conditions
+            for (i, cond) in STANDARD_CONDITIONS.iter().enumerate() {
+                if i < inst.conditions.len() {
+                    inst.conditions[i] = pm.conditions.contains(&cond.to_string());
+                }
+            }
+        }
+    }
+}
+
+/// Apply pre-rolled initiative values from prep data onto tracker instances.
+/// Should be called before `roll_all_initiative`, which will skip these.
+fn apply_prep_initiative(tracker: &mut CombatTracker, enc_id: &str, prep: &CombatPrepData) {
+    for (key, pm) in &prep.monsters {
+        if let Some(init) = pm.initiative {
+            let parts: Vec<&str> = key.split('_').collect();
+            if parts.len() != 2 { continue; }
+            let m_idx: usize = parts[0].parse().unwrap_or(0);
+            let instance: usize = parts[1].parse().unwrap_or(0);
+            let mid = MonsterInstanceId {
+                encounter_id: enc_id.to_string(),
+                monster_index: m_idx,
+                instance,
+            };
+            if let Some(inst) = tracker.instances.get_mut(&mid) {
+                inst.initiative = Some(init);
+            }
+        }
+    }
 }
 
 /// Actions the sidebar can request from the app regarding the server.

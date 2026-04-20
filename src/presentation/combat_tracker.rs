@@ -46,6 +46,10 @@ pub struct MonsterInstance {
     pub dex_mod: i8,
     /// Parsed attacks from combat stats, populated during init.
     pub attacks: Vec<ParsedAttack>,
+    /// Multiattack description text.
+    pub multiattack_text: String,
+    /// Non-attack abilities (save-based, utility, etc.).
+    pub abilities: Vec<crate::model::combat_stats::ParsedAbility>,
     /// If true, rolls initiative with disadvantage (5.5e surprise).
     pub surprised: bool,
     /// If true, rolls initiative with advantage (hidden from all enemies).
@@ -82,6 +86,16 @@ fn roll_with_adv_disadv(rng: &mut impl rand::Rng, advantage: bool, disadvantage:
         r1.min(r2)
     } else {
         rng.gen_range(1..=20)
+    }
+}
+
+/// Human-readable label for advantage/disadvantage state.
+fn adv_label(hidden: bool, surprised: bool) -> &'static str {
+    match (hidden, surprised) {
+        (true, true) => "",     // cancel out
+        (true, false) => "ADV",
+        (false, true) => "DIS",
+        (false, false) => "",
     }
 }
 
@@ -123,6 +137,8 @@ impl CombatTracker {
                 }
 
                 let attacks = stats.attacks.clone();
+                let multiattack_text = stats.multiattack_text.clone();
+                let abilities = stats.abilities.clone();
 
                 for i in 0..em.count as usize {
                     let id = MonsterInstanceId {
@@ -146,6 +162,8 @@ impl CombatTracker {
                         is_dead: false,
                         dex_mod,
                         attacks: attacks.clone(),
+                        multiattack_text: multiattack_text.clone(),
+                        abilities: abilities.clone(),
                         surprised: false,
                         hidden: false,
                     });
@@ -202,6 +220,8 @@ impl CombatTracker {
             }
 
             let attacks = stats.attacks.clone();
+                let multiattack_text = stats.multiattack_text.clone();
+                let abilities = stats.abilities.clone();
 
             for i in 0..em.count as usize {
                 let id = MonsterInstanceId {
@@ -227,6 +247,8 @@ impl CombatTracker {
                     is_dead: false,
                     dex_mod,
                     attacks: attacks.clone(),
+                    multiattack_text: multiattack_text.clone(),
+                    abilities: abilities.clone(),
                     surprised: false,
                     hidden: false,
                 });
@@ -370,36 +392,32 @@ impl CombatTracker {
     /// Both → they cancel out, roll normally.
     pub fn roll_all_initiative(&mut self) {
         let mut rng = rand::thread_rng();
+        self.log.log_info("--- Initiative ---".to_string());
         for inst in self.instances.values_mut() {
-            let die = roll_with_adv_disadv(&mut rng, inst.hidden, inst.surprised);
-            inst.initiative = Some(die + inst.dex_mod as i32);
+            if let Some(total) = inst.initiative {
+                self.log.log_info(format!("{} initiative: {} (preset)", inst.label, total));
+            } else {
+                let die = roll_with_adv_disadv(&mut rng, inst.hidden, inst.surprised);
+                let total = die + inst.dex_mod as i32;
+                inst.initiative = Some(total);
+                let adv = adv_label(inst.hidden, inst.surprised);
+                self.log.log_initiative(&inst.label, die, inst.dex_mod as i32, total, adv);
+            }
         }
         for pc in self.players.values_mut() {
-            let die = roll_with_adv_disadv(&mut rng, pc.hidden, pc.surprised);
-            pc.initiative = Some(die + pc.initiative_modifier as i32);
+            if let Some(total) = pc.initiative {
+                self.log.log_info(format!("{} initiative: {} (preset)", pc.name, total));
+            } else {
+                let die = roll_with_adv_disadv(&mut rng, pc.hidden, pc.surprised);
+                let total = die + pc.initiative_modifier as i32;
+                pc.initiative = Some(total);
+                let adv = adv_label(pc.hidden, pc.surprised);
+                self.log.log_initiative(&pc.name, die, pc.initiative_modifier as i32, total, adv);
+            }
         }
         self.sort_initiative();
     }
 
-    /// Apply per-creature surprise from an awareness result.
-    /// Matches by label/name since instance IDs aren't known at awareness time.
-    /// Apply per-creature surprise and hidden states from an awareness result.
-    pub fn apply_awareness(&mut self, result: &crate::presentation::awareness::AwarenessResult) {
-        for inst in self.instances.values_mut() {
-            let awareness = result.monster_awareness(&inst.label);
-            if let Some(a) = awareness {
-                inst.surprised = a.surprised;
-                inst.hidden = a.hidden;
-            }
-        }
-        for pc in self.players.values_mut() {
-            let awareness = result.pc_awareness(&pc.name);
-            if let Some(a) = awareness {
-                pc.surprised = a.surprised;
-                pc.hidden = a.hidden;
-            }
-        }
-    }
 
     /// Sort initiative order by initiative value (descending).
     pub fn sort_initiative(&mut self) {
@@ -577,6 +595,8 @@ mod tests {
             initiative: None, conditions: vec![false; STANDARD_CONDITIONS.len()],
             is_dead: false, dex_mod: 2,
             attacks: Vec::new(),
+            multiattack_text: String::new(),
+            abilities: Vec::new(),
             surprised: false,
             hidden: false,
         });
@@ -615,6 +635,8 @@ mod tests {
             initiative: None, conditions: vec![false; STANDARD_CONDITIONS.len()],
             is_dead: false, dex_mod: 2,
             attacks: Vec::new(),
+            multiattack_text: String::new(),
+            abilities: Vec::new(),
             surprised: false,
             hidden: false,
         });
@@ -640,6 +662,8 @@ mod tests {
             initiative: None, conditions: vec![false; STANDARD_CONDITIONS.len()],
             is_dead: false, dex_mod: 2,
             attacks: Vec::new(),
+            multiattack_text: String::new(),
+            abilities: Vec::new(),
             surprised: false,
             hidden: false,
         });
@@ -667,6 +691,8 @@ mod tests {
             initiative: None, conditions: vec![false; STANDARD_CONDITIONS.len()],
             is_dead: true, dex_mod: 2,
             attacks: Vec::new(),
+            multiattack_text: String::new(),
+            abilities: Vec::new(),
             surprised: false,
             hidden: false,
         });
@@ -748,6 +774,8 @@ mod tests {
                 initiative: None, conditions: vec![false; STANDARD_CONDITIONS.len()],
                 is_dead: i == 2, dex_mod: 2,
                 attacks: Vec::new(),
+                multiattack_text: String::new(),
+                abilities: Vec::new(),
                 surprised: false,
                 hidden: false,
             });

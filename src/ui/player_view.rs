@@ -1,5 +1,6 @@
 use crate::model::*;
 use crate::presentation::PresentationState;
+use crate::presentation::combat_tracker::CombatantId;
 use crate::render::bg_cache::BackgroundRenderCache;
 use crate::render::recording::replay_commands;
 use crate::render::themed::RenderOptions;
@@ -165,6 +166,70 @@ pub fn player_viewport(
         // AoE markers (live overlay on player view, no center crosshairs)
         crate::presentation::aoe::render_aoe_markers(&painter, &transform, &dungeon.aoe_markers, false);
 
+        // Initiative tracker overlay (top-right + bottom-left upside-down)
+        if let Some(tracker) = &presentation.combat_tracker {
+            if !tracker.initiative_order.is_empty() {
+                let lines = build_initiative_display(tracker);
+                if !lines.is_empty() {
+                    let font = egui::FontId::proportional(14.0);
+                    let line_height = 20.0;
+                    let padding = 8.0;
+                    let box_height = lines.len() as f32 * line_height + padding * 2.0;
+                    let bg = egui::Color32::from_rgba_unmultiplied(0, 0, 0, 180);
+
+                    // Pre-layout galleys and measure max width
+                    let galleys: Vec<_> = lines.iter().map(|(text, bold)| {
+                        let color = if *bold {
+                            egui::Color32::WHITE
+                        } else {
+                            egui::Color32::from_rgb(180, 180, 180)
+                        };
+                        let galley = painter.layout_no_wrap(text.clone(), font.clone(), color);
+                        (galley, *bold)
+                    }).collect();
+                    let max_width = galleys.iter().map(|(g, _)| g.size().x).fold(0.0f32, f32::max);
+                    let box_width = max_width + padding * 2.0;
+
+                    // --- Top-right (normal) ---
+                    let tr_rect = egui::Rect::from_min_size(
+                        egui::pos2(rect.right() - box_width - 12.0, rect.top() + 12.0),
+                        egui::vec2(box_width, box_height),
+                    );
+                    painter.rect_filled(tr_rect, 6.0, bg);
+                    for (i, (galley, _)) in galleys.iter().enumerate() {
+                        let pos = egui::pos2(tr_rect.left() + padding, tr_rect.top() + padding + i as f32 * line_height);
+                        let shape = egui::epaint::TextShape::new(pos, galley.clone(), egui::Color32::PLACEHOLDER);
+                        painter.add(shape);
+                    }
+
+                    // --- Bottom-left (upside-down) ---
+                    let bl_rect = egui::Rect::from_min_size(
+                        egui::pos2(rect.left() + 12.0, rect.bottom() - box_height - 12.0),
+                        egui::vec2(box_width, box_height),
+                    );
+                    painter.rect_filled(bl_rect, 6.0, bg);
+                    for (i, (galley, _)) in galleys.iter().enumerate() {
+                        // When rotated PI around pos, pos becomes the bottom-right of the text.
+                        // Place pos so text fills the box from bottom-right to top-left.
+                        let galley_w = galley.size().x;
+                        let galley_h = galley.size().y;
+                        // Normal position would be (left+padding, top+padding + i*line_height)
+                        // Rotated 180° around pos: the text extends left and up from pos.
+                        // So pos = normal_pos + (galley_w, galley_h) to compensate.
+                        // Lines should be in reverse order (bottom to top when flipped).
+                        let rev_i = galleys.len() - 1 - i;
+                        let pos = egui::pos2(
+                            bl_rect.left() + padding + galley_w,
+                            bl_rect.top() + padding + rev_i as f32 * line_height + galley_h,
+                        );
+                        let mut shape = egui::epaint::TextShape::new(pos, galley.clone(), egui::Color32::PLACEHOLDER);
+                        shape.angle = std::f32::consts::PI;
+                        painter.add(shape);
+                    }
+                }
+            }
+        }
+
         // Live text overlay for visible room labels
         if !presentation.show_labels_player { return; }
         for rl in &layout.rooms {
@@ -188,4 +253,71 @@ pub fn player_viewport(
             }
         }
     });
+}
+
+/// Build the initiative display lines for the player view.
+/// Returns a list of (text, is_bold) pairs.
+///
+/// Rules:
+/// - If current is an NPC, show "Monsters" as current, then find the next player.
+/// - If current is a player and next is an NPC, show: Player (current), Monsters, then next player.
+/// - If current is a player and next is also a player, just show current then next.
+fn build_initiative_display(
+    tracker: &crate::presentation::combat_tracker::CombatTracker,
+) -> Vec<(String, bool)> {
+    let order = &tracker.initiative_order;
+    if order.is_empty() { return Vec::new(); }
+
+    let current = tracker.current_turn.min(order.len() - 1);
+
+    let name_of = |id: &CombatantId| -> Option<String> {
+        match id {
+            CombatantId::Player(pid) => tracker.players.get(pid).map(|p| p.name.clone()),
+            CombatantId::Monster(mid) => tracker.instances.get(mid).map(|m| m.label.clone()),
+        }
+    };
+    let is_player = |id: &CombatantId| -> bool {
+        matches!(id, CombatantId::Player(_))
+    };
+
+    // Find next player after a given index (wrapping)
+    let next_player_after = |start: usize| -> Option<String> {
+        for offset in 1..order.len() {
+            let idx = (start + offset) % order.len();
+            if is_player(&order[idx]) {
+                return name_of(&order[idx]);
+            }
+        }
+        None
+    };
+
+    let mut lines = Vec::new();
+
+    if is_player(&order[current]) {
+        // Current is a player
+        let current_name = name_of(&order[current]).unwrap_or_else(|| "?".into());
+        lines.push((format!("> {}", current_name), true));
+
+        // Check what's next
+        let next_idx = (current + 1) % order.len();
+        if is_player(&order[next_idx]) {
+            // Next is also a player
+            let next_name = name_of(&order[next_idx]).unwrap_or_else(|| "?".into());
+            lines.push((format!("  {}", next_name), false));
+        } else {
+            // Next is monster(s) — show "Monsters" then the next player
+            lines.push(("  Monsters".into(), false));
+            if let Some(next_pc) = next_player_after(next_idx) {
+                lines.push((format!("  {}", next_pc), false));
+            }
+        }
+    } else {
+        // Current is a monster
+        lines.push(("> Monsters".into(), true));
+        if let Some(next_pc) = next_player_after(current) {
+            lines.push((format!("  {}", next_pc), false));
+        }
+    }
+
+    lines
 }

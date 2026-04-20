@@ -19,4 +19,4 @@ pub use monster::*;
 pub use party::*;
 pub use spatial::*;
 pub use theme::*;
-pub use dungeon::*;
+pub use dungeon::{Dungeon, LightSource, SessionState};

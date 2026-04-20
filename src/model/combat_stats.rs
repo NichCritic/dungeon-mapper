@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use regex::Regex;
 
-use super::monster::{Monster, HitPoints};
+use super::monster::{Monster, HitPoints, strip_5e_markup};
 
 /// A parsed attack from a monster's action entries.
 #[derive(Clone, Debug)]
@@ -39,6 +39,23 @@ pub struct ParsedSave {
     pub source: String,
 }
 
+/// A non-attack action (save-based ability, utility, etc.).
+#[derive(Clone, Debug)]
+pub struct ParsedAbility {
+    pub name: String,
+    pub description: String,
+    /// Damage dice expression if present (e.g. "15d8").
+    pub damage_dice: String,
+    /// Average damage if present.
+    pub damage_avg: f32,
+    /// Damage type if present.
+    pub damage_type: String,
+    /// Save DC if present.
+    pub save_dc: Option<u8>,
+    /// Save ability if present.
+    pub save_ability: String,
+}
+
 /// Structured combat stats parsed from a Monster's text fields.
 #[derive(Clone, Debug)]
 pub struct CombatStats {
@@ -48,6 +65,10 @@ pub struct CombatStats {
     pub attacks: Vec<ParsedAttack>,
     pub saving_throws: Vec<ParsedSave>,
     pub multiattack_count: u8,
+    /// Multiattack description text (e.g. "makes two Rend attacks").
+    pub multiattack_text: String,
+    /// Non-attack actions (save-based abilities, utility actions, etc.).
+    pub abilities: Vec<ParsedAbility>,
     /// Estimated damage per round (best attack avg * multiattack count).
     pub estimated_dpr: f32,
 }
@@ -63,7 +84,9 @@ pub fn parse_combat_stats(monster: &Monster) -> CombatStats {
 
     let mut attacks = Vec::new();
     let mut saving_throws = Vec::new();
+    let mut abilities = Vec::new();
     let mut multiattack_count: u8 = 1;
+    let mut multiattack_text = String::new();
 
     for action in &monster.action {
         let text = action.entries_text();
@@ -71,12 +94,20 @@ pub fn parse_combat_stats(monster: &Monster) -> CombatStats {
         // Parse multiattack
         if action.name.to_lowercase().contains("multiattack") {
             multiattack_count = parse_multiattack_count(&text);
+            multiattack_text = summarize_multiattack(&strip_5e_markup(&text));
             continue;
         }
 
         // Parse attack actions
         if let Some(attack) = parse_attack(&action.name, &text) {
             attacks.push(attack);
+        } else {
+            // Non-attack action (save-based ability, utility, etc.)
+            let desc = strip_5e_markup(&text);
+            if !desc.is_empty() {
+                let ability = parse_ability(&action.name, &desc);
+                abilities.push(ability);
+            }
         }
 
         // Parse saving throw DCs
@@ -109,14 +140,18 @@ pub fn parse_combat_stats(monster: &Monster) -> CombatStats {
         attacks,
         saving_throws,
         multiattack_count,
+        multiattack_text,
+        abilities,
         estimated_dpr,
     }
 }
 
 /// Parse an attack action from stripped text.
 fn parse_attack(name: &str, text: &str) -> Option<ParsedAttack> {
-    // After strip_5e_markup: "+4 to hit, reach 5 ft., one target. 5 (1d6 + 2) slashing damage."
-    let hit_re = Regex::new(r"\+(\d+) to hit").unwrap();
+    // After strip_5e_markup:
+    //   Old (MM):  "+4 to hit, reach 5 ft., one target. 5 (1d6 + 2) slashing damage."
+    //   New (XMM): "+4, reach 5 ft. 5 (1d6 + 2) Slashing damage."
+    let hit_re = Regex::new(r"\+(\d+)(?:\s+to hit)?[,.]").unwrap();
     let hit_cap = hit_re.captures(text)?;
     let to_hit: i8 = hit_cap[1].parse().ok()?;
 
@@ -131,11 +166,16 @@ fn parse_attack(name: &str, text: &str) -> Option<ParsedAttack> {
     });
 
     // Primary damage: "19 (2d10 + 8) piercing damage"
+    // Some attacks (e.g. Web) have no damage — those get empty damage fields.
     let dmg_re = Regex::new(r"(\d+) \((\d+d\d+(?:\s*[+-]\s*\d+)?)\) (\w+) damage").unwrap();
-    let dmg_cap = dmg_re.captures(text)?;
-    let damage_avg: f32 = dmg_cap[1].parse().ok()?;
-    let damage_dice = dmg_cap[2].to_string();
-    let damage_type = dmg_cap[3].to_string();
+    let (damage_avg, damage_dice, damage_type) = if let Some(dmg_cap) = dmg_re.captures(text) {
+        let avg: f32 = dmg_cap[1].parse().unwrap_or(0.0);
+        let dice = dmg_cap[2].to_string();
+        let dtype = dmg_cap[3].to_lowercase();
+        (avg, dice, dtype)
+    } else {
+        (0.0, String::new(), String::new())
+    };
 
     // Extra damage riders: "plus 7 (2d6) fire damage"
     let extra_re = Regex::new(r"plus (\d+) \((\d+d\d+(?:\s*[+-]\s*\d+)?)\) (\w+) damage").unwrap();
@@ -150,18 +190,30 @@ fn parse_attack(name: &str, text: &str) -> Option<ParsedAttack> {
     // Determine attack type from presence of reach/range
     let attack_type = if range.is_some() { "rw" } else { "mw" }.to_string();
 
-    // Capture additional effect text after the last "damage" mention
+    // Capture additional effect text after the parsed damage expressions.
+    // Use the specific damage regex (with dice notation) so we don't accidentally
+    // match "damage" appearing in effect text like "if the poison damage reduces..."
+    // For no-damage attacks (e.g. Web), capture everything after the {@h} hit marker.
     let effect = {
-        // Find the end of the last damage clause
+        let dice_dmg_re = Regex::new(r"(?:plus )?\d+ \(\d+d\d+(?:\s*[+-]\s*\d+)?\) \w+ damage").unwrap();
         let mut last_damage_end = 0;
-        for m in Regex::new(r"\w+ damage").unwrap().find_iter(text) {
+        for m in dice_dmg_re.find_iter(text) {
             last_damage_end = m.end();
         }
         if last_damage_end > 0 && last_damage_end < text.len() {
             let remainder = text[last_damage_end..].trim();
-            // Strip leading punctuation
             let remainder = remainder.trim_start_matches(|c: char| c == '.' || c == ',' || c.is_whitespace());
             if remainder.is_empty() { String::new() } else { remainder.to_string() }
+        } else if damage_dice.is_empty() {
+            // No damage dice found — capture effect after "Hit: " or after the target clause
+            let hit_re = Regex::new(r"one (?:target|creature)\.?\s*").unwrap();
+            if let Some(m) = hit_re.find(text) {
+                let remainder = text[m.end()..].trim();
+                let remainder = remainder.trim_start_matches(|c: char| c == '.' || c == ',' || c.is_whitespace());
+                if remainder.is_empty() { String::new() } else { remainder.to_string() }
+            } else {
+                String::new()
+            }
         } else {
             String::new()
         }
@@ -219,6 +271,52 @@ fn parse_multiattack_count(text: &str) -> u8 {
     }
 
     2 // sensible default for multiattack
+}
+
+/// Parse a non-attack ability, extracting damage dice and save DC if present.
+fn parse_ability(name: &str, desc: &str) -> ParsedAbility {
+    let dmg_re = Regex::new(r"(\d+) \((\d+d\d+(?:\s*[+-]\s*\d+)?)\) (\w+) damage").unwrap();
+    let (damage_avg, damage_dice, damage_type) = if let Some(cap) = dmg_re.captures(desc) {
+        (cap[1].parse().unwrap_or(0.0), cap[2].to_string(), cap[3].to_lowercase())
+    } else {
+        (0.0, String::new(), String::new())
+    };
+
+    let dc_re = Regex::new(r"DC (\d+)").unwrap();
+    let save_dc = dc_re.captures(desc).and_then(|c| c[1].parse().ok());
+
+    // Try to find the save ability - look for "WIS save", "DEX save", or "DC 22 Dexterity"
+    let ability_re = Regex::new(r"(?i)(STR|DEX|CON|INT|WIS|CHA)\s+save|DC \d+\s+(Strength|Dexterity|Constitution|Intelligence|Wisdom|Charisma)").unwrap();
+    let save_ability = ability_re.captures(desc)
+        .map(|c| c.get(1).or(c.get(2)).map(|m| m.as_str().to_uppercase()).unwrap_or_default())
+        .unwrap_or_default();
+
+    ParsedAbility {
+        name: name.to_string(),
+        description: desc.to_string(),
+        damage_dice,
+        damage_avg,
+        damage_type,
+        save_dc,
+        save_ability,
+    }
+}
+
+/// Shorten multiattack text by stripping the subject ("The lion makes" -> "Makes").
+fn summarize_multiattack(text: &str) -> String {
+    // Strip leading "The <name> " to get the verb
+    let re = Regex::new(r"(?i)^the \w+ ").unwrap();
+    let shortened = re.replace(text, "");
+    // Capitalize first letter
+    let mut chars = shortened.chars();
+    match chars.next() {
+        Some(c) => {
+            let mut s = c.to_uppercase().to_string();
+            s.push_str(chars.as_str());
+            s
+        }
+        None => shortened.to_string(),
+    }
 }
 
 fn word_to_number(word: &str) -> Option<u8> {
@@ -404,6 +502,62 @@ mod tests {
         assert!(stats.attacks.is_empty());
         assert_eq!(stats.multiattack_count, 1);
         assert!((stats.estimated_dpr - 0.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_parse_no_damage_attack() {
+        // Web-style attack: has to-hit but no damage dice, just an effect
+        let action = Feature {
+            name: "Web".into(),
+            entries: vec![serde_json::Value::String(
+                "{@atk rw} {@hit 5} to hit, range 30/60 ft., one creature. {@h}The target is {@condition restrained} by webbing. As an action, the {@condition restrained} target can make a {@dc 12} Strength check, bursting the webbing on a success.".into()
+            )],
+        };
+        let monster = test_monster_with_actions(vec![action]);
+        let stats = parse_combat_stats(&monster);
+
+        assert_eq!(stats.attacks.len(), 1);
+        let atk = &stats.attacks[0];
+        assert_eq!(atk.name, "Web");
+        assert_eq!(atk.to_hit, 5);
+        assert_eq!(atk.range, Some((30, 60)));
+        assert!(atk.damage_dice.is_empty());
+        assert!((atk.damage_avg - 0.0).abs() < 0.01);
+        assert!(!atk.effect.is_empty(), "Should capture the restraining effect");
+        assert!(atk.effect.contains("restrained"), "Effect should mention restrained: {}", atk.effect);
+    }
+
+    #[test]
+    fn test_parse_xmm_attack() {
+        // XMM-style attack: {@atkr m} instead of {@atk mw}, no "to hit" text
+        let rend = Feature {
+            name: "Rend".into(),
+            entries: vec![serde_json::Value::String(
+                "{@atkr m} {@hit 15}, reach 15 ft. {@h}17 ({@damage 2d8 + 8}) Slashing damage plus 9 ({@damage 2d8}) Acid damage.".into()
+            )],
+        };
+        let acid = Feature {
+            name: "Acid Breath".into(),
+            entries: vec![serde_json::Value::String(
+                "{@actSave dex} {@dc 22}, each creature in a 90-foot-long Line. {@actSaveFail} 67 ({@damage 15d8}) Acid damage. {@actSaveSuccess} Half damage.".into()
+            )],
+        };
+        let multi = Feature {
+            name: "Multiattack".into(),
+            entries: vec![serde_json::Value::String(
+                "The dragon makes three Rend attacks.".into()
+            )],
+        };
+        let monster = test_monster_with_actions(vec![multi, rend, acid]);
+        let stats = parse_combat_stats(&monster);
+
+        assert_eq!(stats.multiattack_count, 3);
+        assert!(!stats.multiattack_text.is_empty(), "Should have multiattack text");
+        assert_eq!(stats.attacks.len(), 1, "Rend should parse as an attack");
+        assert_eq!(stats.attacks[0].name, "Rend");
+        assert_eq!(stats.attacks[0].to_hit, 15);
+        assert_eq!(stats.abilities.len(), 1, "Acid Breath should parse as an ability");
+        assert_eq!(stats.abilities[0].name, "Acid Breath");
     }
 
     #[test]

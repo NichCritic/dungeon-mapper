@@ -9,7 +9,7 @@ pub mod lighting;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::model::{Dungeon, DungeonGraph, EncounterType};
+use crate::model::{Dungeon, DungeonGraph, EncounterType, SessionState};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Visibility {
@@ -67,24 +67,66 @@ pub struct PresentationState {
 
 impl PresentationState {
     pub fn new_from_dungeon(dungeon: &Dungeon) -> Self {
+        let session = &dungeon.session;
+
+        // Restore room visibility from session, defaulting new rooms to Hidden
         let mut room_visibility = HashMap::new();
         for room in &dungeon.graph.rooms {
-            room_visibility.insert(room.id.clone(), Visibility::Hidden);
+            let vis = session.room_visibility.get(&room.id)
+                .map(|s| match s.as_str() {
+                    "visible" => Visibility::Visible,
+                    "explored" => Visibility::Explored,
+                    _ => Visibility::Hidden,
+                })
+                .unwrap_or(Visibility::Hidden);
+            room_visibility.insert(room.id.clone(), vis);
         }
+
+        // Restore encounter positions from session, defaulting to home room
         let mut encounter_positions = HashMap::new();
         for enc in &dungeon.encounters {
-            encounter_positions.insert(enc.id.clone(), enc.home_room_id.clone());
+            let room = session.encounter_positions.get(&enc.id)
+                .cloned()
+                .unwrap_or_else(|| enc.home_room_id.clone());
+            encounter_positions.insert(enc.id.clone(), room);
         }
+
         Self {
             room_visibility,
-            doors_open: HashSet::new(),
+            doors_open: session.doors_open.clone(),
             show_labels_player: false,
             encounter_positions,
             combat_tracker: None,
-            party_room: None,
-            defeated_encounters: HashSet::new(),
-            autobattle: false,
+            party_room: session.party_room.clone(),
+            defeated_encounters: session.defeated_encounters.clone(),
+            autobattle: session.autobattle,
             last_awareness_results: Vec::new(),
+        }
+    }
+
+    /// Snapshot current presentation state back into a SessionState for persistence.
+    pub fn snapshot_session(&self, dungeon: &Dungeon) -> SessionState {
+        let mut room_vis = HashMap::new();
+        for (id, vis) in &self.room_visibility {
+            let s = match vis {
+                Visibility::Hidden => "hidden",
+                Visibility::Explored => "explored",
+                Visibility::Visible => "visible",
+            };
+            room_vis.insert(id.clone(), s.to_string());
+        }
+
+        // Preserve existing encounter_hp from dungeon session (autobattle writes directly)
+        let encounter_hp = dungeon.session.encounter_hp.clone();
+
+        SessionState {
+            room_visibility: room_vis,
+            doors_open: self.doors_open.clone(),
+            encounter_positions: self.encounter_positions.clone(),
+            defeated_encounters: self.defeated_encounters.clone(),
+            encounter_hp,
+            party_room: self.party_room.clone(),
+            autobattle: self.autobattle,
         }
     }
 
@@ -278,6 +320,7 @@ mod tests {
             light_sources: Vec::new(),
             ambient_light: 0.0,
             aoe_markers: Vec::new(),
+            session: SessionState::default(),
         }
     }
 

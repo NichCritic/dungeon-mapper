@@ -12,18 +12,6 @@ pub enum AoEShape {
 }
 
 impl AoEShape {
-    pub const PRESETS: &[(&str, AoEShape)] = &[
-        ("Circle 10ft", AoEShape::Circle { radius: 2.0 }),
-        ("Circle 15ft", AoEShape::Circle { radius: 3.0 }),
-        ("Circle 20ft", AoEShape::Circle { radius: 4.0 }),
-        ("Circle 30ft", AoEShape::Circle { radius: 6.0 }),
-        ("Square 10ft", AoEShape::Square { size: 2.0 }),
-        ("Square 15ft", AoEShape::Square { size: 3.0 }),
-        ("Square 20ft", AoEShape::Square { size: 4.0 }),
-        ("Line 30ft", AoEShape::Line { length: 6.0, width: 1.0 }),
-        ("Line 60ft", AoEShape::Line { length: 12.0, width: 1.0 }),
-    ];
-
     pub fn label(&self) -> String {
         match self {
             AoEShape::Circle { radius } => format!("Circle {}ft", radius * 5.0),
