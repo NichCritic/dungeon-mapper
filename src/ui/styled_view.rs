@@ -79,7 +79,8 @@ fn render_input_hash(layout: &SpatialLayout, graph: &DungeonGraph, theme: &Theme
                 d.x.to_bits().hash(&mut h);
                 d.y.to_bits().hash(&mut h);
                 d.rotation.to_bits().hash(&mut h);
-                d.scale.to_bits().hash(&mut h);
+                d.scale_x.to_bits().hash(&mut h);
+                d.scale_y.to_bits().hash(&mut h);
                 std::mem::discriminant(&d.decor_type).hash(&mut h);
             }
         }

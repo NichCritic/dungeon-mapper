@@ -144,10 +144,13 @@ pub enum DecorType {
     OfferingMouth,
     Vines,
     Scales,
+    Crack,
+    Stream,
+    Pool,
 }
 
 impl DecorType {
-    pub const ALL: [DecorType; 28] = [
+    pub const ALL: [DecorType; 31] = [
         DecorType::Table, DecorType::Chair, DecorType::Bench,
         DecorType::Chest, DecorType::Barrel, DecorType::Crate,
         DecorType::Pillar, DecorType::StairsUp, DecorType::StairsDown,
@@ -157,6 +160,7 @@ impl DecorType {
         DecorType::Bookshelf, DecorType::Trap, DecorType::Rubble,
         DecorType::Bones, DecorType::Web, DecorType::Door, DecorType::Gate,
         DecorType::OfferingMouth, DecorType::Vines, DecorType::Scales,
+        DecorType::Crack, DecorType::Stream, DecorType::Pool,
     ];
 
     pub fn label(self) -> &'static str {
@@ -189,11 +193,14 @@ impl DecorType {
             DecorType::OfferingMouth => "Offering Mouth",
             DecorType::Vines => "Vines",
             DecorType::Scales => "Scales",
+            DecorType::Crack => "Crack",
+            DecorType::Stream => "Stream",
+            DecorType::Pool => "Pool",
         }
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct RoomDecor {
     pub id: String,
     pub decor_type: DecorType,
@@ -203,12 +210,43 @@ pub struct RoomDecor {
     /// Rotation in degrees
     #[serde(default)]
     pub rotation: f32,
-    /// Scale multiplier (1.0 = default size)
-    #[serde(default = "default_decor_scale")]
-    pub scale: f32,
+    /// Horizontal scale multiplier (1.0 = default size)
+    pub scale_x: f32,
+    /// Vertical scale multiplier (1.0 = default size)
+    pub scale_y: f32,
 }
 
-fn default_decor_scale() -> f32 { 1.0 }
+/// Raw shape for backward-compatible deserialization (handles legacy `scale` field).
+#[derive(Deserialize)]
+struct RoomDecorRaw {
+    id: String,
+    decor_type: DecorType,
+    x: f32,
+    y: f32,
+    #[serde(default)]
+    rotation: f32,
+    #[serde(default = "default_one")]
+    scale: f32,
+    scale_x: Option<f32>,
+    scale_y: Option<f32>,
+}
+
+fn default_one() -> f32 { 1.0 }
+
+impl<'de> Deserialize<'de> for RoomDecor {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = RoomDecorRaw::deserialize(deserializer)?;
+        Ok(Self {
+            id: raw.id,
+            decor_type: raw.decor_type,
+            x: raw.x,
+            y: raw.y,
+            rotation: raw.rotation,
+            scale_x: raw.scale_x.unwrap_or(raw.scale),
+            scale_y: raw.scale_y.unwrap_or(raw.scale),
+        })
+    }
+}
 
 impl RoomDecor {
     pub fn new(decor_type: DecorType, x: f32, y: f32) -> Self {
@@ -218,7 +256,8 @@ impl RoomDecor {
             x,
             y,
             rotation: 0.0,
-            scale: 1.0,
+            scale_x: 1.0,
+            scale_y: 1.0,
         }
     }
 }
@@ -239,6 +278,9 @@ pub struct ElevationSection {
     /// Height of the elevation change in feet (e.g. 5ft raised platform, 10ft pit).
     #[serde(default = "default_section_height")]
     pub height: f32,
+    /// When true, the section fill is fully opaque (hides floor beneath).
+    #[serde(default)]
+    pub opaque: bool,
 }
 
 fn default_section_height() -> f32 { 5.0 }
@@ -250,6 +292,7 @@ impl ElevationSection {
             x, y, width, length,
             elevation,
             height: 5.0,
+            opaque: false,
         }
     }
 }

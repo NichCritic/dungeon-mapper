@@ -1273,21 +1273,32 @@ fn combat_tracker_ui(
                         let is_current = current_turn_id.as_ref() == Some(&combatant_id);
 
                         ui.push_id(format!("pc_{}", pid), |ui| {
-                            let frame_color = if is_current {
-                                egui::Color32::from_rgba_unmultiplied(100, 200, 255, 30)
+                            let (frame_color, stroke_color) = if is_current {
+                                (egui::Color32::from_rgba_unmultiplied(100, 200, 255, 30),
+                                 egui::Color32::from_rgb(100, 200, 255))
                             } else {
-                                egui::Color32::TRANSPARENT
+                                (egui::Color32::TRANSPARENT,
+                                 egui::Color32::from_rgb(60, 60, 65))
                             };
 
-                            egui::Frame::NONE.fill(frame_color).show(ui, |ui| {
+                            egui::Frame::NONE
+                                .fill(frame_color)
+                                .stroke(egui::Stroke::new(1.0, stroke_color))
+                                .inner_margin(4.0)
+                                .corner_radius(2.0)
+                                .show(ui, |ui| {
+                                // Name + AC + HP + initiative
                                 ui.horizontal(|ui| {
                                     ui.label(egui::RichText::new(&pc.name).strong());
                                     ui.label(format!("AC {}", pc.ac));
-                                    ui.label("Init:");
-                                    let mut init_val = pc.initiative.unwrap_or(0);
-                                    if crate::ui::canvas_common::num_input_i32(ui, &mut init_val, 35.0) {
-                                        pc.initiative = Some(init_val);
-                                    }
+                                    ui.label(format!("{}/{}", pc.current_hp, pc.max_hp));
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        let mut init_val = pc.initiative.unwrap_or(0);
+                                        if crate::ui::canvas_common::num_input_i32(ui, &mut init_val, 35.0) {
+                                            pc.initiative = Some(init_val);
+                                        }
+                                        ui.label("Init:");
+                                    });
                                 });
 
                                 // HP bar
@@ -1303,57 +1314,59 @@ fn combat_tracker_ui(
                                 } else {
                                     egui::Color32::from_rgb(220, 60, 60)
                                 };
-                                ui.label(format!("{}/{} HP", pc.current_hp, pc.max_hp));
                                 let bar = egui::ProgressBar::new(hp_frac)
                                     .fill(bar_color)
                                     .desired_width(ui.available_width());
                                 ui.add(bar);
 
-                                // Damage/Heal
-                                let dmg_id = egui::Id::new(format!("dmg_pc_{}", pid));
-                                let mut dmg_val: i32 = ui.ctx().memory(|m| m.data.get_temp(dmg_id).unwrap_or(0));
+                                // Damage/Heal + conditions on same row
                                 ui.horizontal(|ui| {
-                                    ui.label("HP:"); crate::ui::canvas_common::num_input_i32(ui, &mut dmg_val, 40.0);
+                                    let dmg_id = egui::Id::new(format!("dmg_pc_{}", pid));
+                                    let mut dmg_val: i32 = ui.ctx().memory(|m| m.data.get_temp(dmg_id).unwrap_or(0));
+                                    crate::ui::canvas_common::num_input_i32(ui, &mut dmg_val, 40.0);
                                     if ui.small_button("Dmg").clicked() && dmg_val > 0 {
                                         damage_actions.push((combatant_id.clone(), dmg_val));
                                     }
                                     if ui.small_button("Heal").clicked() && dmg_val > 0 {
                                         heal_actions.push((combatant_id.clone(), dmg_val));
                                     }
-                                });
-                                ui.ctx().memory_mut(|m| m.data.insert_temp(dmg_id, dmg_val));
+                                    ui.ctx().memory_mut(|m| m.data.insert_temp(dmg_id, dmg_val));
 
-                                // Conditions
-                                ui.horizontal_wrapped(|ui| {
+                                    ui.separator();
+
+                                    // Show active conditions inline
                                     for (c_idx, &cond_name) in STANDARD_CONDITIONS.iter().enumerate() {
-                                        let active = pc.conditions.get(c_idx).copied().unwrap_or(false);
-                                        let abbrev = &cond_name[..3.min(cond_name.len())];
-                                        let color = if active {
-                                            egui::Color32::from_rgb(255, 160, 40)
-                                        } else {
-                                            egui::Color32::from_rgb(120, 120, 120)
-                                        };
-                                        if ui.add(egui::Button::new(
-                                            egui::RichText::new(abbrev).size(9.0).color(color)
-                                        ).min_size(egui::vec2(0.0, 16.0))).on_hover_text(cond_name).clicked() {
-                                            condition_toggles.push((combatant_id.clone(), c_idx));
+                                        if pc.conditions.get(c_idx).copied().unwrap_or(false) {
+                                            ui.colored_label(egui::Color32::from_rgb(255, 160, 40), &cond_name[..3.min(cond_name.len())]);
                                         }
                                     }
-                                    // Hidden toggle
-                                    let hid_color = if pc.hidden {
-                                        egui::Color32::from_rgb(100, 200, 255)
-                                    } else {
-                                        egui::Color32::from_rgb(120, 120, 120)
-                                    };
-                                    if ui.add(egui::Button::new(
-                                        egui::RichText::new("Hid").size(9.0).color(hid_color)
-                                    ).min_size(egui::vec2(0.0, 16.0))).on_hover_text("Hidden").clicked() {
-                                        hidden_toggles.push(combatant_id.clone());
+                                    if pc.hidden {
+                                        ui.colored_label(egui::Color32::from_rgb(100, 200, 255), "Hid");
                                     }
+
+                                    // Popup for toggling conditions
+                                    let popup_id = ui.make_persistent_id(format!("cond_popup_pc_{}", pid));
+                                    let cond_btn = ui.small_button("Cond");
+                                    if cond_btn.clicked() {
+                                        ui.memory_mut(|mem| mem.toggle_popup(popup_id));
+                                    }
+                                    egui::popup_below_widget(ui, popup_id, &cond_btn, egui::PopupCloseBehavior::CloseOnClickOutside, |ui| {
+                                        ui.set_min_width(120.0);
+                                        for (c_idx, &cond_name) in STANDARD_CONDITIONS.iter().enumerate() {
+                                            let active = pc.conditions.get(c_idx).copied().unwrap_or(false);
+                                            if ui.selectable_label(active, cond_name).clicked() {
+                                                condition_toggles.push((combatant_id.clone(), c_idx));
+                                            }
+                                        }
+                                        ui.separator();
+                                        if ui.selectable_label(pc.hidden, "Hidden").clicked() {
+                                            hidden_toggles.push(combatant_id.clone());
+                                        }
+                                    });
                                 });
                             });
                         });
-                        ui.add_space(2.0);
+                        ui.add_space(4.0);
                     }
                 });
         }
@@ -1391,28 +1404,52 @@ fn combat_tracker_ui(
                         let is_current = current_turn_id.as_ref() == Some(&combatant_id);
 
                         ui.push_id(format!("inst_{}_{}_{}", inst_id.encounter_id, inst_id.monster_index, inst_id.instance), |ui| {
-                            let frame_color = if is_current {
-                                egui::Color32::from_rgba_unmultiplied(100, 255, 100, 30)
+                            let (frame_color, stroke_color) = if is_current {
+                                (egui::Color32::from_rgba_unmultiplied(30, 80, 30, 30),
+                                 egui::Color32::from_rgb(30, 80, 30))
                             } else if inst.is_dead {
-                                egui::Color32::from_rgba_unmultiplied(100, 100, 100, 20)
+                                (egui::Color32::from_rgba_unmultiplied(100, 100, 100, 20),
+                                 egui::Color32::from_rgb(80, 80, 80))
                             } else {
-                                egui::Color32::TRANSPARENT
+                                (egui::Color32::TRANSPARENT,
+                                 egui::Color32::from_rgb(60, 60, 65))
                             };
 
-                            egui::Frame::NONE.fill(frame_color).show(ui, |ui| {
-                                // Name + AC + initiative
+                            egui::Frame::NONE
+                                .fill(frame_color)
+                                .stroke(egui::Stroke::new(1.0, stroke_color))
+                                .inner_margin(4.0)
+                                .corner_radius(2.0)
+                                .show(ui, |ui| {
+                                // Name + AC + HP + initiative
                                 ui.horizontal(|ui| {
-                                    if inst.is_dead {
-                                        ui.colored_label(egui::Color32::from_rgb(150, 150, 150), &inst.label);
+                                    let name_label = if inst.is_dead {
+                                        egui::RichText::new(&inst.label).color(egui::Color32::from_rgb(150, 150, 150))
                                     } else {
-                                        ui.label(&inst.label);
+                                        egui::RichText::new(&inst.label).strong()
+                                    };
+                                    if ui.add(egui::Label::new(name_label).sense(egui::Sense::CLICK))
+                                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                        .clicked()
+                                    {
+                                        ui.ctx().memory_mut(|mem| {
+                                            mem.data.insert_temp(egui::Id::new("combat_statblock_mid"), inst_id.clone());
+                                        });
                                     }
                                     ui.label(format!("AC {}", inst.ac));
-                                    ui.label("Init:");
-                                    let mut init_val = inst.initiative.unwrap_or(0);
-                                    if crate::ui::canvas_common::num_input_i32(ui, &mut init_val, 35.0) {
-                                        inst.initiative = Some(init_val);
-                                    }
+                                    let hp_text = if inst.temp_hp > 0 {
+                                        format!("{}/{} (+{})", inst.current_hp, inst.max_hp, inst.temp_hp)
+                                    } else {
+                                        format!("{}/{}", inst.current_hp, inst.max_hp)
+                                    };
+                                    ui.label(&hp_text);
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        let mut init_val = inst.initiative.unwrap_or(0);
+                                        if crate::ui::canvas_common::num_input_i32(ui, &mut init_val, 35.0) {
+                                            inst.initiative = Some(init_val);
+                                        }
+                                        ui.label("Init:");
+                                    });
                                 });
 
                                 // HP bar
@@ -1429,101 +1466,60 @@ fn combat_tracker_ui(
                                     egui::Color32::from_rgb(220, 60, 60)
                                 };
 
-                                ui.horizontal(|ui| {
-                                    let hp_text = format!("{}/{}", inst.current_hp, inst.max_hp);
-                                    if inst.temp_hp > 0 {
-                                        ui.label(format!("{} (+{} temp)", hp_text, inst.temp_hp));
-                                    } else {
-                                        ui.label(&hp_text);
-                                    }
-                                });
-
                                 let bar = egui::ProgressBar::new(hp_frac)
                                     .fill(bar_color)
                                     .desired_width(ui.available_width());
                                 ui.add(bar);
 
-                                // Damage/Heal controls
-                                let dmg_id = egui::Id::new(format!("dmg_{}_{}_{}", inst_id.encounter_id, inst_id.monster_index, inst_id.instance));
-                                let mut dmg_val: i32 = ui.ctx().memory(|m| m.data.get_temp(dmg_id).unwrap_or(0));
-
+                                // Damage/Heal controls + conditions on same row
                                 ui.horizontal(|ui| {
-                                    ui.label("HP:"); crate::ui::canvas_common::num_input_i32(ui, &mut dmg_val, 40.0);
+                                    let dmg_id = egui::Id::new(format!("dmg_{}_{}_{}", inst_id.encounter_id, inst_id.monster_index, inst_id.instance));
+                                    let mut dmg_val: i32 = ui.ctx().memory(|m| m.data.get_temp(dmg_id).unwrap_or(0));
+                                    crate::ui::canvas_common::num_input_i32(ui, &mut dmg_val, 40.0);
                                     if ui.small_button("Dmg").clicked() && dmg_val > 0 {
                                         damage_actions.push((combatant_id.clone(), dmg_val));
                                     }
                                     if ui.small_button("Heal").clicked() && dmg_val > 0 {
                                         heal_actions.push((combatant_id.clone(), dmg_val));
                                     }
-                                });
-                                ui.ctx().memory_mut(|m| m.data.insert_temp(dmg_id, dmg_val));
+                                    ui.ctx().memory_mut(|m| m.data.insert_temp(dmg_id, dmg_val));
 
-                                // Conditions (compact toggles)
-                                ui.horizontal_wrapped(|ui| {
+                                    ui.separator();
+
+                                    // Show active conditions inline
                                     for (c_idx, &cond_name) in STANDARD_CONDITIONS.iter().enumerate() {
-                                        let active = inst.conditions.get(c_idx).copied().unwrap_or(false);
-                                        let abbrev = &cond_name[..3.min(cond_name.len())];
-                                        let color = if active {
-                                            egui::Color32::from_rgb(255, 160, 40)
-                                        } else {
-                                            egui::Color32::from_rgb(120, 120, 120)
-                                        };
-                                        if ui.add(egui::Button::new(
-                                            egui::RichText::new(abbrev).size(9.0).color(color)
-                                        ).min_size(egui::vec2(0.0, 16.0))).on_hover_text(cond_name).clicked() {
-                                            condition_toggles.push((combatant_id.clone(), c_idx));
+                                        if inst.conditions.get(c_idx).copied().unwrap_or(false) {
+                                            ui.colored_label(egui::Color32::from_rgb(255, 160, 40), &cond_name[..3.min(cond_name.len())]);
                                         }
                                     }
-                                    // Hidden toggle
-                                    let hid_color = if inst.hidden {
-                                        egui::Color32::from_rgb(100, 200, 255)
-                                    } else {
-                                        egui::Color32::from_rgb(120, 120, 120)
-                                    };
-                                    if ui.add(egui::Button::new(
-                                        egui::RichText::new("Hid").size(9.0).color(hid_color)
-                                    ).min_size(egui::vec2(0.0, 16.0))).on_hover_text("Hidden").clicked() {
-                                        hidden_toggles.push(combatant_id.clone());
+                                    if inst.hidden {
+                                        ui.colored_label(egui::Color32::from_rgb(100, 200, 255), "Hid");
                                     }
-                                });
 
-                                // Actions (attacks + save-based abilities)
-                                if !inst.attacks.is_empty() || !inst.abilities.is_empty() {
-                                    let attacks_snapshot: Vec<_> = inst.attacks.clone();
-                                    let attacker_name = inst.label.clone();
-                                    let attacker_hidden = inst.hidden;
-                                    let attacker_cid = combatant_id.clone();
-                                    let targets: Vec<_> = all_targets.iter()
-                                        .filter(|(cid, _, _, _)| *cid != attacker_cid)
-                                        .cloned().collect();
-                                    let id_salt = format!("attacks_{}_{}_{}", inst_id.encounter_id, inst_id.monster_index, inst_id.instance);
-                                    let label = if !inst.multiattack_text.is_empty() {
-                                        format!("Actions ({}x):", parse_multiattack_header_count(&inst.multiattack_text))
-                                    } else {
-                                        "Actions:".to_string()
-                                    };
-                                    let label_resp = ui.label(&label);
-                                    if !inst.multiattack_text.is_empty() {
-                                        label_resp.on_hover_text(&inst.multiattack_text);
+                                    // Popup for toggling conditions
+                                    let popup_id = ui.make_persistent_id(format!("cond_popup_{}_{}_{}", inst_id.encounter_id, inst_id.monster_index, inst_id.instance));
+                                    let cond_btn = ui.small_button("Cond");
+                                    if cond_btn.clicked() {
+                                        ui.memory_mut(|mem| mem.toggle_popup(popup_id));
                                     }
-                                    if !inst.attacks.is_empty() {
-                                        attack_target_ui(ui, &attacks_snapshot, &attacker_name, attacker_hidden, &attacker_cid, &targets, &id_salt, &mut attack_actions);
-                                    }
-                                    for ability in &inst.abilities {
-                                        let btn_label = if ability.save_dc.is_some() {
-                                            format!("{} (DC {})", ability.name, ability.save_dc.unwrap())
-                                        } else {
-                                            ability.name.clone()
-                                        };
-                                        if ui.small_button(&btn_label).on_hover_text(&ability.description).clicked() {
-                                            ability_actions.push((inst.label.clone(), ability.clone()));
+                                    egui::popup_below_widget(ui, popup_id, &cond_btn, egui::PopupCloseBehavior::CloseOnClickOutside, |ui| {
+                                        ui.set_min_width(120.0);
+                                        for (c_idx, &cond_name) in STANDARD_CONDITIONS.iter().enumerate() {
+                                            let active = inst.conditions.get(c_idx).copied().unwrap_or(false);
+                                            if ui.selectable_label(active, cond_name).clicked() {
+                                                condition_toggles.push((combatant_id.clone(), c_idx));
+                                            }
                                         }
-                                    }
-                                }
+                                        ui.separator();
+                                        if ui.selectable_label(inst.hidden, "Hidden").clicked() {
+                                            hidden_toggles.push(combatant_id.clone());
+                                        }
+                                    });
+                                });
                             });
                         });
 
-                        ui.add_space(2.0);
+                        ui.add_space(4.0);
                     }
                 });
         }

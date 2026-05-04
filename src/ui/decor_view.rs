@@ -197,10 +197,10 @@ pub fn decor_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut DecorVie
                 let wx = room_px_x + decor.x * GRID_PX;
                 let wy = room_px_y + decor.y * GRID_PX;
                 let screen_center = transform.world_to_screen(egui::pos2(wx, wy));
-                let s = GRID_PX * 0.4 * decor.scale * transform.zoom;
+                let s = GRID_PX * 0.4 * transform.zoom;
                 let deg = decor.rotation;
 
-                draw_decor_symbol(&painter, screen_center, s, deg, decor.decor_type, decor_color);
+                draw_decor_symbol(&painter, screen_center, s, decor.scale_x, decor.scale_y, deg, decor.decor_type, decor_color);
             }
         }
     }
@@ -294,6 +294,7 @@ pub fn decor_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut DecorVie
     }
 
     // Click handling
+    let ctrl_held = ui.ctx().input(|i| i.modifiers.command);
     if response.clicked() {
         if let Some(pos) = response.interact_pointer_pos() {
             let world = transform.screen_to_world(pos);
@@ -302,30 +303,58 @@ pub fn decor_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut DecorVie
 
             // First, check if we clicked on an existing decor item in the selected room
             let mut clicked_decor = None;
-            if let Some(ref sel_id) = state.selected_room {
-                if let Some(rl) = render_layout.room_by_id(sel_id) {
-                    if let Some(room) = dungeon.graph.room_by_id(sel_id) {
-                        let room_px_x = rl.x as f32 * GRID_PX;
-                        let room_px_y = rl.y as f32 * GRID_PX;
-                        let hit_radius = GRID_PX * 0.5;
-                        for (di, decor) in room.decor.iter().enumerate() {
-                            let dx = world.x - (room_px_x + decor.x * GRID_PX);
-                            let dy = world.y - (room_px_y + decor.y * GRID_PX);
-                            if (dx * dx + dy * dy).sqrt() < hit_radius {
-                                clicked_decor = Some(di);
-                                break;
+            if !ctrl_held {
+                if let Some(ref sel_id) = state.selected_room {
+                    if let Some(rl) = render_layout.room_by_id(sel_id) {
+                        if let Some(room) = dungeon.graph.room_by_id(sel_id) {
+                            let room_px_x = rl.x as f32 * GRID_PX;
+                            let room_px_y = rl.y as f32 * GRID_PX;
+                            let hit_radius = GRID_PX * 0.5;
+                            for (di, decor) in room.decor.iter().enumerate() {
+                                let dx = world.x - (room_px_x + decor.x * GRID_PX);
+                                let dy = world.y - (room_px_y + decor.y * GRID_PX);
+                                if (dx * dx + dy * dy).sqrt() < hit_radius {
+                                    clicked_decor = Some(di);
+                                    break;
+                                }
                             }
                         }
                     }
                 }
             }
 
-            if let Some(di) = clicked_decor {
+            if ctrl_held && state.selected_room.is_some() && state.selected_decor.is_some() {
+                // Ctrl+click: clone selected decor at click position
+                let sel_id = state.selected_room.clone().unwrap();
+                let di = state.selected_decor.unwrap();
+                if let Some(rl) = render_layout.room_by_id(&sel_id) {
+                    let room_px_x = rl.x as f32 * GRID_PX;
+                    let room_px_y = rl.y as f32 * GRID_PX;
+                    let new_x = ((world.x - room_px_x) / GRID_PX).clamp(0.0, rl.width as f32);
+                    let new_y = ((world.y - room_px_y) / GRID_PX).clamp(0.0, rl.height as f32);
+                    if let Some(room) = dungeon.graph.room_by_id_mut(&sel_id) {
+                        if di < room.decor.len() {
+                            let mut cloned = room.decor[di].clone();
+                            cloned.id = uuid::Uuid::new_v4().to_string();
+                            cloned.x = new_x;
+                            cloned.y = new_y;
+                            room.decor.push(cloned);
+                            state.selected_decor = Some(room.decor.len() - 1);
+                        }
+                    }
+                }
+            } else if let Some(di) = clicked_decor {
                 state.selected_decor = Some(di);
             } else if state.place_mode {
-                // Place new decor if clicking inside a room
-                if let Some(ref sel_id) = state.selected_room.clone() {
-                    if let Some(rl) = render_layout.room_by_id(sel_id) {
+                // Place new decor — auto-select room under cursor if needed
+                let target_room = state.selected_room.clone().or_else(|| {
+                    render_layout.rooms.iter().find(|rl| {
+                        gx >= rl.x && gx < rl.x + rl.width as i32
+                            && gy >= rl.y && gy < rl.y + rl.height as i32
+                    }).map(|rl| rl.room_id.clone())
+                });
+                if let Some(sel_id) = target_room {
+                    if let Some(rl) = render_layout.room_by_id(&sel_id) {
                         let room_px_x = rl.x as f32 * GRID_PX;
                         let room_px_y = rl.y as f32 * GRID_PX;
                         let room_w = rl.width as f32 * GRID_PX;
@@ -336,10 +365,11 @@ pub fn decor_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut DecorVie
                             let dx = (world.x - room_px_x) / GRID_PX;
                             let dy = (world.y - room_px_y) / GRID_PX;
                             let new_decor = RoomDecor::new(state.place_type, dx, dy);
-                            if let Some(room) = dungeon.graph.room_by_id_mut(sel_id) {
+                            if let Some(room) = dungeon.graph.room_by_id_mut(&sel_id) {
                                 room.decor.push(new_decor);
                                 state.selected_decor = Some(room.decor.len() - 1);
                             }
+                            state.selected_room = Some(sel_id);
                         }
                     }
                 }
@@ -360,8 +390,8 @@ pub fn decor_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut DecorVie
         }
     }
 
-    // Delete selected decor with Delete or Backspace key
-    if state.selected_room.is_some() && (!state.selected_decor_set.is_empty() || state.selected_decor.is_some()) {
+    // Delete selected decor with Delete or Backspace key (not while editing text)
+    if state.selected_room.is_some() && (!state.selected_decor_set.is_empty() || state.selected_decor.is_some()) && !ui.ctx().wants_keyboard_input() {
         let delete_pressed = ui.ctx().input(|i| {
             i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)
         });
@@ -483,6 +513,24 @@ pub fn decor_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut DecorVie
             );
         }
     }
+
+    // Ctrl+hover ghost preview for clone
+    if ctrl_held && !state.place_mode && state.selected_room.is_some() && state.selected_decor.is_some() && response.hovered() {
+        if let Some(pos) = response.hover_pos() {
+            let sel_id = state.selected_room.as_ref().unwrap();
+            let di = state.selected_decor.unwrap();
+            if let Some(room) = dungeon.graph.room_by_id(sel_id) {
+                if di < room.decor.len() {
+                    let decor = &room.decor[di];
+                    let s = GRID_PX * 0.4 * transform.zoom;
+                    let ghost_color = egui::Color32::from_rgba_unmultiplied(
+                        decor_color.r(), decor_color.g(), decor_color.b(), 100,
+                    );
+                    draw_decor_symbol(&painter, pos, s, decor.scale_x, decor.scale_y, decor.rotation, decor.decor_type, ghost_color);
+                }
+            }
+        }
+    }
 }
 
 pub fn decor_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut DecorViewState) {
@@ -565,6 +613,8 @@ pub fn decor_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Decor
                             ui.painter(),
                             icon_rect.center(),
                             10.0,
+                            1.0,
+                            1.0,
                             0.0,
                             dt,
                             preview_color,
@@ -706,7 +756,12 @@ pub fn decor_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Decor
                         crate::ui::canvas_common::num_input_f32(ui, &mut decor.y, 35.0);
                     });
                     ui.add(egui::Slider::new(&mut decor.rotation, 0.0..=360.0).text("Rotation"));
-                    ui.add(egui::Slider::new(&mut decor.scale, 0.2..=3.0).text("Size"));
+                    ui.horizontal(|ui| {
+                        ui.label("W");
+                        ui.add(egui::DragValue::new(&mut decor.scale_x).speed(0.05).range(0.01..=f32::MAX));
+                        ui.label("H");
+                        ui.add(egui::DragValue::new(&mut decor.scale_y).speed(0.05).range(0.01..=f32::MAX));
+                    });
                 }
             }
         }
@@ -871,21 +926,21 @@ fn decor_type_combo(ui: &mut egui::Ui, id: &str, value: &mut DecorType, search: 
 }
 
 /// Rotate a screen-space point around a center by deg degrees.
-fn rot_screen(px: f32, py: f32, cx: f32, cy: f32, deg: f32) -> egui::Pos2 {
+fn rot_screen(px: f32, py: f32, cx: f32, cy: f32, deg: f32, sclx: f32, scly: f32) -> egui::Pos2 {
     let rad = deg.to_radians();
     let cos = rad.cos();
     let sin = rad.sin();
-    let dx = px - cx;
-    let dy = py - cy;
+    let dx = (px - cx) * sclx;
+    let dy = (py - cy) * scly;
     egui::pos2(cx + dx * cos - dy * sin, cy + dx * sin + dy * cos)
 }
 
 fn rot_line_screen(
     painter: &egui::Painter, x1: f32, y1: f32, x2: f32, y2: f32,
-    cx: f32, cy: f32, deg: f32, stroke: egui::Stroke,
+    cx: f32, cy: f32, deg: f32, sclx: f32, scly: f32, stroke: egui::Stroke,
 ) {
-    let a = rot_screen(x1, y1, cx, cy, deg);
-    let b = rot_screen(x2, y2, cx, cy, deg);
+    let a = rot_screen(x1, y1, cx, cy, deg, sclx, scly);
+    let b = rot_screen(x2, y2, cx, cy, deg, sclx, scly);
     painter.line_segment([a, b], stroke);
 }
 
@@ -893,13 +948,16 @@ fn rot_line_screen(
 fn draw_decor_symbol(
     painter: &egui::Painter,
     center: egui::Pos2,
-    s: f32, // half-size in screen pixels
+    s: f32, // base half-size in screen pixels (without per-decor scale)
+    sclx: f32, // horizontal scale factor
+    scly: f32, // vertical scale factor
     deg: f32,
     decor_type: DecorType,
     color: egui::Color32,
 ) {
     let cx = center.x;
     let cy = center.y;
+    let savg = (sclx + scly) / 2.0;
     let stroke = egui::Stroke::new(1.5, color);
     let thin = egui::Stroke::new(0.8, color);
     match decor_type {
@@ -907,48 +965,48 @@ fn draw_decor_symbol(
             let hw = s;
             let hh = s * 0.6;
             // Tabletop
-            rot_line_screen(painter, cx - hw, cy - hh, cx + hw, cy - hh, cx, cy, deg, stroke);
-            rot_line_screen(painter, cx + hw, cy - hh, cx + hw, cy + hh, cx, cy, deg, stroke);
-            rot_line_screen(painter, cx + hw, cy + hh, cx - hw, cy + hh, cx, cy, deg, stroke);
-            rot_line_screen(painter, cx - hw, cy + hh, cx - hw, cy - hh, cx, cy, deg, stroke);
+            rot_line_screen(painter, cx - hw, cy - hh, cx + hw, cy - hh, cx, cy, deg, sclx, scly, stroke);
+            rot_line_screen(painter, cx + hw, cy - hh, cx + hw, cy + hh, cx, cy, deg, sclx, scly, stroke);
+            rot_line_screen(painter, cx + hw, cy + hh, cx - hw, cy + hh, cx, cy, deg, sclx, scly, stroke);
+            rot_line_screen(painter, cx - hw, cy + hh, cx - hw, cy - hh, cx, cy, deg, sclx, scly, stroke);
             // Legs
             let lr = s * 0.08;
             for &(lx, ly) in &[(-hw + lr * 2.0, -hh + lr * 2.0), (hw - lr * 2.0, -hh + lr * 2.0),
                                  (-hw + lr * 2.0, hh - lr * 2.0), (hw - lr * 2.0, hh - lr * 2.0)] {
-                let p = rot_screen(cx + lx, cy + ly, cx, cy, deg);
-                painter.circle_filled(p, lr, color);
+                let p = rot_screen(cx + lx, cy + ly, cx, cy, deg, sclx, scly);
+                painter.circle_filled(p, lr * savg, color);
             }
         }
         DecorType::Chest => {
             let cs = s * 0.6;
-            rot_line_screen(painter, cx - cs, cy - cs, cx + cs, cy - cs, cx, cy, deg, stroke);
-            rot_line_screen(painter, cx + cs, cy - cs, cx + cs, cy + cs, cx, cy, deg, stroke);
-            rot_line_screen(painter, cx + cs, cy + cs, cx - cs, cy + cs, cx, cy, deg, stroke);
-            rot_line_screen(painter, cx - cs, cy + cs, cx - cs, cy - cs, cx, cy, deg, stroke);
+            rot_line_screen(painter, cx - cs, cy - cs, cx + cs, cy - cs, cx, cy, deg, sclx, scly, stroke);
+            rot_line_screen(painter, cx + cs, cy - cs, cx + cs, cy + cs, cx, cy, deg, sclx, scly, stroke);
+            rot_line_screen(painter, cx + cs, cy + cs, cx - cs, cy + cs, cx, cy, deg, sclx, scly, stroke);
+            rot_line_screen(painter, cx - cs, cy + cs, cx - cs, cy - cs, cx, cy, deg, sclx, scly, stroke);
             // Lid line
-            rot_line_screen(painter, cx - cs, cy - cs * 0.2, cx + cs, cy - cs * 0.2, cx, cy, deg, thin);
+            rot_line_screen(painter, cx - cs, cy - cs * 0.2, cx + cs, cy - cs * 0.2, cx, cy, deg, sclx, scly, thin);
             // Clasp
-            let clasp = rot_screen(cx, cy + cs, cx, cy, deg);
-            painter.circle_filled(clasp, s * 0.08, color);
+            let clasp = rot_screen(cx, cy + cs, cx, cy, deg, sclx, scly);
+            painter.circle_filled(clasp, s * 0.08 * savg, color);
         }
         DecorType::Pillar => {
-            painter.circle_filled(center, s * 0.5, color);
+            painter.circle_filled(center, s * 0.5 * savg, color);
             let light = egui::Color32::from_rgba_unmultiplied(
                 color.r().saturating_add(40), color.g().saturating_add(40), color.b().saturating_add(40), color.a());
-            painter.circle_stroke(center, s * 0.5, egui::Stroke::new(1.0, light));
-            painter.circle_stroke(center, s * 0.35, egui::Stroke::new(0.5, light));
+            painter.circle_stroke(center, s * 0.5 * savg, egui::Stroke::new(1.0, light));
+            painter.circle_stroke(center, s * 0.35 * savg, egui::Stroke::new(0.5, light));
         }
         DecorType::StairsUp | DecorType::StairsDown => {
             // Box
-            rot_line_screen(painter, cx - s, cy - s, cx + s, cy - s, cx, cy, deg, stroke);
-            rot_line_screen(painter, cx + s, cy - s, cx + s, cy + s, cx, cy, deg, stroke);
-            rot_line_screen(painter, cx + s, cy + s, cx - s, cy + s, cx, cy, deg, stroke);
-            rot_line_screen(painter, cx - s, cy + s, cx - s, cy - s, cx, cy, deg, stroke);
+            rot_line_screen(painter, cx - s, cy - s, cx + s, cy - s, cx, cy, deg, sclx, scly, stroke);
+            rot_line_screen(painter, cx + s, cy - s, cx + s, cy + s, cx, cy, deg, sclx, scly, stroke);
+            rot_line_screen(painter, cx + s, cy + s, cx - s, cy + s, cx, cy, deg, sclx, scly, stroke);
+            rot_line_screen(painter, cx - s, cy + s, cx - s, cy - s, cx, cy, deg, sclx, scly, stroke);
             // Treads
             let steps = 5;
             for i in 1..steps {
                 let y = cy - s + (i as f32 / steps as f32) * s * 2.0;
-                rot_line_screen(painter, cx - s, y, cx + s, y, cx, cy, deg, thin);
+                rot_line_screen(painter, cx - s, y, cx + s, y, cx, cy, deg, sclx, scly, thin);
             }
             // Arrow
             let (arrow_tip, arrow_l, arrow_r) = if decor_type == DecorType::StairsUp {
@@ -956,39 +1014,39 @@ fn draw_decor_symbol(
             } else {
                 (cy + s * 0.9, cy + s * 0.5, cy + s * 0.5)
             };
-            rot_line_screen(painter, cx, arrow_tip, cx - s * 0.3, arrow_l, cx, cy, deg, stroke);
-            rot_line_screen(painter, cx, arrow_tip, cx + s * 0.3, arrow_r, cx, cy, deg, stroke);
+            rot_line_screen(painter, cx, arrow_tip, cx - s * 0.3, arrow_l, cx, cy, deg, sclx, scly, stroke);
+            rot_line_screen(painter, cx, arrow_tip, cx + s * 0.3, arrow_r, cx, cy, deg, sclx, scly, stroke);
         }
         DecorType::Altar => {
             // Platform
-            rot_line_screen(painter, cx - s * 0.8, cy + s * 0.6, cx + s * 0.8, cy + s * 0.6, cx, cy, deg, stroke);
-            rot_line_screen(painter, cx - s * 0.8, cy + s * 0.8, cx + s * 0.8, cy + s * 0.8, cx, cy, deg, stroke);
-            rot_line_screen(painter, cx - s * 0.8, cy + s * 0.6, cx - s * 0.8, cy + s * 0.8, cx, cy, deg, stroke);
-            rot_line_screen(painter, cx + s * 0.8, cy + s * 0.6, cx + s * 0.8, cy + s * 0.8, cx, cy, deg, stroke);
+            rot_line_screen(painter, cx - s * 0.8, cy + s * 0.6, cx + s * 0.8, cy + s * 0.6, cx, cy, deg, sclx, scly, stroke);
+            rot_line_screen(painter, cx - s * 0.8, cy + s * 0.8, cx + s * 0.8, cy + s * 0.8, cx, cy, deg, sclx, scly, stroke);
+            rot_line_screen(painter, cx - s * 0.8, cy + s * 0.6, cx - s * 0.8, cy + s * 0.8, cx, cy, deg, sclx, scly, stroke);
+            rot_line_screen(painter, cx + s * 0.8, cy + s * 0.6, cx + s * 0.8, cy + s * 0.8, cx, cy, deg, sclx, scly, stroke);
             // Cross
             let t = s * 0.2;
-            rot_line_screen(painter, cx - t, cy - s, cx + t, cy - s, cx, cy, deg, thin);
-            rot_line_screen(painter, cx + t, cy - s, cx + t, cy + s * 0.5, cx, cy, deg, thin);
-            rot_line_screen(painter, cx + t, cy + s * 0.5, cx - t, cy + s * 0.5, cx, cy, deg, thin);
-            rot_line_screen(painter, cx - t, cy + s * 0.5, cx - t, cy - s, cx, cy, deg, thin);
-            rot_line_screen(painter, cx - s * 0.6, cy - t * 1.5, cx + s * 0.6, cy - t * 1.5, cx, cy, deg, thin);
-            rot_line_screen(painter, cx - s * 0.6, cy + t * 0.5, cx + s * 0.6, cy + t * 0.5, cx, cy, deg, thin);
-            rot_line_screen(painter, cx - s * 0.6, cy - t * 1.5, cx - s * 0.6, cy + t * 0.5, cx, cy, deg, thin);
-            rot_line_screen(painter, cx + s * 0.6, cy - t * 1.5, cx + s * 0.6, cy + t * 0.5, cx, cy, deg, thin);
+            rot_line_screen(painter, cx - t, cy - s, cx + t, cy - s, cx, cy, deg, sclx, scly, thin);
+            rot_line_screen(painter, cx + t, cy - s, cx + t, cy + s * 0.5, cx, cy, deg, sclx, scly, thin);
+            rot_line_screen(painter, cx + t, cy + s * 0.5, cx - t, cy + s * 0.5, cx, cy, deg, sclx, scly, thin);
+            rot_line_screen(painter, cx - t, cy + s * 0.5, cx - t, cy - s, cx, cy, deg, sclx, scly, thin);
+            rot_line_screen(painter, cx - s * 0.6, cy - t * 1.5, cx + s * 0.6, cy - t * 1.5, cx, cy, deg, sclx, scly, thin);
+            rot_line_screen(painter, cx - s * 0.6, cy + t * 0.5, cx + s * 0.6, cy + t * 0.5, cx, cy, deg, sclx, scly, thin);
+            rot_line_screen(painter, cx - s * 0.6, cy - t * 1.5, cx - s * 0.6, cy + t * 0.5, cx, cy, deg, sclx, scly, thin);
+            rot_line_screen(painter, cx + s * 0.6, cy - t * 1.5, cx + s * 0.6, cy + t * 0.5, cx, cy, deg, sclx, scly, thin);
         }
         DecorType::Fountain => {
-            painter.circle_stroke(center, s * 0.85, stroke);
-            painter.circle_stroke(center, s * 0.55, thin);
-            painter.circle_stroke(center, s * 0.25, thin);
-            painter.circle_filled(center, s * 0.08, color);
+            painter.circle_stroke(center, s * 0.85 * savg, stroke);
+            painter.circle_stroke(center, s * 0.55 * savg, thin);
+            painter.circle_stroke(center, s * 0.25 * savg, thin);
+            painter.circle_filled(center, s * 0.08 * savg, color);
         }
         DecorType::Trap => {
             // Triangle with X
-            rot_line_screen(painter, cx, cy - s * 0.7, cx + s * 0.7, cy + s * 0.5, cx, cy, deg, stroke);
-            rot_line_screen(painter, cx + s * 0.7, cy + s * 0.5, cx - s * 0.7, cy + s * 0.5, cx, cy, deg, stroke);
-            rot_line_screen(painter, cx - s * 0.7, cy + s * 0.5, cx, cy - s * 0.7, cx, cy, deg, stroke);
-            rot_line_screen(painter, cx - s * 0.25, cy - s * 0.1, cx + s * 0.25, cy + s * 0.35, cx, cy, deg, thin);
-            rot_line_screen(painter, cx + s * 0.25, cy - s * 0.1, cx - s * 0.25, cy + s * 0.35, cx, cy, deg, thin);
+            rot_line_screen(painter, cx, cy - s * 0.7, cx + s * 0.7, cy + s * 0.5, cx, cy, deg, sclx, scly, stroke);
+            rot_line_screen(painter, cx + s * 0.7, cy + s * 0.5, cx - s * 0.7, cy + s * 0.5, cx, cy, deg, sclx, scly, stroke);
+            rot_line_screen(painter, cx - s * 0.7, cy + s * 0.5, cx, cy - s * 0.7, cx, cy, deg, sclx, scly, stroke);
+            rot_line_screen(painter, cx - s * 0.25, cy - s * 0.1, cx + s * 0.25, cy + s * 0.35, cx, cy, deg, sclx, scly, thin);
+            rot_line_screen(painter, cx + s * 0.25, cy - s * 0.1, cx - s * 0.25, cy + s * 0.35, cx, cy, deg, sclx, scly, thin);
         }
         DecorType::Rubble => {
             let rocks: [(f32, f32, f32); 7] = [
@@ -997,157 +1055,157 @@ fn draw_decor_symbol(
                 (0.2, 0.15, 0.11),
             ];
             for &(dx, dy, r) in &rocks {
-                let p = rot_screen(cx + dx * s, cy + dy * s, cx, cy, deg);
-                painter.circle_filled(p, r * s, color);
+                let p = rot_screen(cx + dx * s, cy + dy * s, cx, cy, deg, sclx, scly);
+                painter.circle_filled(p, r * s * savg, color);
             }
         }
         DecorType::Chair => {
             let cs = s * 0.4;
-            rot_line_screen(painter, cx - cs, cy - cs, cx + cs, cy - cs, cx, cy, deg, stroke);
-            rot_line_screen(painter, cx + cs, cy - cs, cx + cs, cy + cs, cx, cy, deg, stroke);
-            rot_line_screen(painter, cx + cs, cy + cs, cx - cs, cy + cs, cx, cy, deg, stroke);
-            rot_line_screen(painter, cx - cs, cy + cs, cx - cs, cy - cs, cx, cy, deg, stroke);
-            rot_line_screen(painter, cx - cs, cy - cs, cx + cs, cy - cs, cx, cy, deg, egui::Stroke::new(2.5, color));
+            rot_line_screen(painter, cx - cs, cy - cs, cx + cs, cy - cs, cx, cy, deg, sclx, scly, stroke);
+            rot_line_screen(painter, cx + cs, cy - cs, cx + cs, cy + cs, cx, cy, deg, sclx, scly, stroke);
+            rot_line_screen(painter, cx + cs, cy + cs, cx - cs, cy + cs, cx, cy, deg, sclx, scly, stroke);
+            rot_line_screen(painter, cx - cs, cy + cs, cx - cs, cy - cs, cx, cy, deg, sclx, scly, stroke);
+            rot_line_screen(painter, cx - cs, cy - cs, cx + cs, cy - cs, cx, cy, deg, sclx, scly, egui::Stroke::new(2.5, color));
         }
         DecorType::Bench => {
             let hw = s * 0.9;
             let hh = s * 0.25;
-            rot_line_screen(painter, cx - hw, cy - hh, cx + hw, cy - hh, cx, cy, deg, stroke);
-            rot_line_screen(painter, cx + hw, cy - hh, cx + hw, cy + hh, cx, cy, deg, stroke);
-            rot_line_screen(painter, cx + hw, cy + hh, cx - hw, cy + hh, cx, cy, deg, stroke);
-            rot_line_screen(painter, cx - hw, cy + hh, cx - hw, cy - hh, cx, cy, deg, stroke);
+            rot_line_screen(painter, cx - hw, cy - hh, cx + hw, cy - hh, cx, cy, deg, sclx, scly, stroke);
+            rot_line_screen(painter, cx + hw, cy - hh, cx + hw, cy + hh, cx, cy, deg, sclx, scly, stroke);
+            rot_line_screen(painter, cx + hw, cy + hh, cx - hw, cy + hh, cx, cy, deg, sclx, scly, stroke);
+            rot_line_screen(painter, cx - hw, cy + hh, cx - hw, cy - hh, cx, cy, deg, sclx, scly, stroke);
         }
         DecorType::Barrel => {
-            painter.circle_stroke(center, s * 0.55, stroke);
-            rot_line_screen(painter, cx - s * 0.5, cy - s * 0.15, cx + s * 0.5, cy - s * 0.15, cx, cy, deg, thin);
-            rot_line_screen(painter, cx - s * 0.5, cy + s * 0.15, cx + s * 0.5, cy + s * 0.15, cx, cy, deg, thin);
+            painter.circle_stroke(center, s * 0.55 * savg, stroke);
+            rot_line_screen(painter, cx - s * 0.5, cy - s * 0.15, cx + s * 0.5, cy - s * 0.15, cx, cy, deg, sclx, scly, thin);
+            rot_line_screen(painter, cx - s * 0.5, cy + s * 0.15, cx + s * 0.5, cy + s * 0.15, cx, cy, deg, sclx, scly, thin);
         }
         DecorType::Crate => {
             let cs = s * 0.55;
-            rot_line_screen(painter, cx - cs, cy - cs, cx + cs, cy - cs, cx, cy, deg, stroke);
-            rot_line_screen(painter, cx + cs, cy - cs, cx + cs, cy + cs, cx, cy, deg, stroke);
-            rot_line_screen(painter, cx + cs, cy + cs, cx - cs, cy + cs, cx, cy, deg, stroke);
-            rot_line_screen(painter, cx - cs, cy + cs, cx - cs, cy - cs, cx, cy, deg, stroke);
-            rot_line_screen(painter, cx - cs, cy - cs, cx + cs, cy + cs, cx, cy, deg, thin);
-            rot_line_screen(painter, cx + cs, cy - cs, cx - cs, cy + cs, cx, cy, deg, thin);
+            rot_line_screen(painter, cx - cs, cy - cs, cx + cs, cy - cs, cx, cy, deg, sclx, scly, stroke);
+            rot_line_screen(painter, cx + cs, cy - cs, cx + cs, cy + cs, cx, cy, deg, sclx, scly, stroke);
+            rot_line_screen(painter, cx + cs, cy + cs, cx - cs, cy + cs, cx, cy, deg, sclx, scly, stroke);
+            rot_line_screen(painter, cx - cs, cy + cs, cx - cs, cy - cs, cx, cy, deg, sclx, scly, stroke);
+            rot_line_screen(painter, cx - cs, cy - cs, cx + cs, cy + cs, cx, cy, deg, sclx, scly, thin);
+            rot_line_screen(painter, cx + cs, cy - cs, cx - cs, cy + cs, cx, cy, deg, sclx, scly, thin);
         }
         DecorType::Ladder => {
             let hw = s * 0.3;
-            rot_line_screen(painter, cx - hw, cy - s, cx - hw, cy + s, cx, cy, deg, stroke);
-            rot_line_screen(painter, cx + hw, cy - s, cx + hw, cy + s, cx, cy, deg, stroke);
+            rot_line_screen(painter, cx - hw, cy - s, cx - hw, cy + s, cx, cy, deg, sclx, scly, stroke);
+            rot_line_screen(painter, cx + hw, cy - s, cx + hw, cy + s, cx, cy, deg, sclx, scly, stroke);
             for i in 0..5 {
                 let y = cy - s + (i as f32 + 0.5) * s * 2.0 / 5.0;
-                rot_line_screen(painter, cx - hw, y, cx + hw, y, cx, cy, deg, thin);
+                rot_line_screen(painter, cx - hw, y, cx + hw, y, cx, cy, deg, sclx, scly, thin);
             }
         }
         DecorType::Well => {
-            painter.circle_stroke(center, s * 0.7, stroke);
-            painter.circle_stroke(center, s * 0.5, thin);
-            rot_line_screen(painter, cx - s * 0.7, cy, cx + s * 0.7, cy, cx, cy, deg, thin);
-            rot_line_screen(painter, cx, cy - s * 0.7, cx, cy + s * 0.7, cx, cy, deg, thin);
+            painter.circle_stroke(center, s * 0.7 * savg, stroke);
+            painter.circle_stroke(center, s * 0.5 * savg, thin);
+            rot_line_screen(painter, cx - s * 0.7, cy, cx + s * 0.7, cy, cx, cy, deg, sclx, scly, thin);
+            rot_line_screen(painter, cx, cy - s * 0.7, cx, cy + s * 0.7, cx, cy, deg, sclx, scly, thin);
         }
         DecorType::Brazier => {
-            painter.circle_stroke(center, s * 0.4, stroke);
-            painter.circle_filled(center, s * 0.25, color);
-            rot_line_screen(painter, cx - s * 0.3, cy + s * 0.3, cx - s * 0.5, cy + s * 0.7, cx, cy, deg, thin);
-            rot_line_screen(painter, cx + s * 0.3, cy + s * 0.3, cx + s * 0.5, cy + s * 0.7, cx, cy, deg, thin);
-            rot_line_screen(painter, cx, cy + s * 0.4, cx, cy + s * 0.7, cx, cy, deg, thin);
+            painter.circle_stroke(center, s * 0.4 * savg, stroke);
+            painter.circle_filled(center, s * 0.25 * savg, color);
+            rot_line_screen(painter, cx - s * 0.3, cy + s * 0.3, cx - s * 0.5, cy + s * 0.7, cx, cy, deg, sclx, scly, thin);
+            rot_line_screen(painter, cx + s * 0.3, cy + s * 0.3, cx + s * 0.5, cy + s * 0.7, cx, cy, deg, sclx, scly, thin);
+            rot_line_screen(painter, cx, cy + s * 0.4, cx, cy + s * 0.7, cx, cy, deg, sclx, scly, thin);
         }
         DecorType::Fireplace => {
-            rot_line_screen(painter, cx - s * 0.7, cy - s * 0.6, cx - s * 0.7, cy + s * 0.6, cx, cy, deg, egui::Stroke::new(2.0, color));
-            rot_line_screen(painter, cx + s * 0.7, cy - s * 0.6, cx + s * 0.7, cy + s * 0.6, cx, cy, deg, egui::Stroke::new(2.0, color));
-            rot_line_screen(painter, cx - s * 0.7, cy + s * 0.6, cx + s * 0.7, cy + s * 0.6, cx, cy, deg, egui::Stroke::new(2.0, color));
-            rot_line_screen(painter, cx, cy + s * 0.3, cx - s * 0.15, cy - s * 0.2, cx, cy, deg, thin);
-            rot_line_screen(painter, cx, cy + s * 0.3, cx + s * 0.15, cy - s * 0.2, cx, cy, deg, thin);
+            rot_line_screen(painter, cx - s * 0.7, cy - s * 0.6, cx - s * 0.7, cy + s * 0.6, cx, cy, deg, sclx, scly, egui::Stroke::new(2.0, color));
+            rot_line_screen(painter, cx + s * 0.7, cy - s * 0.6, cx + s * 0.7, cy + s * 0.6, cx, cy, deg, sclx, scly, egui::Stroke::new(2.0, color));
+            rot_line_screen(painter, cx - s * 0.7, cy + s * 0.6, cx + s * 0.7, cy + s * 0.6, cx, cy, deg, sclx, scly, egui::Stroke::new(2.0, color));
+            rot_line_screen(painter, cx, cy + s * 0.3, cx - s * 0.15, cy - s * 0.2, cx, cy, deg, sclx, scly, thin);
+            rot_line_screen(painter, cx, cy + s * 0.3, cx + s * 0.15, cy - s * 0.2, cx, cy, deg, sclx, scly, thin);
         }
         DecorType::Statue => {
-            let p = rot_screen(cx, cy - s * 0.15, cx, cy, deg);
-            painter.circle_filled(p, s * 0.4, color);
+            let p = rot_screen(cx, cy - s * 0.15, cx, cy, deg, sclx, scly);
+            painter.circle_filled(p, s * 0.4 * savg, color);
             let bs = s * 0.5;
-            rot_line_screen(painter, cx - bs, cy + s * 0.3, cx + bs, cy + s * 0.3, cx, cy, deg, stroke);
-            rot_line_screen(painter, cx + bs, cy + s * 0.3, cx + bs, cy + s * 0.7, cx, cy, deg, stroke);
-            rot_line_screen(painter, cx + bs, cy + s * 0.7, cx - bs, cy + s * 0.7, cx, cy, deg, stroke);
-            rot_line_screen(painter, cx - bs, cy + s * 0.7, cx - bs, cy + s * 0.3, cx, cy, deg, stroke);
+            rot_line_screen(painter, cx - bs, cy + s * 0.3, cx + bs, cy + s * 0.3, cx, cy, deg, sclx, scly, stroke);
+            rot_line_screen(painter, cx + bs, cy + s * 0.3, cx + bs, cy + s * 0.7, cx, cy, deg, sclx, scly, stroke);
+            rot_line_screen(painter, cx + bs, cy + s * 0.7, cx - bs, cy + s * 0.7, cx, cy, deg, sclx, scly, stroke);
+            rot_line_screen(painter, cx - bs, cy + s * 0.7, cx - bs, cy + s * 0.3, cx, cy, deg, sclx, scly, stroke);
         }
         DecorType::Throne => {
             let cs = s * 0.5;
-            rot_line_screen(painter, cx - cs, cy - cs, cx + cs, cy - cs, cx, cy, deg, thin);
-            rot_line_screen(painter, cx + cs, cy - cs, cx + cs, cy + cs, cx, cy, deg, thin);
-            rot_line_screen(painter, cx + cs, cy + cs, cx - cs, cy + cs, cx, cy, deg, thin);
-            rot_line_screen(painter, cx - cs, cy + cs, cx - cs, cy - cs, cx, cy, deg, thin);
-            rot_line_screen(painter, cx - cs, cy - cs, cx - cs, cy - s * 0.9, cx, cy, deg, egui::Stroke::new(2.0, color));
-            rot_line_screen(painter, cx + cs, cy - cs, cx + cs, cy - s * 0.9, cx, cy, deg, egui::Stroke::new(2.0, color));
-            rot_line_screen(painter, cx - cs, cy - s * 0.9, cx + cs, cy - s * 0.9, cx, cy, deg, egui::Stroke::new(2.0, color));
-            rot_line_screen(painter, cx - cs, cy, cx - s * 0.8, cy, cx, cy, deg, stroke);
-            rot_line_screen(painter, cx + cs, cy, cx + s * 0.8, cy, cx, cy, deg, stroke);
+            rot_line_screen(painter, cx - cs, cy - cs, cx + cs, cy - cs, cx, cy, deg, sclx, scly, thin);
+            rot_line_screen(painter, cx + cs, cy - cs, cx + cs, cy + cs, cx, cy, deg, sclx, scly, thin);
+            rot_line_screen(painter, cx + cs, cy + cs, cx - cs, cy + cs, cx, cy, deg, sclx, scly, thin);
+            rot_line_screen(painter, cx - cs, cy + cs, cx - cs, cy - cs, cx, cy, deg, sclx, scly, thin);
+            rot_line_screen(painter, cx - cs, cy - cs, cx - cs, cy - s * 0.9, cx, cy, deg, sclx, scly, egui::Stroke::new(2.0, color));
+            rot_line_screen(painter, cx + cs, cy - cs, cx + cs, cy - s * 0.9, cx, cy, deg, sclx, scly, egui::Stroke::new(2.0, color));
+            rot_line_screen(painter, cx - cs, cy - s * 0.9, cx + cs, cy - s * 0.9, cx, cy, deg, sclx, scly, egui::Stroke::new(2.0, color));
+            rot_line_screen(painter, cx - cs, cy, cx - s * 0.8, cy, cx, cy, deg, sclx, scly, stroke);
+            rot_line_screen(painter, cx + cs, cy, cx + s * 0.8, cy, cx, cy, deg, sclx, scly, stroke);
         }
         DecorType::Bed => {
             let hw = s * 0.6;
             let hh = s * 0.9;
-            rot_line_screen(painter, cx - hw, cy - hh, cx + hw, cy - hh, cx, cy, deg, thin);
-            rot_line_screen(painter, cx + hw, cy - hh, cx + hw, cy + hh, cx, cy, deg, thin);
-            rot_line_screen(painter, cx + hw, cy + hh, cx - hw, cy + hh, cx, cy, deg, thin);
-            rot_line_screen(painter, cx - hw, cy + hh, cx - hw, cy - hh, cx, cy, deg, thin);
-            rot_line_screen(painter, cx - hw, cy - hh, cx + hw, cy - hh, cx, cy, deg, egui::Stroke::new(3.0, color));
-            rot_line_screen(painter, cx - hw * 0.6, cy - hh + s * 0.3, cx + hw * 0.6, cy - hh + s * 0.3, cx, cy, deg, thin);
+            rot_line_screen(painter, cx - hw, cy - hh, cx + hw, cy - hh, cx, cy, deg, sclx, scly, thin);
+            rot_line_screen(painter, cx + hw, cy - hh, cx + hw, cy + hh, cx, cy, deg, sclx, scly, thin);
+            rot_line_screen(painter, cx + hw, cy + hh, cx - hw, cy + hh, cx, cy, deg, sclx, scly, thin);
+            rot_line_screen(painter, cx - hw, cy + hh, cx - hw, cy - hh, cx, cy, deg, sclx, scly, thin);
+            rot_line_screen(painter, cx - hw, cy - hh, cx + hw, cy - hh, cx, cy, deg, sclx, scly, egui::Stroke::new(3.0, color));
+            rot_line_screen(painter, cx - hw * 0.6, cy - hh + s * 0.3, cx + hw * 0.6, cy - hh + s * 0.3, cx, cy, deg, sclx, scly, thin);
         }
         DecorType::Bookshelf => {
             let hw = s * 0.8;
             let hh = s * 0.4;
-            rot_line_screen(painter, cx - hw, cy - hh, cx + hw, cy - hh, cx, cy, deg, stroke);
-            rot_line_screen(painter, cx + hw, cy - hh, cx + hw, cy + hh, cx, cy, deg, stroke);
-            rot_line_screen(painter, cx + hw, cy + hh, cx - hw, cy + hh, cx, cy, deg, stroke);
-            rot_line_screen(painter, cx - hw, cy + hh, cx - hw, cy - hh, cx, cy, deg, stroke);
+            rot_line_screen(painter, cx - hw, cy - hh, cx + hw, cy - hh, cx, cy, deg, sclx, scly, stroke);
+            rot_line_screen(painter, cx + hw, cy - hh, cx + hw, cy + hh, cx, cy, deg, sclx, scly, stroke);
+            rot_line_screen(painter, cx + hw, cy + hh, cx - hw, cy + hh, cx, cy, deg, sclx, scly, stroke);
+            rot_line_screen(painter, cx - hw, cy + hh, cx - hw, cy - hh, cx, cy, deg, sclx, scly, stroke);
             for i in 1..3 {
                 let y = cy - hh + (i as f32 / 3.0) * hh * 2.0;
-                rot_line_screen(painter, cx - hw, y, cx + hw, y, cx, cy, deg, thin);
+                rot_line_screen(painter, cx - hw, y, cx + hw, y, cx, cy, deg, sclx, scly, thin);
             }
         }
         DecorType::Bones => {
-            rot_line_screen(painter, cx - s * 0.6, cy - s * 0.4, cx + s * 0.6, cy + s * 0.4, cx, cy, deg, stroke);
-            rot_line_screen(painter, cx + s * 0.6, cy - s * 0.4, cx - s * 0.6, cy + s * 0.4, cx, cy, deg, stroke);
+            rot_line_screen(painter, cx - s * 0.6, cy - s * 0.4, cx + s * 0.6, cy + s * 0.4, cx, cy, deg, sclx, scly, stroke);
+            rot_line_screen(painter, cx + s * 0.6, cy - s * 0.4, cx - s * 0.6, cy + s * 0.4, cx, cy, deg, sclx, scly, stroke);
             for &(bx, by) in &[(-0.6f32, -0.4f32), (0.6, 0.4), (0.6, -0.4), (-0.6, 0.4)] {
-                let p = rot_screen(cx + bx * s, cy + by * s, cx, cy, deg);
-                painter.circle_filled(p, s * 0.1, color);
+                let p = rot_screen(cx + bx * s, cy + by * s, cx, cy, deg, sclx, scly);
+                painter.circle_filled(p, s * 0.1 * savg, color);
             }
-            let skull = rot_screen(cx, cy - s * 0.1, cx, cy, deg);
-            painter.circle_stroke(skull, s * 0.2, thin);
+            let skull = rot_screen(cx, cy - s * 0.1, cx, cy, deg, sclx, scly);
+            painter.circle_stroke(skull, s * 0.2 * savg, thin);
         }
         DecorType::Web => {
             for i in 0..6 {
                 let angle = (i as f32 / 6.0) * std::f32::consts::TAU;
                 let ex = cx + s * 0.8 * angle.cos();
                 let ey = cy + s * 0.8 * angle.sin();
-                rot_line_screen(painter, cx, cy, ex, ey, cx, cy, deg, thin);
+                rot_line_screen(painter, cx, cy, ex, ey, cx, cy, deg, sclx, scly, thin);
             }
             for ring in 1..3 {
                 let r = s * 0.8 * ring as f32 / 3.0;
                 for i in 0..6 {
                     let a1 = (i as f32 / 6.0) * std::f32::consts::TAU;
                     let a2 = ((i + 1) as f32 / 6.0) * std::f32::consts::TAU;
-                    let p1 = rot_screen(cx + r * a1.cos(), cy + r * a1.sin(), cx, cy, deg);
-                    let p2 = rot_screen(cx + r * a2.cos(), cy + r * a2.sin(), cx, cy, deg);
+                    let p1 = rot_screen(cx + r * a1.cos(), cy + r * a1.sin(), cx, cy, deg, sclx, scly);
+                    let p2 = rot_screen(cx + r * a2.cos(), cy + r * a2.sin(), cx, cy, deg, sclx, scly);
                     painter.line_segment([p1, p2], egui::Stroke::new(0.5, color));
                 }
             }
         }
         DecorType::Door => {
             let hw = s * 0.05;
-            rot_line_screen(painter, cx - hw, cy - s * 0.7, cx - hw, cy + s * 0.7, cx, cy, deg, egui::Stroke::new(2.0, color));
-            rot_line_screen(painter, cx - hw, cy - s * 0.7, cx + s * 0.7, cy - s * 0.7, cx, cy, deg, stroke);
-            rot_line_screen(painter, cx + s * 0.7, cy - s * 0.7, cx + s * 0.7, cy + s * 0.7, cx, cy, deg, stroke);
-            rot_line_screen(painter, cx + s * 0.7, cy + s * 0.7, cx - hw, cy + s * 0.7, cx, cy, deg, stroke);
+            rot_line_screen(painter, cx - hw, cy - s * 0.7, cx - hw, cy + s * 0.7, cx, cy, deg, sclx, scly, egui::Stroke::new(2.0, color));
+            rot_line_screen(painter, cx - hw, cy - s * 0.7, cx + s * 0.7, cy - s * 0.7, cx, cy, deg, sclx, scly, stroke);
+            rot_line_screen(painter, cx + s * 0.7, cy - s * 0.7, cx + s * 0.7, cy + s * 0.7, cx, cy, deg, sclx, scly, stroke);
+            rot_line_screen(painter, cx + s * 0.7, cy + s * 0.7, cx - hw, cy + s * 0.7, cx, cy, deg, sclx, scly, stroke);
         }
         DecorType::Gate => {
             for i in 0..5 {
                 let x = cx - s * 0.6 + (i as f32 / 4.0) * s * 1.2;
-                rot_line_screen(painter, x, cy - s * 0.7, x, cy + s * 0.7, cx, cy, deg, thin);
+                rot_line_screen(painter, x, cy - s * 0.7, x, cy + s * 0.7, cx, cy, deg, sclx, scly, thin);
             }
-            rot_line_screen(painter, cx - s * 0.6, cy - s * 0.2, cx + s * 0.6, cy - s * 0.2, cx, cy, deg, thin);
-            rot_line_screen(painter, cx - s * 0.6, cy + s * 0.2, cx + s * 0.6, cy + s * 0.2, cx, cy, deg, thin);
-            rot_line_screen(painter, cx - s * 0.7, cy - s * 0.8, cx + s * 0.7, cy - s * 0.8, cx, cy, deg, egui::Stroke::new(2.0, color));
-            rot_line_screen(painter, cx - s * 0.7, cy - s * 0.8, cx - s * 0.7, cy + s * 0.7, cx, cy, deg, egui::Stroke::new(2.0, color));
-            rot_line_screen(painter, cx + s * 0.7, cy - s * 0.8, cx + s * 0.7, cy + s * 0.7, cx, cy, deg, egui::Stroke::new(2.0, color));
+            rot_line_screen(painter, cx - s * 0.6, cy - s * 0.2, cx + s * 0.6, cy - s * 0.2, cx, cy, deg, sclx, scly, thin);
+            rot_line_screen(painter, cx - s * 0.6, cy + s * 0.2, cx + s * 0.6, cy + s * 0.2, cx, cy, deg, sclx, scly, thin);
+            rot_line_screen(painter, cx - s * 0.7, cy - s * 0.8, cx + s * 0.7, cy - s * 0.8, cx, cy, deg, sclx, scly, egui::Stroke::new(2.0, color));
+            rot_line_screen(painter, cx - s * 0.7, cy - s * 0.8, cx - s * 0.7, cy + s * 0.7, cx, cy, deg, sclx, scly, egui::Stroke::new(2.0, color));
+            rot_line_screen(painter, cx + s * 0.7, cy - s * 0.8, cx + s * 0.7, cy + s * 0.7, cx, cy, deg, sclx, scly, egui::Stroke::new(2.0, color));
         }
         DecorType::Vines => {
             let tendrils: [(f32, f32, f32, f32, f32, f32); 5] = [
@@ -1159,13 +1217,13 @@ fn draw_decor_symbol(
             ];
             for &(sx, sy, cx1, cy1, ex, ey) in &tendrils {
                 let steps = 6;
-                let mut prev = rot_screen(cx + sx * s, cy + sy * s, cx, cy, deg);
+                let mut prev = rot_screen(cx + sx * s, cy + sy * s, cx, cy, deg, sclx, scly);
                 for i in 1..=steps {
                     let t = i as f32 / steps as f32;
                     let it = 1.0 - t;
                     let nx = cx + (it * it * sx + 2.0 * it * t * cx1 + t * t * ex) * s;
                     let ny = cy + (it * it * sy + 2.0 * it * t * cy1 + t * t * ey) * s;
-                    let cur = rot_screen(nx, ny, cx, cy, deg);
+                    let cur = rot_screen(nx, ny, cx, cy, deg, sclx, scly);
                     painter.line_segment([prev, cur], thin);
                     prev = cur;
                 }
@@ -1175,25 +1233,25 @@ fn draw_decor_symbol(
                 let lx = cx + (it * it * sx + 2.0 * it * leaf_t * cx1 + leaf_t * leaf_t * ex) * s;
                 let ly = cy + (it * it * sy + 2.0 * it * leaf_t * cy1 + leaf_t * leaf_t * ey) * s;
                 let ls = s * 0.12;
-                rot_line_screen(painter, lx - ls, ly, lx, ly - ls, cx, cy, deg, thin);
-                rot_line_screen(painter, lx, ly - ls, lx + ls, ly, cx, cy, deg, thin);
-                rot_line_screen(painter, lx - ls, ly, lx + ls, ly, cx, cy, deg, egui::Stroke::new(0.5, color));
+                rot_line_screen(painter, lx - ls, ly, lx, ly - ls, cx, cy, deg, sclx, scly, thin);
+                rot_line_screen(painter, lx, ly - ls, lx + ls, ly, cx, cy, deg, sclx, scly, thin);
+                rot_line_screen(painter, lx - ls, ly, lx + ls, ly, cx, cy, deg, sclx, scly, egui::Stroke::new(0.5, color));
             }
         }
         DecorType::Scales => {
             // Central stand
-            rot_line_screen(painter, cx, cy - s * 0.9, cx, cy + s * 0.8, cx, cy, deg, stroke);
+            rot_line_screen(painter, cx, cy - s * 0.9, cx, cy + s * 0.8, cx, cy, deg, sclx, scly, stroke);
             // Base
-            rot_line_screen(painter, cx - s * 0.4, cy + s * 0.8, cx + s * 0.4, cy + s * 0.8, cx, cy, deg, egui::Stroke::new(2.0, color));
+            rot_line_screen(painter, cx - s * 0.4, cy + s * 0.8, cx + s * 0.4, cy + s * 0.8, cx, cy, deg, sclx, scly, egui::Stroke::new(2.0, color));
             // Crossbeam
-            rot_line_screen(painter, cx - s * 0.8, cy - s * 0.5, cx + s * 0.8, cy - s * 0.7, cx, cy, deg, stroke);
+            rot_line_screen(painter, cx - s * 0.8, cy - s * 0.5, cx + s * 0.8, cy - s * 0.7, cx, cy, deg, sclx, scly, stroke);
             // Pivot triangle
-            rot_line_screen(painter, cx - s * 0.1, cy - s * 0.9, cx + s * 0.1, cy - s * 0.9, cx, cy, deg, thin);
-            rot_line_screen(painter, cx - s * 0.1, cy - s * 0.9, cx, cy - s * 0.7, cx, cy, deg, thin);
-            rot_line_screen(painter, cx + s * 0.1, cy - s * 0.9, cx, cy - s * 0.7, cx, cy, deg, thin);
+            rot_line_screen(painter, cx - s * 0.1, cy - s * 0.9, cx + s * 0.1, cy - s * 0.9, cx, cy, deg, sclx, scly, thin);
+            rot_line_screen(painter, cx - s * 0.1, cy - s * 0.9, cx, cy - s * 0.7, cx, cy, deg, sclx, scly, thin);
+            rot_line_screen(painter, cx + s * 0.1, cy - s * 0.9, cx, cy - s * 0.7, cx, cy, deg, sclx, scly, thin);
             // Left chain + pan
-            rot_line_screen(painter, cx - s * 0.8, cy - s * 0.5, cx - s * 0.8, cy + s * 0.1, cx, cy, deg, thin);
-            rot_line_screen(painter, cx - s * 1.05, cy + s * 0.1, cx - s * 0.55, cy + s * 0.1, cx, cy, deg, thin);
+            rot_line_screen(painter, cx - s * 0.8, cy - s * 0.5, cx - s * 0.8, cy + s * 0.1, cx, cy, deg, sclx, scly, thin);
+            rot_line_screen(painter, cx - s * 1.05, cy + s * 0.1, cx - s * 0.55, cy + s * 0.1, cx, cy, deg, sclx, scly, thin);
             for i in 0..6 {
                 let a0 = std::f32::consts::PI * (i as f32 / 6.0);
                 let a1 = std::f32::consts::PI * ((i + 1) as f32 / 6.0);
@@ -1203,11 +1261,11 @@ fn draw_decor_symbol(
                 rot_line_screen(painter,
                     pcx + pr * a0.cos(), pcy + pr * a0.sin(),
                     pcx + pr * a1.cos(), pcy + pr * a1.sin(),
-                    cx, cy, deg, thin);
+                    cx, cy, deg, sclx, scly, thin);
             }
             // Right chain + pan
-            rot_line_screen(painter, cx + s * 0.8, cy - s * 0.7, cx + s * 0.8, cy - s * 0.1, cx, cy, deg, thin);
-            rot_line_screen(painter, cx + s * 0.55, cy - s * 0.1, cx + s * 1.05, cy - s * 0.1, cx, cy, deg, thin);
+            rot_line_screen(painter, cx + s * 0.8, cy - s * 0.7, cx + s * 0.8, cy - s * 0.1, cx, cy, deg, sclx, scly, thin);
+            rot_line_screen(painter, cx + s * 0.55, cy - s * 0.1, cx + s * 1.05, cy - s * 0.1, cx, cy, deg, sclx, scly, thin);
             for i in 0..6 {
                 let a0 = std::f32::consts::PI * (i as f32 / 6.0);
                 let a1 = std::f32::consts::PI * ((i + 1) as f32 / 6.0);
@@ -1217,17 +1275,17 @@ fn draw_decor_symbol(
                 rot_line_screen(painter,
                     pcx + pr * a0.cos(), pcy + pr * a0.sin(),
                     pcx + pr * a1.cos(), pcy + pr * a1.sin(),
-                    cx, cy, deg, thin);
+                    cx, cy, deg, sclx, scly, thin);
             }
         }
         DecorType::OfferingMouth => {
             // Face outline
-            painter.circle_stroke(egui::pos2(cx, cy), s * 0.85, stroke);
+            painter.circle_stroke(egui::pos2(cx, cy), s * 0.85 * savg, stroke);
             // Eyes
-            let le = rot_screen(cx - s * 0.3, cy - s * 0.25, cx, cy, deg);
-            let re = rot_screen(cx + s * 0.3, cy - s * 0.25, cx, cy, deg);
-            painter.circle_filled(le, s * 0.12, color);
-            painter.circle_filled(re, s * 0.12, color);
+            let le = rot_screen(cx - s * 0.3, cy - s * 0.25, cx, cy, deg, sclx, scly);
+            let re = rot_screen(cx + s * 0.3, cy - s * 0.25, cx, cy, deg, sclx, scly);
+            painter.circle_filled(le, s * 0.12 * savg, color);
+            painter.circle_filled(re, s * 0.12 * savg, color);
             // Open mouth (oval via line segments)
             let mouth_cx = cx;
             let mouth_cy = cy + s * 0.3;
@@ -1241,17 +1299,79 @@ fn draw_decor_symbol(
                 let y0 = mouth_cy + mouth_ry * a0.sin();
                 let x1 = mouth_cx + mouth_rx * a1.cos();
                 let y1 = mouth_cy + mouth_ry * a1.sin();
-                rot_line_screen(painter, x0, y0, x1, y1, cx, cy, deg, stroke);
+                rot_line_screen(painter, x0, y0, x1, y1, cx, cy, deg, sclx, scly, stroke);
             }
             // Dark mouth interior
-            let mc = rot_screen(mouth_cx, mouth_cy, cx, cy, deg);
-            painter.circle_filled(mc, mouth_ry * 0.6, color.linear_multiply(0.3));
+            let mc = rot_screen(mouth_cx, mouth_cy, cx, cy, deg, sclx, scly);
+            painter.circle_filled(mc, mouth_ry * 0.6 * savg, color.linear_multiply(0.3));
             // Brow ridges
-            rot_line_screen(painter, cx - s * 0.5, cy - s * 0.45, cx - s * 0.1, cy - s * 0.5, cx, cy, deg, stroke);
-            rot_line_screen(painter, cx + s * 0.5, cy - s * 0.45, cx + s * 0.1, cy - s * 0.5, cx, cy, deg, stroke);
+            rot_line_screen(painter, cx - s * 0.5, cy - s * 0.45, cx - s * 0.1, cy - s * 0.5, cx, cy, deg, sclx, scly, stroke);
+            rot_line_screen(painter, cx + s * 0.5, cy - s * 0.45, cx + s * 0.1, cy - s * 0.5, cx, cy, deg, sclx, scly, stroke);
             // Nose hint
-            rot_line_screen(painter, cx, cy - s * 0.1, cx - s * 0.08, cy + s * 0.05, cx, cy, deg, thin);
-            rot_line_screen(painter, cx, cy - s * 0.1, cx + s * 0.08, cy + s * 0.05, cx, cy, deg, thin);
+            rot_line_screen(painter, cx, cy - s * 0.1, cx - s * 0.08, cy + s * 0.05, cx, cy, deg, sclx, scly, thin);
+            rot_line_screen(painter, cx, cy - s * 0.1, cx + s * 0.08, cy + s * 0.05, cx, cy, deg, sclx, scly, thin);
+        }
+        DecorType::Crack => {
+            // Jagged crack line with a short branch
+            rot_line_screen(painter, cx, cy - s * 0.8, cx + s * 0.15, cy - s * 0.45, cx, cy, deg, sclx, scly, stroke);
+            rot_line_screen(painter, cx + s * 0.15, cy - s * 0.45, cx - s * 0.2, cy - s * 0.1, cx, cy, deg, sclx, scly, stroke);
+            rot_line_screen(painter, cx - s * 0.2, cy - s * 0.1, cx + s * 0.1, cy + s * 0.25, cx, cy, deg, sclx, scly, stroke);
+            rot_line_screen(painter, cx + s * 0.1, cy + s * 0.25, cx - s * 0.15, cy + s * 0.55, cx, cy, deg, sclx, scly, stroke);
+            rot_line_screen(painter, cx - s * 0.15, cy + s * 0.55, cx + s * 0.05, cy + s * 0.8, cx, cy, deg, sclx, scly, stroke);
+            // Branch
+            rot_line_screen(painter, cx - s * 0.2, cy - s * 0.1, cx - s * 0.5, cy + s * 0.15, cx, cy, deg, sclx, scly, thin);
+        }
+        DecorType::Stream => {
+            // Wavy stream flowing top to bottom with parallel banks
+            let water = egui::Color32::from_rgba_unmultiplied(80, 130, 200, 140);
+            let water_stroke = egui::Stroke::new(1.0, water);
+            let water_thin = egui::Stroke::new(0.5, water);
+            let bank_w = s * 0.25;
+            let segments = 8;
+            for bank in [-1.0f32, 1.0] {
+                let bx = bank * bank_w;
+                for i in 0..segments {
+                    let t0 = i as f32 / segments as f32;
+                    let t1 = (i + 1) as f32 / segments as f32;
+                    let y0 = cy - s * 0.9 + t0 * s * 1.8;
+                    let y1 = cy - s * 0.9 + t1 * s * 1.8;
+                    let wave0 = (t0 * std::f32::consts::TAU * 1.5).sin() * s * 0.15;
+                    let wave1 = (t1 * std::f32::consts::TAU * 1.5).sin() * s * 0.15;
+                    rot_line_screen(painter, cx + bx + wave0, y0, cx + bx + wave1, y1, cx, cy, deg, sclx, scly, water_stroke);
+                }
+            }
+            for i in 1..4 {
+                let t = i as f32 / 4.0;
+                let y = cy - s * 0.9 + t * s * 1.8;
+                let wave = (t * std::f32::consts::TAU * 1.5).sin() * s * 0.15;
+                rot_line_screen(painter, cx - bank_w * 0.5 + wave, y, cx + bank_w * 0.5 + wave, y, cx, cy, deg, sclx, scly, water_thin);
+            }
+        }
+        DecorType::Pool => {
+            // Oval pool with ripple rings (ellipse via line segments)
+            let water_fill = egui::Color32::from_rgba_unmultiplied(80, 130, 200, 80);
+            let water_edge = egui::Color32::from_rgba_unmultiplied(60, 100, 170, 180);
+            let rx = s * 0.7;
+            let ry = s * 0.7;
+            let segments = 24;
+            // Filled ellipse via polygon
+            let mut fill_points = Vec::with_capacity(segments);
+            for i in 0..segments {
+                let a = (i as f32 / segments as f32) * std::f32::consts::TAU;
+                fill_points.push(rot_screen(cx + rx * a.cos(), cy + ry * a.sin(), cx, cy, deg, sclx, scly));
+            }
+            let fill_mesh = egui::Shape::convex_polygon(fill_points, water_fill, egui::Stroke::NONE);
+            painter.add(fill_mesh);
+            // Outline rings
+            for (scale, width) in [(1.0f32, 1.5f32), (0.6, 0.8), (0.25, 0.5)] {
+                for i in 0..segments {
+                    let a0 = (i as f32 / segments as f32) * std::f32::consts::TAU;
+                    let a1 = ((i + 1) as f32 / segments as f32) * std::f32::consts::TAU;
+                    let p0 = rot_screen(cx + rx * scale * a0.cos(), cy + ry * scale * a0.sin(), cx, cy, deg, sclx, scly);
+                    let p1 = rot_screen(cx + rx * scale * a1.cos(), cy + ry * scale * a1.sin(), cx, cy, deg, sclx, scly);
+                    painter.line_segment([p0, p1], egui::Stroke::new(width, water_edge));
+                }
+            }
         }
     }
 }

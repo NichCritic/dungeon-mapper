@@ -2,9 +2,18 @@
 
 use std::collections::HashMap;
 
+use std::sync::LazyLock;
+
 use regex::Regex;
 
 use super::monster::{Monster, HitPoints, strip_5e_markup};
+
+macro_rules! regex {
+    ($pattern:expr) => {{
+        static RE: LazyLock<Regex> = LazyLock::new(|| Regex::new($pattern).unwrap());
+        &*RE
+    }};
+}
 
 /// A parsed attack from a monster's action entries.
 #[derive(Clone, Debug)]
@@ -151,15 +160,12 @@ fn parse_attack(name: &str, text: &str) -> Option<ParsedAttack> {
     // After strip_5e_markup:
     //   Old (MM):  "+4 to hit, reach 5 ft., one target. 5 (1d6 + 2) slashing damage."
     //   New (XMM): "+4, reach 5 ft. 5 (1d6 + 2) Slashing damage."
-    let hit_re = Regex::new(r"\+(\d+)(?:\s+to hit)?[,.]").unwrap();
-    let hit_cap = hit_re.captures(text)?;
+    let hit_cap = regex!(r"\+(\d+)(?:\s+to hit)?[,.]").captures(text)?;
     let to_hit: i8 = hit_cap[1].parse().ok()?;
 
-    let reach_re = Regex::new(r"reach (\d+) ft\.").unwrap();
-    let reach = reach_re.captures(text).and_then(|c| c[1].parse().ok());
+    let reach = regex!(r"reach (\d+) ft\.").captures(text).and_then(|c| c[1].parse().ok());
 
-    let range_re = Regex::new(r"range (\d+)/(\d+) ft\.").unwrap();
-    let range = range_re.captures(text).and_then(|c| {
+    let range = regex!(r"range (\d+)/(\d+) ft\.").captures(text).and_then(|c| {
         let normal: u32 = c[1].parse().ok()?;
         let long: u32 = c[2].parse().ok()?;
         Some((normal, long))
@@ -167,7 +173,7 @@ fn parse_attack(name: &str, text: &str) -> Option<ParsedAttack> {
 
     // Primary damage: "19 (2d10 + 8) piercing damage"
     // Some attacks (e.g. Web) have no damage — those get empty damage fields.
-    let dmg_re = Regex::new(r"(\d+) \((\d+d\d+(?:\s*[+-]\s*\d+)?)\) (\w+) damage").unwrap();
+    let dmg_re = regex!(r"(\d+) \((\d+d\d+(?:\s*[+-]\s*\d+)?)\) (\w+) damage");
     let (damage_avg, damage_dice, damage_type) = if let Some(dmg_cap) = dmg_re.captures(text) {
         let avg: f32 = dmg_cap[1].parse().unwrap_or(0.0);
         let dice = dmg_cap[2].to_string();
@@ -178,8 +184,7 @@ fn parse_attack(name: &str, text: &str) -> Option<ParsedAttack> {
     };
 
     // Extra damage riders: "plus 7 (2d6) fire damage"
-    let extra_re = Regex::new(r"plus (\d+) \((\d+d\d+(?:\s*[+-]\s*\d+)?)\) (\w+) damage").unwrap();
-    let extra_damage: Vec<DamageRider> = extra_re.captures_iter(text).map(|c| {
+    let extra_damage: Vec<DamageRider> = regex!(r"plus (\d+) \((\d+d\d+(?:\s*[+-]\s*\d+)?)\) (\w+) damage").captures_iter(text).map(|c| {
         DamageRider {
             damage_avg: c[1].parse().unwrap_or(0.0),
             damage_dice: c[2].to_string(),
@@ -195,9 +200,8 @@ fn parse_attack(name: &str, text: &str) -> Option<ParsedAttack> {
     // match "damage" appearing in effect text like "if the poison damage reduces..."
     // For no-damage attacks (e.g. Web), capture everything after the {@h} hit marker.
     let effect = {
-        let dice_dmg_re = Regex::new(r"(?:plus )?\d+ \(\d+d\d+(?:\s*[+-]\s*\d+)?\) \w+ damage").unwrap();
         let mut last_damage_end = 0;
-        for m in dice_dmg_re.find_iter(text) {
+        for m in regex!(r"(?:plus )?\d+ \(\d+d\d+(?:\s*[+-]\s*\d+)?\) \w+ damage").find_iter(text) {
             last_damage_end = m.end();
         }
         if last_damage_end > 0 && last_damage_end < text.len() {
@@ -206,8 +210,7 @@ fn parse_attack(name: &str, text: &str) -> Option<ParsedAttack> {
             if remainder.is_empty() { String::new() } else { remainder.to_string() }
         } else if damage_dice.is_empty() {
             // No damage dice found — capture effect after "Hit: " or after the target clause
-            let hit_re = Regex::new(r"one (?:target|creature)\.?\s*").unwrap();
-            if let Some(m) = hit_re.find(text) {
+            if let Some(m) = regex!(r"one (?:target|creature)\.?\s*").find(text) {
                 let remainder = text[m.end()..].trim();
                 let remainder = remainder.trim_start_matches(|c: char| c == '.' || c == ',' || c.is_whitespace());
                 if remainder.is_empty() { String::new() } else { remainder.to_string() }
@@ -236,8 +239,7 @@ fn parse_attack(name: &str, text: &str) -> Option<ParsedAttack> {
 /// Parse saving throw DCs from text.
 fn parse_saving_throws(source_name: &str, text: &str) -> Vec<ParsedSave> {
     // After strip_5e_markup: "DC 19 Wisdom saving throw"
-    let dc_re = Regex::new(r"DC (\d+) (\w+)").unwrap();
-    dc_re.captures_iter(text).filter_map(|c| {
+    regex!(r"DC (\d+) (\w+)").captures_iter(text).filter_map(|c| {
         let dc: u8 = c[1].parse().ok()?;
         let ability = c[2].to_string();
         Some(ParsedSave {
@@ -253,8 +255,7 @@ fn parse_multiattack_count(text: &str) -> u8 {
     let lower = text.to_lowercase();
 
     // "makes three attacks" / "makes two melee attacks"
-    let re = Regex::new(r"makes (\w+)").unwrap();
-    if let Some(cap) = re.captures(&lower) {
+    if let Some(cap) = regex!(r"makes (\w+)").captures(&lower) {
         if let Some(n) = word_to_number(&cap[1]) {
             return n;
         }
@@ -262,8 +263,7 @@ fn parse_multiattack_count(text: &str) -> u8 {
 
     // Fallback: count "and" conjunctions for "one bite and two claws" pattern
     // "one with its bite and two with its claws" = 3 total
-    let count_re = Regex::new(r"(\w+) (?:with its |melee |ranged )?(?:attack|bite|claw|tail|fist|slam)").unwrap();
-    let total: u8 = count_re.captures_iter(&lower)
+    let total: u8 = regex!(r"(\w+) (?:with its |melee |ranged )?(?:attack|bite|claw|tail|fist|slam)").captures_iter(&lower)
         .filter_map(|c| word_to_number(&c[1]))
         .sum();
     if total > 0 {
@@ -275,19 +275,16 @@ fn parse_multiattack_count(text: &str) -> u8 {
 
 /// Parse a non-attack ability, extracting damage dice and save DC if present.
 fn parse_ability(name: &str, desc: &str) -> ParsedAbility {
-    let dmg_re = Regex::new(r"(\d+) \((\d+d\d+(?:\s*[+-]\s*\d+)?)\) (\w+) damage").unwrap();
-    let (damage_avg, damage_dice, damage_type) = if let Some(cap) = dmg_re.captures(desc) {
+    let (damage_avg, damage_dice, damage_type) = if let Some(cap) = regex!(r"(\d+) \((\d+d\d+(?:\s*[+-]\s*\d+)?)\) (\w+) damage").captures(desc) {
         (cap[1].parse().unwrap_or(0.0), cap[2].to_string(), cap[3].to_lowercase())
     } else {
         (0.0, String::new(), String::new())
     };
 
-    let dc_re = Regex::new(r"DC (\d+)").unwrap();
-    let save_dc = dc_re.captures(desc).and_then(|c| c[1].parse().ok());
+    let save_dc = regex!(r"DC (\d+)").captures(desc).and_then(|c| c[1].parse().ok());
 
     // Try to find the save ability - look for "WIS save", "DEX save", or "DC 22 Dexterity"
-    let ability_re = Regex::new(r"(?i)(STR|DEX|CON|INT|WIS|CHA)\s+save|DC \d+\s+(Strength|Dexterity|Constitution|Intelligence|Wisdom|Charisma)").unwrap();
-    let save_ability = ability_re.captures(desc)
+    let save_ability = regex!(r"(?i)(STR|DEX|CON|INT|WIS|CHA)\s+save|DC \d+\s+(Strength|Dexterity|Constitution|Intelligence|Wisdom|Charisma)").captures(desc)
         .map(|c| c.get(1).or(c.get(2)).map(|m| m.as_str().to_uppercase()).unwrap_or_default())
         .unwrap_or_default();
 
@@ -305,8 +302,7 @@ fn parse_ability(name: &str, desc: &str) -> ParsedAbility {
 /// Shorten multiattack text by stripping the subject ("The lion makes" -> "Makes").
 fn summarize_multiattack(text: &str) -> String {
     // Strip leading "The <name> " to get the verb
-    let re = Regex::new(r"(?i)^the \w+ ").unwrap();
-    let shortened = re.replace(text, "");
+    let shortened = regex!(r"(?i)^the \w+ ").replace(text, "");
     // Capitalize first letter
     let mut chars = shortened.chars();
     match chars.next() {

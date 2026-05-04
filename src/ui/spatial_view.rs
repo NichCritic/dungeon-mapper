@@ -198,7 +198,7 @@ pub fn spatial_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Spatia
         draw_groups_spatial(&painter, &transform, layout, &dungeon.graph, state);
         draw_bounds(&painter, &transform, layout);
         draw_corridors(&painter, &transform, layout, &dungeon.graph, state);
-        draw_rooms(&painter, &transform, layout, &dungeon.graph, state);
+        draw_rooms(&painter, &transform, layout, &dungeon.graph, state, dungeon.theme.floor_color);
         draw_doors(&painter, &transform, layout, &dungeon.graph, state);
         draw_waypoint_handles(&painter, &transform, layout, state);
         draw_exit_handles(&painter, &transform, layout, &dungeon.graph, state);
@@ -484,6 +484,18 @@ fn handle_spatial_interactions(
             if let Some(layout) = &dungeon.layout {
                 let mut hit_corridor = None;
                 for (ci, corridor) in layout.corridors.iter().enumerate() {
+                    // Floor filtering: skip corridors not on the current floor
+                    if let Some(floor) = state.current_floor {
+                        if let Some(edge) = dungeon.graph.connections.iter().find(|e| e.connection.id == corridor.connection_id) {
+                            let src_visible = dungeon.graph.room_by_id(&edge.source_room_id)
+                                .is_some_and(|r| r.floor.visible_on(floor));
+                            let tgt_visible = dungeon.graph.room_by_id(&edge.target_room_id)
+                                .is_some_and(|r| r.floor.visible_on(floor));
+                            if !src_visible && !tgt_visible {
+                                continue;
+                            }
+                        }
+                    }
                     for pair in corridor.waypoints.windows(2) {
                         let a = egui::pos2(grid_to_world(pair[0].x), grid_to_world(pair[0].y));
                         let b = egui::pos2(grid_to_world(pair[1].x), grid_to_world(pair[1].y));
@@ -508,6 +520,14 @@ fn handle_spatial_interactions(
                     // Check room hit (with margin for narrow rooms)
                     let mut hit_room = false;
                     for rl in &layout.rooms {
+                        // Floor filtering: skip rooms not on the current floor
+                        if let Some(floor) = state.current_floor {
+                            if let Some(room) = dungeon.graph.room_by_id(&rl.room_id) {
+                                if !room.floor.visible_on(floor) {
+                                    continue;
+                                }
+                            }
+                        }
                         let margin = GRID_PX * 0.4;
                         let room_x1 = rl.x as f32 * GRID_PX - margin;
                         let room_y1 = rl.y as f32 * GRID_PX - margin;
@@ -1403,8 +1423,17 @@ fn draw_rooms(
     layout: &SpatialLayout,
     graph: &DungeonGraph,
     state: &SpatialViewState,
+    floor_color: [u8; 4],
 ) {
-    for rl in &layout.rooms {
+    // Sort rooms by floor so higher floors render on top of lower floors
+    let mut room_order: Vec<usize> = (0..layout.rooms.len()).collect();
+    room_order.sort_by_key(|&i| {
+        graph.room_by_id(&layout.rooms[i].room_id)
+            .map(|r| *r.floor.floors().iter().max().unwrap_or(&0))
+            .unwrap_or(0)
+    });
+    for ri in room_order {
+        let rl = &layout.rooms[ri];
         // Floor filtering: dim lower floors, hide higher floors
         let dim = if let Some(floor) = state.current_floor {
             if let Some(room) = graph.room_by_id(&rl.room_id) {
@@ -1560,6 +1589,9 @@ fn draw_rooms(
                     ElevationType::Hole => (90, 0.0),
                     ElevationType::Water => (0, 0.0), // handled separately
                 };
+                if section.opaque {
+                    painter.rect_filled(sec_rect, 0.0, egui::Color32::from_rgba_unmultiplied(floor_color[0], floor_color[1], floor_color[2], floor_color[3]));
+                }
                 let section_fill = if is_water {
                     egui::Color32::from_rgba_unmultiplied(80, 130, 200, 60)
                 } else {
@@ -2032,8 +2064,9 @@ pub fn spatial_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Spa
             }
         }
 
-        // List sections
+        // List sections (drag to reorder)
         let mut remove_section = None;
+        let mut reorder: Option<(usize, usize)> = None;
         {
             let section_info: Vec<(usize, String, ElevationType)> = dungeon.graph.room_by_id(&room_id)
                 .map(|r| r.sections.iter().enumerate()
@@ -2041,10 +2074,32 @@ pub fn spatial_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Spa
                     .collect())
                 .unwrap_or_default();
 
-            for (si, _id, elev) in &section_info {
+            for (si, id, elev) in &section_info {
                 let is_sel = state.selected_section.as_ref()
                     .is_some_and(|(rid, idx)| rid == &room_id && *idx == *si);
-                ui.horizontal(|ui| {
+                let row_id = egui::Id::new(("section_row", id));
+                let resp = ui.horizontal(|ui| {
+                    // Drag handle
+                    let handle = ui.label("≡");
+                    let drag_resp = ui.interact(handle.rect, row_id, egui::Sense::drag());
+                    if drag_resp.dragged() {
+                        // Show drag cursor
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                    }
+                    if drag_resp.drag_stopped() {
+                        // Find target index from pointer position
+                        if let Some(pos) = ui.ctx().pointer_latest_pos() {
+                            // Walk the section list to find which row the pointer is over
+                            // We use a simple heuristic: the row heights are uniform
+                            let row_top = handle.rect.top();
+                            let row_h = handle.rect.height() + ui.spacing().item_spacing.y;
+                            let delta_rows = ((pos.y - row_top) / row_h).round() as i32;
+                            let target = (*si as i32 + delta_rows).clamp(0, section_info.len() as i32 - 1) as usize;
+                            if target != *si {
+                                reorder = Some((*si, target));
+                            }
+                        }
+                    }
                     if ui.selectable_label(is_sel, elev.label()).clicked() {
                         state.selected_section = Some((room_id.clone(), *si));
                     }
@@ -2052,6 +2107,31 @@ pub fn spatial_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Spa
                         remove_section = Some(*si);
                     }
                 });
+                // Drop target indicator
+                if let Some((_from, _to)) = reorder {
+                    let _ = resp;
+                }
+            }
+        }
+
+        if let Some((from, to)) = reorder {
+            if let Some(room) = dungeon.graph.room_by_id_mut(&room_id) {
+                if from < room.sections.len() && to < room.sections.len() {
+                    let item = room.sections.remove(from);
+                    room.sections.insert(to, item);
+                    // Update selection to follow the moved item
+                    if let Some((ref rid, ref mut idx)) = state.selected_section {
+                        if rid == &room_id {
+                            if *idx == from {
+                                *idx = to;
+                            } else if from < to && *idx > from && *idx <= to {
+                                *idx -= 1;
+                            } else if from > to && *idx >= to && *idx < from {
+                                *idx += 1;
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -2101,6 +2181,7 @@ pub fn spatial_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Spa
                                 ui.label("ft");
                             });
                         }
+                        ui.checkbox(&mut section.opaque, "Opaque");
                     }
                 }
             }

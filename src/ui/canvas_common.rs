@@ -162,7 +162,12 @@ pub fn num_input_i32(ui: &mut egui::Ui, value: &mut i32, width: f32) -> bool {
     let response = ui.add(egui::TextEdit::singleline(&mut text).desired_width(width));
     select_all_on_focus(ui, &response, &text);
     if response.changed() {
-        if let Ok(v) = text.parse::<i32>() {
+        let trimmed = text.trim();
+        if trimmed.is_empty() || trimmed == "-" {
+            *value = 0;
+            return true;
+        }
+        if let Ok(v) = trimmed.parse::<i32>() {
             *value = v;
             return true;
         }

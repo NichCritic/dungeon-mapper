@@ -26,6 +26,32 @@ pub fn render_themed(
 
     render_background(renderer, layout, theme);
 
+    // Sort rooms by floor so higher floors render on top of lower floors
+    let mut room_order: Vec<usize> = (0..layout.rooms.len()).collect();
+    room_order.sort_by_key(|&i| {
+        graph.room_by_id(&layout.rooms[i].room_id)
+            .map(|r| *r.floor.floors().iter().max().unwrap_or(&0))
+            .unwrap_or(0)
+    });
+
+    // Sort corridors by floor (max floor of connected rooms)
+    let mut corridor_order: Vec<usize> = (0..layout.corridors.len()).collect();
+    corridor_order.sort_by_key(|&i| {
+        let conn_id = &layout.corridors[i].connection_id;
+        graph.connections.iter()
+            .find(|e| e.connection.id == *conn_id)
+            .map(|e| {
+                let sf = graph.room_by_id(&e.source_room_id)
+                    .map(|r| *r.floor.floors().iter().max().unwrap_or(&0))
+                    .unwrap_or(0);
+                let tf = graph.room_by_id(&e.target_room_id)
+                    .map(|r| *r.floor.floors().iter().max().unwrap_or(&0))
+                    .unwrap_or(0);
+                sf.max(tf)
+            })
+            .unwrap_or(0)
+    });
+
     // Collect baked marching squares contour segments from cave rooms (used by shading)
     let contour_segments: Vec<(f32, f32, f32, f32)> = graph.rooms.iter()
         .filter_map(|r| r.cave_data.as_ref())
@@ -33,28 +59,30 @@ pub fn render_themed(
         .collect();
     render_exterior_shading(renderer, layout, &floor, theme, &contour_segments);
 
-    for rl in &layout.rooms {
-        render_room_floor(renderer, rl, graph, theme);
+    for &ri in &room_order {
+        render_room_floor(renderer, &layout.rooms[ri], graph, theme);
     }
-    for corridor in &layout.corridors {
-        render_corridor_floor(renderer, corridor, theme);
+    for &ci in &corridor_order {
+        render_corridor_floor(renderer, &layout.corridors[ci], theme);
     }
     if theme.corridor_chamfer != ChamferStyle::Sharp {
-        for corridor in &layout.corridors {
-            render_corridor_chamfers(renderer, corridor, theme);
+        for &ci in &corridor_order {
+            render_corridor_chamfers(renderer, &layout.corridors[ci], theme);
         }
     }
     if options.show_grid {
         render_grid(renderer, &floor);
     }
     // Render room decor and elevation sections (after floors/grid, before walls)
-    for rl in &layout.rooms {
+    for &ri in &room_order {
+        let rl = &layout.rooms[ri];
         if options.show_decor {
             render_decor(renderer, rl, graph, theme);
         }
         render_elevation_sections(renderer, rl, graph, theme);
     }
-    for rl in &layout.rooms {
+    for &ri in &room_order {
+        let rl = &layout.rooms[ri];
         // Cave rooms use baked marching squares contour segments
         let room = graph.room_by_id(&rl.room_id);
         if let Some(cave) = room.and_then(|r| {
@@ -74,8 +102,8 @@ pub fn render_themed(
     repair_circle_junctions(renderer, graph, layout, theme);
     // Build set of cells inside cave rooms (so corridor walls don't double-draw there)
     let cave_cells = build_cave_cell_set(layout, graph);
-    for corridor in &layout.corridors {
-        render_corridor_walls(renderer, corridor, &floor, theme, &cave_cells);
+    for &ci in &corridor_order {
+        render_corridor_walls(renderer, &layout.corridors[ci], &floor, theme, &cave_cells);
     }
     render_doors(renderer, graph, layout, theme, options);
     if options.show_labels {
@@ -521,21 +549,22 @@ pub fn repair_circle_junctions(
     }
 }
 
-/// Rotate a point (px, py) around center (cx, cy) by angle in degrees.
-fn rot(px: f32, py: f32, cx: f32, cy: f32, deg: f32) -> (f32, f32) {
+/// Rotate and scale a point (px, py) around center (cx, cy).
+/// Applies non-uniform scale (sclx, scly) to offset before rotation.
+fn rot(px: f32, py: f32, cx: f32, cy: f32, deg: f32, sclx: f32, scly: f32) -> (f32, f32) {
     let rad = deg.to_radians();
     let cos = rad.cos();
     let sin = rad.sin();
-    let dx = px - cx;
-    let dy = py - cy;
+    let dx = (px - cx) * sclx;
+    let dy = (py - cy) * scly;
     (cx + dx * cos - dy * sin, cy + dx * sin + dy * cos)
 }
 
-/// Draw a rotated line via the rotate helper.
+/// Draw a rotated+scaled line via the rotate helper.
 fn rot_line(renderer: &mut dyn MapRenderer, x1: f32, y1: f32, x2: f32, y2: f32,
-            cx: f32, cy: f32, deg: f32, width: f32, color: [u8; 4]) {
-    let (rx1, ry1) = rot(x1, y1, cx, cy, deg);
-    let (rx2, ry2) = rot(x2, y2, cx, cy, deg);
+            cx: f32, cy: f32, deg: f32, sclx: f32, scly: f32, width: f32, color: [u8; 4]) {
+    let (rx1, ry1) = rot(x1, y1, cx, cy, deg, sclx, scly);
+    let (rx2, ry2) = rot(x2, y2, cx, cy, deg, sclx, scly);
     renderer.draw_line(rx1, ry1, rx2, ry2, width, color);
 }
 
@@ -559,7 +588,10 @@ pub fn render_decor(
     for decor in &room.decor {
         let cx = room_px_x + decor.x * GRID_PX;
         let cy = room_px_y + decor.y * GRID_PX;
-        let s = GRID_PX * 0.4 * decor.scale;
+        let s = GRID_PX * 0.4;
+        let sclx = decor.scale_x;
+        let scly = decor.scale_y;
+        let savg = (sclx + scly) / 2.0;
         let deg = decor.rotation;
 
         match decor.decor_type {
@@ -568,18 +600,18 @@ pub fn render_decor(
                 let hw = s;
                 let hh = s * 0.6;
                 // Tabletop outline
-                rot_line(renderer, cx - hw, cy - hh, cx + hw, cy - hh, cx, cy, deg, 1.5, color);
-                rot_line(renderer, cx + hw, cy - hh, cx + hw, cy + hh, cx, cy, deg, 1.5, color);
-                rot_line(renderer, cx + hw, cy + hh, cx - hw, cy + hh, cx, cy, deg, 1.5, color);
-                rot_line(renderer, cx - hw, cy + hh, cx - hw, cy - hh, cx, cy, deg, 1.5, color);
+                rot_line(renderer, cx - hw, cy - hh, cx + hw, cy - hh, cx, cy, deg, sclx, scly, 1.5, color);
+                rot_line(renderer, cx + hw, cy - hh, cx + hw, cy + hh, cx, cy, deg, sclx, scly, 1.5, color);
+                rot_line(renderer, cx + hw, cy + hh, cx - hw, cy + hh, cx, cy, deg, sclx, scly, 1.5, color);
+                rot_line(renderer, cx - hw, cy + hh, cx - hw, cy - hh, cx, cy, deg, sclx, scly, 1.5, color);
                 // Fill
                 let fill = [color[0], color[1], color[2], 40];
-                renderer.fill_rect(cx - hw, cy - hh, hw * 2.0, hh * 2.0, fill);
+                renderer.fill_rect(cx - hw * sclx, cy - hh * scly, hw * 2.0 * sclx, hh * 2.0 * scly, fill);
                 // Legs (circles at corners)
-                let leg_r = s * 0.1;
+                let leg_r = s * 0.1 * savg;
                 for &(lx, ly) in &[(-hw + leg_r, -hh + leg_r), (hw - leg_r, -hh + leg_r),
                                      (-hw + leg_r, hh - leg_r), (hw - leg_r, hh - leg_r)] {
-                    let (rx, ry) = rot(cx + lx, cy + ly, cx, cy, deg);
+                    let (rx, ry) = rot(cx + lx, cy + ly, cx, cy, deg, sclx, scly);
                     renderer.fill_circle(rx, ry, leg_r, color);
                 }
             }
@@ -587,76 +619,76 @@ pub fn render_decor(
                 // Chest with lid line and clasp
                 let cs = s * 0.6;
                 // Body outline
-                rot_line(renderer, cx - cs, cy - cs, cx + cs, cy - cs, cx, cy, deg, 1.5, color);
-                rot_line(renderer, cx + cs, cy - cs, cx + cs, cy + cs, cx, cy, deg, 1.5, color);
-                rot_line(renderer, cx + cs, cy + cs, cx - cs, cy + cs, cx, cy, deg, 1.5, color);
-                rot_line(renderer, cx - cs, cy + cs, cx - cs, cy - cs, cx, cy, deg, 1.5, color);
+                rot_line(renderer, cx - cs, cy - cs, cx + cs, cy - cs, cx, cy, deg, sclx, scly, 1.5, color);
+                rot_line(renderer, cx + cs, cy - cs, cx + cs, cy + cs, cx, cy, deg, sclx, scly, 1.5, color);
+                rot_line(renderer, cx + cs, cy + cs, cx - cs, cy + cs, cx, cy, deg, sclx, scly, 1.5, color);
+                rot_line(renderer, cx - cs, cy + cs, cx - cs, cy - cs, cx, cy, deg, sclx, scly, 1.5, color);
                 // Lid line
-                rot_line(renderer, cx - cs, cy - cs * 0.2, cx + cs, cy - cs * 0.2, cx, cy, deg, 1.0, color);
+                rot_line(renderer, cx - cs, cy - cs * 0.2, cx + cs, cy - cs * 0.2, cx, cy, deg, sclx, scly, 1.0, color);
                 // Clasp
-                let (clx, cly) = rot(cx, cy + cs, cx, cy, deg);
-                renderer.fill_circle(clx, cly, s * 0.1, color);
+                let (clx, cly) = rot(cx, cy + cs, cx, cy, deg, sclx, scly);
+                renderer.fill_circle(clx, cly, s * 0.1 * savg, color);
             }
             DecorType::Pillar => {
                 // Pillar with ring detail
-                renderer.fill_circle(cx, cy, s * 0.5, color);
-                renderer.stroke_circle(cx, cy, s * 0.5, 1.0, light);
-                renderer.stroke_circle(cx, cy, s * 0.35, 0.5, light);
+                renderer.fill_circle(cx, cy, s * 0.5 * savg, color);
+                renderer.stroke_circle(cx, cy, s * 0.5 * savg, 1.0, light);
+                renderer.stroke_circle(cx, cy, s * 0.35 * savg, 0.5, light);
             }
             DecorType::StairsUp => {
                 // Stair treads with arrow up
                 let steps = 5;
-                rot_line(renderer, cx - s, cy - s, cx + s, cy - s, cx, cy, deg, 1.5, color);
-                rot_line(renderer, cx + s, cy - s, cx + s, cy + s, cx, cy, deg, 1.5, color);
-                rot_line(renderer, cx + s, cy + s, cx - s, cy + s, cx, cy, deg, 1.5, color);
-                rot_line(renderer, cx - s, cy + s, cx - s, cy - s, cx, cy, deg, 1.5, color);
+                rot_line(renderer, cx - s, cy - s, cx + s, cy - s, cx, cy, deg, sclx, scly, 1.5, color);
+                rot_line(renderer, cx + s, cy - s, cx + s, cy + s, cx, cy, deg, sclx, scly, 1.5, color);
+                rot_line(renderer, cx + s, cy + s, cx - s, cy + s, cx, cy, deg, sclx, scly, 1.5, color);
+                rot_line(renderer, cx - s, cy + s, cx - s, cy - s, cx, cy, deg, sclx, scly, 1.5, color);
                 for i in 1..steps {
                     let y = cy - s + (i as f32 / steps as f32) * s * 2.0;
-                    rot_line(renderer, cx - s, y, cx + s, y, cx, cy, deg, 0.8, color);
+                    rot_line(renderer, cx - s, y, cx + s, y, cx, cy, deg, sclx, scly, 0.8, color);
                 }
                 // Arrow up
-                rot_line(renderer, cx, cy - s * 0.9, cx - s * 0.3, cy - s * 0.5, cx, cy, deg, 1.5, color);
-                rot_line(renderer, cx, cy - s * 0.9, cx + s * 0.3, cy - s * 0.5, cx, cy, deg, 1.5, color);
+                rot_line(renderer, cx, cy - s * 0.9, cx - s * 0.3, cy - s * 0.5, cx, cy, deg, sclx, scly, 1.5, color);
+                rot_line(renderer, cx, cy - s * 0.9, cx + s * 0.3, cy - s * 0.5, cx, cy, deg, sclx, scly, 1.5, color);
             }
             DecorType::StairsDown => {
                 // Same treads, arrow down
                 let steps = 5;
-                rot_line(renderer, cx - s, cy - s, cx + s, cy - s, cx, cy, deg, 1.5, color);
-                rot_line(renderer, cx + s, cy - s, cx + s, cy + s, cx, cy, deg, 1.5, color);
-                rot_line(renderer, cx + s, cy + s, cx - s, cy + s, cx, cy, deg, 1.5, color);
-                rot_line(renderer, cx - s, cy + s, cx - s, cy - s, cx, cy, deg, 1.5, color);
+                rot_line(renderer, cx - s, cy - s, cx + s, cy - s, cx, cy, deg, sclx, scly, 1.5, color);
+                rot_line(renderer, cx + s, cy - s, cx + s, cy + s, cx, cy, deg, sclx, scly, 1.5, color);
+                rot_line(renderer, cx + s, cy + s, cx - s, cy + s, cx, cy, deg, sclx, scly, 1.5, color);
+                rot_line(renderer, cx - s, cy + s, cx - s, cy - s, cx, cy, deg, sclx, scly, 1.5, color);
                 for i in 1..steps {
                     let y = cy - s + (i as f32 / steps as f32) * s * 2.0;
-                    rot_line(renderer, cx - s, y, cx + s, y, cx, cy, deg, 0.8, color);
+                    rot_line(renderer, cx - s, y, cx + s, y, cx, cy, deg, sclx, scly, 0.8, color);
                 }
-                rot_line(renderer, cx, cy + s * 0.9, cx - s * 0.3, cy + s * 0.5, cx, cy, deg, 1.5, color);
-                rot_line(renderer, cx, cy + s * 0.9, cx + s * 0.3, cy + s * 0.5, cx, cy, deg, 1.5, color);
+                rot_line(renderer, cx, cy + s * 0.9, cx - s * 0.3, cy + s * 0.5, cx, cy, deg, sclx, scly, 1.5, color);
+                rot_line(renderer, cx, cy + s * 0.9, cx + s * 0.3, cy + s * 0.5, cx, cy, deg, sclx, scly, 1.5, color);
             }
             DecorType::Altar => {
                 // Cross on a platform base
                 let t = s * 0.2;
                 // Platform base
-                rot_line(renderer, cx - s * 0.8, cy + s * 0.6, cx + s * 0.8, cy + s * 0.6, cx, cy, deg, 1.5, color);
-                rot_line(renderer, cx - s * 0.8, cy + s * 0.8, cx + s * 0.8, cy + s * 0.8, cx, cy, deg, 1.5, color);
-                rot_line(renderer, cx - s * 0.8, cy + s * 0.6, cx - s * 0.8, cy + s * 0.8, cx, cy, deg, 1.5, color);
-                rot_line(renderer, cx + s * 0.8, cy + s * 0.6, cx + s * 0.8, cy + s * 0.8, cx, cy, deg, 1.5, color);
+                rot_line(renderer, cx - s * 0.8, cy + s * 0.6, cx + s * 0.8, cy + s * 0.6, cx, cy, deg, sclx, scly, 1.5, color);
+                rot_line(renderer, cx - s * 0.8, cy + s * 0.8, cx + s * 0.8, cy + s * 0.8, cx, cy, deg, sclx, scly, 1.5, color);
+                rot_line(renderer, cx - s * 0.8, cy + s * 0.6, cx - s * 0.8, cy + s * 0.8, cx, cy, deg, sclx, scly, 1.5, color);
+                rot_line(renderer, cx + s * 0.8, cy + s * 0.6, cx + s * 0.8, cy + s * 0.8, cx, cy, deg, sclx, scly, 1.5, color);
                 // Cross vertical
-                rot_line(renderer, cx - t, cy - s, cx + t, cy - s, cx, cy, deg, 1.0, color);
-                rot_line(renderer, cx + t, cy - s, cx + t, cy + s * 0.5, cx, cy, deg, 1.0, color);
-                rot_line(renderer, cx + t, cy + s * 0.5, cx - t, cy + s * 0.5, cx, cy, deg, 1.0, color);
-                rot_line(renderer, cx - t, cy + s * 0.5, cx - t, cy - s, cx, cy, deg, 1.0, color);
+                rot_line(renderer, cx - t, cy - s, cx + t, cy - s, cx, cy, deg, sclx, scly, 1.0, color);
+                rot_line(renderer, cx + t, cy - s, cx + t, cy + s * 0.5, cx, cy, deg, sclx, scly, 1.0, color);
+                rot_line(renderer, cx + t, cy + s * 0.5, cx - t, cy + s * 0.5, cx, cy, deg, sclx, scly, 1.0, color);
+                rot_line(renderer, cx - t, cy + s * 0.5, cx - t, cy - s, cx, cy, deg, sclx, scly, 1.0, color);
                 // Cross horizontal
-                rot_line(renderer, cx - s * 0.6, cy - t * 1.5, cx + s * 0.6, cy - t * 1.5, cx, cy, deg, 1.0, color);
-                rot_line(renderer, cx - s * 0.6, cy + t * 0.5, cx + s * 0.6, cy + t * 0.5, cx, cy, deg, 1.0, color);
-                rot_line(renderer, cx - s * 0.6, cy - t * 1.5, cx - s * 0.6, cy + t * 0.5, cx, cy, deg, 1.0, color);
-                rot_line(renderer, cx + s * 0.6, cy - t * 1.5, cx + s * 0.6, cy + t * 0.5, cx, cy, deg, 1.0, color);
+                rot_line(renderer, cx - s * 0.6, cy - t * 1.5, cx + s * 0.6, cy - t * 1.5, cx, cy, deg, sclx, scly, 1.0, color);
+                rot_line(renderer, cx - s * 0.6, cy + t * 0.5, cx + s * 0.6, cy + t * 0.5, cx, cy, deg, sclx, scly, 1.0, color);
+                rot_line(renderer, cx - s * 0.6, cy - t * 1.5, cx - s * 0.6, cy + t * 0.5, cx, cy, deg, sclx, scly, 1.0, color);
+                rot_line(renderer, cx + s * 0.6, cy - t * 1.5, cx + s * 0.6, cy + t * 0.5, cx, cy, deg, sclx, scly, 1.0, color);
             }
             DecorType::Fountain => {
                 // Three concentric circles with water lines
-                renderer.stroke_circle(cx, cy, s * 0.85, 1.5, color);
-                renderer.stroke_circle(cx, cy, s * 0.55, 1.0, color);
-                renderer.stroke_circle(cx, cy, s * 0.25, 1.0, color);
-                renderer.fill_circle(cx, cy, s * 0.1, color);
+                renderer.stroke_circle(cx, cy, s * 0.85 * savg, 1.5, color);
+                renderer.stroke_circle(cx, cy, s * 0.55 * savg, 1.0, color);
+                renderer.stroke_circle(cx, cy, s * 0.25 * savg, 1.0, color);
+                renderer.fill_circle(cx, cy, s * 0.1 * savg, color);
                 // Water ripple arcs (small lines)
                 for angle_deg in [45.0f32, 135.0, 225.0, 315.0] {
                     let rad = angle_deg.to_radians();
@@ -666,17 +698,17 @@ pub fn render_decor(
                     let py = cy + r * rad.sin();
                     let perp_x = -rad.sin() * len;
                     let perp_y = rad.cos() * len;
-                    renderer.draw_line(px - perp_x, py - perp_y, px + perp_x, py + perp_y, 0.5, color);
+                    rot_line(renderer, px - perp_x, py - perp_y, px + perp_x, py + perp_y, cx, cy, deg, sclx, scly, 0.5, color);
                 }
             }
             DecorType::Trap => {
                 // Triangle warning with X
-                rot_line(renderer, cx, cy - s * 0.7, cx + s * 0.7, cy + s * 0.5, cx, cy, deg, 1.5, color);
-                rot_line(renderer, cx + s * 0.7, cy + s * 0.5, cx - s * 0.7, cy + s * 0.5, cx, cy, deg, 1.5, color);
-                rot_line(renderer, cx - s * 0.7, cy + s * 0.5, cx, cy - s * 0.7, cx, cy, deg, 1.5, color);
+                rot_line(renderer, cx, cy - s * 0.7, cx + s * 0.7, cy + s * 0.5, cx, cy, deg, sclx, scly, 1.5, color);
+                rot_line(renderer, cx + s * 0.7, cy + s * 0.5, cx - s * 0.7, cy + s * 0.5, cx, cy, deg, sclx, scly, 1.5, color);
+                rot_line(renderer, cx - s * 0.7, cy + s * 0.5, cx, cy - s * 0.7, cx, cy, deg, sclx, scly, 1.5, color);
                 // X in center
-                rot_line(renderer, cx - s * 0.25, cy - s * 0.1, cx + s * 0.25, cy + s * 0.35, cx, cy, deg, 1.0, color);
-                rot_line(renderer, cx + s * 0.25, cy - s * 0.1, cx - s * 0.25, cy + s * 0.35, cx, cy, deg, 1.0, color);
+                rot_line(renderer, cx - s * 0.25, cy - s * 0.1, cx + s * 0.25, cy + s * 0.35, cx, cy, deg, sclx, scly, 1.0, color);
+                rot_line(renderer, cx + s * 0.25, cy - s * 0.1, cx - s * 0.25, cy + s * 0.35, cx, cy, deg, sclx, scly, 1.0, color);
             }
             DecorType::Rubble => {
                 let rocks: [(f32, f32, f32); 7] = [
@@ -685,151 +717,151 @@ pub fn render_decor(
                     (0.2, 0.15, 0.11),
                 ];
                 for &(dx, dy, r) in &rocks {
-                    let (rx, ry) = rot(cx + dx * s, cy + dy * s, cx, cy, deg);
-                    renderer.fill_circle(rx, ry, r * s, color);
-                    renderer.stroke_circle(rx, ry, r * s, 0.5, light);
+                    let (rx, ry) = rot(cx + dx * s, cy + dy * s, cx, cy, deg, sclx, scly);
+                    renderer.fill_circle(rx, ry, r * s * savg, color);
+                    renderer.stroke_circle(rx, ry, r * s * savg, 0.5, light);
                 }
             }
             DecorType::Chair => {
                 // Small square seat with back
                 let cs = s * 0.4;
-                rot_line(renderer, cx - cs, cy - cs, cx + cs, cy - cs, cx, cy, deg, 1.0, color);
-                rot_line(renderer, cx + cs, cy - cs, cx + cs, cy + cs, cx, cy, deg, 1.0, color);
-                rot_line(renderer, cx + cs, cy + cs, cx - cs, cy + cs, cx, cy, deg, 1.0, color);
-                rot_line(renderer, cx - cs, cy + cs, cx - cs, cy - cs, cx, cy, deg, 1.0, color);
+                rot_line(renderer, cx - cs, cy - cs, cx + cs, cy - cs, cx, cy, deg, sclx, scly, 1.0, color);
+                rot_line(renderer, cx + cs, cy - cs, cx + cs, cy + cs, cx, cy, deg, sclx, scly, 1.0, color);
+                rot_line(renderer, cx + cs, cy + cs, cx - cs, cy + cs, cx, cy, deg, sclx, scly, 1.0, color);
+                rot_line(renderer, cx - cs, cy + cs, cx - cs, cy - cs, cx, cy, deg, sclx, scly, 1.0, color);
                 // Back rest (thicker line on one side)
-                rot_line(renderer, cx - cs, cy - cs, cx + cs, cy - cs, cx, cy, deg, 2.5, color);
+                rot_line(renderer, cx - cs, cy - cs, cx + cs, cy - cs, cx, cy, deg, sclx, scly, 2.5, color);
             }
             DecorType::Bench => {
                 // Long narrow rectangle
                 let hw = s * 0.9;
                 let hh = s * 0.25;
-                rot_line(renderer, cx - hw, cy - hh, cx + hw, cy - hh, cx, cy, deg, 1.5, color);
-                rot_line(renderer, cx + hw, cy - hh, cx + hw, cy + hh, cx, cy, deg, 1.5, color);
-                rot_line(renderer, cx + hw, cy + hh, cx - hw, cy + hh, cx, cy, deg, 1.5, color);
-                rot_line(renderer, cx - hw, cy + hh, cx - hw, cy - hh, cx, cy, deg, 1.5, color);
+                rot_line(renderer, cx - hw, cy - hh, cx + hw, cy - hh, cx, cy, deg, sclx, scly, 1.5, color);
+                rot_line(renderer, cx + hw, cy - hh, cx + hw, cy + hh, cx, cy, deg, sclx, scly, 1.5, color);
+                rot_line(renderer, cx + hw, cy + hh, cx - hw, cy + hh, cx, cy, deg, sclx, scly, 1.5, color);
+                rot_line(renderer, cx - hw, cy + hh, cx - hw, cy - hh, cx, cy, deg, sclx, scly, 1.5, color);
             }
             DecorType::Barrel => {
                 // Circle with horizontal bands
-                let (rx, ry) = rot(cx, cy, cx, cy, deg);
-                renderer.stroke_circle(rx, ry, s * 0.55, 1.5, color);
-                rot_line(renderer, cx - s * 0.5, cy - s * 0.15, cx + s * 0.5, cy - s * 0.15, cx, cy, deg, 0.8, color);
-                rot_line(renderer, cx - s * 0.5, cy + s * 0.15, cx + s * 0.5, cy + s * 0.15, cx, cy, deg, 0.8, color);
+                let (rx, ry) = rot(cx, cy, cx, cy, deg, sclx, scly);
+                renderer.stroke_circle(rx, ry, s * 0.55 * savg, 1.5, color);
+                rot_line(renderer, cx - s * 0.5, cy - s * 0.15, cx + s * 0.5, cy - s * 0.15, cx, cy, deg, sclx, scly, 0.8, color);
+                rot_line(renderer, cx - s * 0.5, cy + s * 0.15, cx + s * 0.5, cy + s * 0.15, cx, cy, deg, sclx, scly, 0.8, color);
             }
             DecorType::Crate => {
                 // Square with X
                 let cs = s * 0.55;
-                rot_line(renderer, cx - cs, cy - cs, cx + cs, cy - cs, cx, cy, deg, 1.5, color);
-                rot_line(renderer, cx + cs, cy - cs, cx + cs, cy + cs, cx, cy, deg, 1.5, color);
-                rot_line(renderer, cx + cs, cy + cs, cx - cs, cy + cs, cx, cy, deg, 1.5, color);
-                rot_line(renderer, cx - cs, cy + cs, cx - cs, cy - cs, cx, cy, deg, 1.5, color);
-                rot_line(renderer, cx - cs, cy - cs, cx + cs, cy + cs, cx, cy, deg, 0.8, color);
-                rot_line(renderer, cx + cs, cy - cs, cx - cs, cy + cs, cx, cy, deg, 0.8, color);
+                rot_line(renderer, cx - cs, cy - cs, cx + cs, cy - cs, cx, cy, deg, sclx, scly, 1.5, color);
+                rot_line(renderer, cx + cs, cy - cs, cx + cs, cy + cs, cx, cy, deg, sclx, scly, 1.5, color);
+                rot_line(renderer, cx + cs, cy + cs, cx - cs, cy + cs, cx, cy, deg, sclx, scly, 1.5, color);
+                rot_line(renderer, cx - cs, cy + cs, cx - cs, cy - cs, cx, cy, deg, sclx, scly, 1.5, color);
+                rot_line(renderer, cx - cs, cy - cs, cx + cs, cy + cs, cx, cy, deg, sclx, scly, 0.8, color);
+                rot_line(renderer, cx + cs, cy - cs, cx - cs, cy + cs, cx, cy, deg, sclx, scly, 0.8, color);
             }
             DecorType::Ladder => {
                 // Two vertical rails with rungs
                 let hw = s * 0.3;
-                rot_line(renderer, cx - hw, cy - s, cx - hw, cy + s, cx, cy, deg, 1.5, color);
-                rot_line(renderer, cx + hw, cy - s, cx + hw, cy + s, cx, cy, deg, 1.5, color);
+                rot_line(renderer, cx - hw, cy - s, cx - hw, cy + s, cx, cy, deg, sclx, scly, 1.5, color);
+                rot_line(renderer, cx + hw, cy - s, cx + hw, cy + s, cx, cy, deg, sclx, scly, 1.5, color);
                 for i in 0..5 {
                     let y = cy - s + (i as f32 + 0.5) * s * 2.0 / 5.0;
-                    rot_line(renderer, cx - hw, y, cx + hw, y, cx, cy, deg, 1.0, color);
+                    rot_line(renderer, cx - hw, y, cx + hw, y, cx, cy, deg, sclx, scly, 1.0, color);
                 }
             }
             DecorType::Well => {
                 // Circle with cross inside
-                renderer.stroke_circle(cx, cy, s * 0.7, 1.5, color);
-                renderer.stroke_circle(cx, cy, s * 0.5, 1.0, color);
-                rot_line(renderer, cx - s * 0.7, cy, cx + s * 0.7, cy, cx, cy, deg, 0.8, color);
-                rot_line(renderer, cx, cy - s * 0.7, cx, cy + s * 0.7, cx, cy, deg, 0.8, color);
+                renderer.stroke_circle(cx, cy, s * 0.7 * savg, 1.5, color);
+                renderer.stroke_circle(cx, cy, s * 0.5 * savg, 1.0, color);
+                rot_line(renderer, cx - s * 0.7, cy, cx + s * 0.7, cy, cx, cy, deg, sclx, scly, 0.8, color);
+                rot_line(renderer, cx, cy - s * 0.7, cx, cy + s * 0.7, cx, cy, deg, sclx, scly, 0.8, color);
             }
             DecorType::Brazier => {
                 // Bowl on stand with flames
-                renderer.stroke_circle(cx, cy, s * 0.4, 1.5, color);
-                renderer.fill_circle(cx, cy, s * 0.25, color);
+                renderer.stroke_circle(cx, cy, s * 0.4 * savg, 1.5, color);
+                renderer.fill_circle(cx, cy, s * 0.25 * savg, color);
                 // Stand legs
-                rot_line(renderer, cx - s * 0.3, cy + s * 0.3, cx - s * 0.5, cy + s * 0.7, cx, cy, deg, 1.0, color);
-                rot_line(renderer, cx + s * 0.3, cy + s * 0.3, cx + s * 0.5, cy + s * 0.7, cx, cy, deg, 1.0, color);
-                rot_line(renderer, cx, cy + s * 0.4, cx, cy + s * 0.7, cx, cy, deg, 1.0, color);
+                rot_line(renderer, cx - s * 0.3, cy + s * 0.3, cx - s * 0.5, cy + s * 0.7, cx, cy, deg, sclx, scly, 1.0, color);
+                rot_line(renderer, cx + s * 0.3, cy + s * 0.3, cx + s * 0.5, cy + s * 0.7, cx, cy, deg, sclx, scly, 1.0, color);
+                rot_line(renderer, cx, cy + s * 0.4, cx, cy + s * 0.7, cx, cy, deg, sclx, scly, 1.0, color);
             }
             DecorType::Fireplace => {
                 // U-shape opening
-                rot_line(renderer, cx - s * 0.7, cy - s * 0.6, cx - s * 0.7, cy + s * 0.6, cx, cy, deg, 2.0, color);
-                rot_line(renderer, cx + s * 0.7, cy - s * 0.6, cx + s * 0.7, cy + s * 0.6, cx, cy, deg, 2.0, color);
-                rot_line(renderer, cx - s * 0.7, cy + s * 0.6, cx + s * 0.7, cy + s * 0.6, cx, cy, deg, 2.0, color);
+                rot_line(renderer, cx - s * 0.7, cy - s * 0.6, cx - s * 0.7, cy + s * 0.6, cx, cy, deg, sclx, scly, 2.0, color);
+                rot_line(renderer, cx + s * 0.7, cy - s * 0.6, cx + s * 0.7, cy + s * 0.6, cx, cy, deg, sclx, scly, 2.0, color);
+                rot_line(renderer, cx - s * 0.7, cy + s * 0.6, cx + s * 0.7, cy + s * 0.6, cx, cy, deg, sclx, scly, 2.0, color);
                 // Flame
-                rot_line(renderer, cx, cy + s * 0.3, cx - s * 0.15, cy - s * 0.2, cx, cy, deg, 1.0, color);
-                rot_line(renderer, cx, cy + s * 0.3, cx + s * 0.15, cy - s * 0.2, cx, cy, deg, 1.0, color);
+                rot_line(renderer, cx, cy + s * 0.3, cx - s * 0.15, cy - s * 0.2, cx, cy, deg, sclx, scly, 1.0, color);
+                rot_line(renderer, cx, cy + s * 0.3, cx + s * 0.15, cy - s * 0.2, cx, cy, deg, sclx, scly, 1.0, color);
             }
             DecorType::Statue => {
                 // Circle on a square base
-                let (rx, ry) = rot(cx, cy - s * 0.15, cx, cy, deg);
-                renderer.fill_circle(rx, ry, s * 0.4, color);
+                let (rx, ry) = rot(cx, cy - s * 0.15, cx, cy, deg, sclx, scly);
+                renderer.fill_circle(rx, ry, s * 0.4 * savg, color);
                 let bs = s * 0.5;
-                rot_line(renderer, cx - bs, cy + s * 0.3, cx + bs, cy + s * 0.3, cx, cy, deg, 1.5, color);
-                rot_line(renderer, cx + bs, cy + s * 0.3, cx + bs, cy + s * 0.7, cx, cy, deg, 1.5, color);
-                rot_line(renderer, cx + bs, cy + s * 0.7, cx - bs, cy + s * 0.7, cx, cy, deg, 1.5, color);
-                rot_line(renderer, cx - bs, cy + s * 0.7, cx - bs, cy + s * 0.3, cx, cy, deg, 1.5, color);
+                rot_line(renderer, cx - bs, cy + s * 0.3, cx + bs, cy + s * 0.3, cx, cy, deg, sclx, scly, 1.5, color);
+                rot_line(renderer, cx + bs, cy + s * 0.3, cx + bs, cy + s * 0.7, cx, cy, deg, sclx, scly, 1.5, color);
+                rot_line(renderer, cx + bs, cy + s * 0.7, cx - bs, cy + s * 0.7, cx, cy, deg, sclx, scly, 1.5, color);
+                rot_line(renderer, cx - bs, cy + s * 0.7, cx - bs, cy + s * 0.3, cx, cy, deg, sclx, scly, 1.5, color);
             }
             DecorType::Throne => {
                 // Chair with high back and armrests
                 let cs = s * 0.5;
-                rot_line(renderer, cx - cs, cy - cs, cx + cs, cy - cs, cx, cy, deg, 1.0, color);
-                rot_line(renderer, cx + cs, cy - cs, cx + cs, cy + cs, cx, cy, deg, 1.0, color);
-                rot_line(renderer, cx + cs, cy + cs, cx - cs, cy + cs, cx, cy, deg, 1.0, color);
-                rot_line(renderer, cx - cs, cy + cs, cx - cs, cy - cs, cx, cy, deg, 1.0, color);
+                rot_line(renderer, cx - cs, cy - cs, cx + cs, cy - cs, cx, cy, deg, sclx, scly, 1.0, color);
+                rot_line(renderer, cx + cs, cy - cs, cx + cs, cy + cs, cx, cy, deg, sclx, scly, 1.0, color);
+                rot_line(renderer, cx + cs, cy + cs, cx - cs, cy + cs, cx, cy, deg, sclx, scly, 1.0, color);
+                rot_line(renderer, cx - cs, cy + cs, cx - cs, cy - cs, cx, cy, deg, sclx, scly, 1.0, color);
                 // High back
-                rot_line(renderer, cx - cs, cy - cs, cx - cs, cy - s * 0.9, cx, cy, deg, 2.0, color);
-                rot_line(renderer, cx + cs, cy - cs, cx + cs, cy - s * 0.9, cx, cy, deg, 2.0, color);
-                rot_line(renderer, cx - cs, cy - s * 0.9, cx + cs, cy - s * 0.9, cx, cy, deg, 2.0, color);
+                rot_line(renderer, cx - cs, cy - cs, cx - cs, cy - s * 0.9, cx, cy, deg, sclx, scly, 2.0, color);
+                rot_line(renderer, cx + cs, cy - cs, cx + cs, cy - s * 0.9, cx, cy, deg, sclx, scly, 2.0, color);
+                rot_line(renderer, cx - cs, cy - s * 0.9, cx + cs, cy - s * 0.9, cx, cy, deg, sclx, scly, 2.0, color);
                 // Armrests
-                rot_line(renderer, cx - cs, cy, cx - s * 0.8, cy, cx, cy, deg, 1.5, color);
-                rot_line(renderer, cx + cs, cy, cx + s * 0.8, cy, cx, cy, deg, 1.5, color);
+                rot_line(renderer, cx - cs, cy, cx - s * 0.8, cy, cx, cy, deg, sclx, scly, 1.5, color);
+                rot_line(renderer, cx + cs, cy, cx + s * 0.8, cy, cx, cy, deg, sclx, scly, 1.5, color);
             }
             DecorType::Bed => {
                 // Rectangle with headboard
                 let hw = s * 0.6;
                 let hh = s * 0.9;
-                rot_line(renderer, cx - hw, cy - hh, cx + hw, cy - hh, cx, cy, deg, 1.0, color);
-                rot_line(renderer, cx + hw, cy - hh, cx + hw, cy + hh, cx, cy, deg, 1.0, color);
-                rot_line(renderer, cx + hw, cy + hh, cx - hw, cy + hh, cx, cy, deg, 1.0, color);
-                rot_line(renderer, cx - hw, cy + hh, cx - hw, cy - hh, cx, cy, deg, 1.0, color);
+                rot_line(renderer, cx - hw, cy - hh, cx + hw, cy - hh, cx, cy, deg, sclx, scly, 1.0, color);
+                rot_line(renderer, cx + hw, cy - hh, cx + hw, cy + hh, cx, cy, deg, sclx, scly, 1.0, color);
+                rot_line(renderer, cx + hw, cy + hh, cx - hw, cy + hh, cx, cy, deg, sclx, scly, 1.0, color);
+                rot_line(renderer, cx - hw, cy + hh, cx - hw, cy - hh, cx, cy, deg, sclx, scly, 1.0, color);
                 // Headboard
-                rot_line(renderer, cx - hw, cy - hh, cx + hw, cy - hh, cx, cy, deg, 3.0, color);
+                rot_line(renderer, cx - hw, cy - hh, cx + hw, cy - hh, cx, cy, deg, sclx, scly, 3.0, color);
                 // Pillow
-                rot_line(renderer, cx - hw * 0.6, cy - hh + s * 0.3, cx + hw * 0.6, cy - hh + s * 0.3, cx, cy, deg, 0.8, color);
+                rot_line(renderer, cx - hw * 0.6, cy - hh + s * 0.3, cx + hw * 0.6, cy - hh + s * 0.3, cx, cy, deg, sclx, scly, 0.8, color);
             }
             DecorType::Bookshelf => {
                 // Rectangle with horizontal shelf lines
                 let hw = s * 0.8;
                 let hh = s * 0.4;
-                rot_line(renderer, cx - hw, cy - hh, cx + hw, cy - hh, cx, cy, deg, 1.5, color);
-                rot_line(renderer, cx + hw, cy - hh, cx + hw, cy + hh, cx, cy, deg, 1.5, color);
-                rot_line(renderer, cx + hw, cy + hh, cx - hw, cy + hh, cx, cy, deg, 1.5, color);
-                rot_line(renderer, cx - hw, cy + hh, cx - hw, cy - hh, cx, cy, deg, 1.5, color);
+                rot_line(renderer, cx - hw, cy - hh, cx + hw, cy - hh, cx, cy, deg, sclx, scly, 1.5, color);
+                rot_line(renderer, cx + hw, cy - hh, cx + hw, cy + hh, cx, cy, deg, sclx, scly, 1.5, color);
+                rot_line(renderer, cx + hw, cy + hh, cx - hw, cy + hh, cx, cy, deg, sclx, scly, 1.5, color);
+                rot_line(renderer, cx - hw, cy + hh, cx - hw, cy - hh, cx, cy, deg, sclx, scly, 1.5, color);
                 // Shelves
                 for i in 1..3 {
                     let y = cy - hh + (i as f32 / 3.0) * hh * 2.0;
-                    rot_line(renderer, cx - hw, y, cx + hw, y, cx, cy, deg, 0.8, color);
+                    rot_line(renderer, cx - hw, y, cx + hw, y, cx, cy, deg, sclx, scly, 0.8, color);
                 }
                 // Vertical dividers
                 for i in 1..4 {
                     let x = cx - hw + (i as f32 / 4.0) * hw * 2.0;
-                    rot_line(renderer, x, cy - hh, x, cy + hh, cx, cy, deg, 0.5, color);
+                    rot_line(renderer, x, cy - hh, x, cy + hh, cx, cy, deg, sclx, scly, 0.5, color);
                 }
             }
             DecorType::Bones => {
                 // Crossed bones
-                rot_line(renderer, cx - s * 0.6, cy - s * 0.4, cx + s * 0.6, cy + s * 0.4, cx, cy, deg, 1.5, color);
-                rot_line(renderer, cx + s * 0.6, cy - s * 0.4, cx - s * 0.6, cy + s * 0.4, cx, cy, deg, 1.5, color);
+                rot_line(renderer, cx - s * 0.6, cy - s * 0.4, cx + s * 0.6, cy + s * 0.4, cx, cy, deg, sclx, scly, 1.5, color);
+                rot_line(renderer, cx + s * 0.6, cy - s * 0.4, cx - s * 0.6, cy + s * 0.4, cx, cy, deg, sclx, scly, 1.5, color);
                 // Bone ends
                 for &(bx, by) in &[(-0.6, -0.4), (0.6, 0.4), (0.6, -0.4), (-0.6, 0.4)] {
-                    let (rx, ry) = rot(cx + bx * s, cy + by * s, cx, cy, deg);
-                    renderer.fill_circle(rx, ry, s * 0.1, color);
+                    let (rx, ry) = rot(cx + bx * s, cy + by * s, cx, cy, deg, sclx, scly);
+                    renderer.fill_circle(rx, ry, s * 0.1 * savg, color);
                 }
                 // Skull
-                let (sx, sy) = rot(cx, cy - s * 0.1, cx, cy, deg);
-                renderer.stroke_circle(sx, sy, s * 0.2, 1.0, color);
+                let (skx, sky) = rot(cx, cy - s * 0.1, cx, cy, deg, sclx, scly);
+                renderer.stroke_circle(skx, sky, s * 0.2 * savg, 1.0, color);
             }
             DecorType::Web => {
                 // Radial lines from center
@@ -837,7 +869,7 @@ pub fn render_decor(
                     let angle = (i as f32 / 6.0) * std::f32::consts::TAU;
                     let ex = cx + s * 0.8 * angle.cos();
                     let ey = cy + s * 0.8 * angle.sin();
-                    rot_line(renderer, cx, cy, ex, ey, cx, cy, deg, 0.8, color);
+                    rot_line(renderer, cx, cy, ex, ey, cx, cy, deg, sclx, scly, 0.8, color);
                 }
                 // Concentric rings (approximated with lines)
                 for ring in 1..3 {
@@ -847,31 +879,31 @@ pub fn render_decor(
                         let a2 = ((i + 1) as f32 / 6.0) * std::f32::consts::TAU;
                         let (x1, y1) = (cx + r * a1.cos(), cy + r * a1.sin());
                         let (x2, y2) = (cx + r * a2.cos(), cy + r * a2.sin());
-                        rot_line(renderer, x1, y1, x2, y2, cx, cy, deg, 0.5, color);
+                        rot_line(renderer, x1, y1, x2, y2, cx, cy, deg, sclx, scly, 0.5, color);
                     }
                 }
             }
             DecorType::Door => {
                 // Arc showing door swing
                 let hw = s * 0.05;
-                rot_line(renderer, cx - hw, cy - s * 0.7, cx - hw, cy + s * 0.7, cx, cy, deg, 2.0, color);
+                rot_line(renderer, cx - hw, cy - s * 0.7, cx - hw, cy + s * 0.7, cx, cy, deg, sclx, scly, 2.0, color);
                 // Door panel
-                rot_line(renderer, cx - hw, cy - s * 0.7, cx + s * 0.7, cy - s * 0.7, cx, cy, deg, 1.5, color);
-                rot_line(renderer, cx + s * 0.7, cy - s * 0.7, cx + s * 0.7, cy + s * 0.7, cx, cy, deg, 1.5, color);
-                rot_line(renderer, cx + s * 0.7, cy + s * 0.7, cx - hw, cy + s * 0.7, cx, cy, deg, 1.5, color);
+                rot_line(renderer, cx - hw, cy - s * 0.7, cx + s * 0.7, cy - s * 0.7, cx, cy, deg, sclx, scly, 1.5, color);
+                rot_line(renderer, cx + s * 0.7, cy - s * 0.7, cx + s * 0.7, cy + s * 0.7, cx, cy, deg, sclx, scly, 1.5, color);
+                rot_line(renderer, cx + s * 0.7, cy + s * 0.7, cx - hw, cy + s * 0.7, cx, cy, deg, sclx, scly, 1.5, color);
             }
             DecorType::Gate => {
                 // Portcullis: vertical bars with cross
                 for i in 0..5 {
                     let x = cx - s * 0.6 + (i as f32 / 4.0) * s * 1.2;
-                    rot_line(renderer, x, cy - s * 0.7, x, cy + s * 0.7, cx, cy, deg, 1.0, color);
+                    rot_line(renderer, x, cy - s * 0.7, x, cy + s * 0.7, cx, cy, deg, sclx, scly, 1.0, color);
                 }
-                rot_line(renderer, cx - s * 0.6, cy - s * 0.2, cx + s * 0.6, cy - s * 0.2, cx, cy, deg, 1.0, color);
-                rot_line(renderer, cx - s * 0.6, cy + s * 0.2, cx + s * 0.6, cy + s * 0.2, cx, cy, deg, 1.0, color);
+                rot_line(renderer, cx - s * 0.6, cy - s * 0.2, cx + s * 0.6, cy - s * 0.2, cx, cy, deg, sclx, scly, 1.0, color);
+                rot_line(renderer, cx - s * 0.6, cy + s * 0.2, cx + s * 0.6, cy + s * 0.2, cx, cy, deg, sclx, scly, 1.0, color);
                 // Frame
-                rot_line(renderer, cx - s * 0.7, cy - s * 0.8, cx + s * 0.7, cy - s * 0.8, cx, cy, deg, 2.0, color);
-                rot_line(renderer, cx - s * 0.7, cy - s * 0.8, cx - s * 0.7, cy + s * 0.7, cx, cy, deg, 2.0, color);
-                rot_line(renderer, cx + s * 0.7, cy - s * 0.8, cx + s * 0.7, cy + s * 0.7, cx, cy, deg, 2.0, color);
+                rot_line(renderer, cx - s * 0.7, cy - s * 0.8, cx + s * 0.7, cy - s * 0.8, cx, cy, deg, sclx, scly, 2.0, color);
+                rot_line(renderer, cx - s * 0.7, cy - s * 0.8, cx - s * 0.7, cy + s * 0.7, cx, cy, deg, sclx, scly, 2.0, color);
+                rot_line(renderer, cx + s * 0.7, cy - s * 0.8, cx + s * 0.7, cy + s * 0.7, cx, cy, deg, sclx, scly, 2.0, color);
             }
             DecorType::Vines => {
                 // Curving tendrils radiating from center with small leaf marks
@@ -893,7 +925,7 @@ pub fn render_decor(
                         let it = 1.0 - t;
                         let nx = cx + (it * it * sx + 2.0 * it * t * cx1 + t * t * ex) * s;
                         let ny = cy + (it * it * sy + 2.0 * it * t * cy1 + t * t * ey) * s;
-                        rot_line(renderer, px, py, nx, ny, cx, cy, deg, 1.0, color);
+                        rot_line(renderer, px, py, nx, ny, cx, cy, deg, sclx, scly, 1.0, color);
                         px = nx;
                         py = ny;
                     }
@@ -903,19 +935,19 @@ pub fn render_decor(
                     let lx = cx + (it * it * sx + 2.0 * it * leaf_t * cx1 + leaf_t * leaf_t * ex) * s;
                     let ly = cy + (it * it * sy + 2.0 * it * leaf_t * cy1 + leaf_t * leaf_t * ey) * s;
                     let leaf_s = s * 0.12;
-                    rot_line(renderer, lx - leaf_s, ly, lx, ly - leaf_s, cx, cy, deg, 0.8, color);
-                    rot_line(renderer, lx, ly - leaf_s, lx + leaf_s, ly, cx, cy, deg, 0.8, color);
-                    rot_line(renderer, lx - leaf_s, ly, lx + leaf_s, ly, cx, cy, deg, 0.5, color);
+                    rot_line(renderer, lx - leaf_s, ly, lx, ly - leaf_s, cx, cy, deg, sclx, scly, 0.8, color);
+                    rot_line(renderer, lx, ly - leaf_s, lx + leaf_s, ly, cx, cy, deg, sclx, scly, 0.8, color);
+                    rot_line(renderer, lx - leaf_s, ly, lx + leaf_s, ly, cx, cy, deg, sclx, scly, 0.5, color);
                 }
             }
             DecorType::OfferingMouth => {
                 // Face outline (circle)
-                renderer.stroke_circle(cx, cy, s * 0.85, 1.5, color);
+                renderer.stroke_circle(cx, cy, s * 0.85 * savg, 1.5, color);
                 // Eyes (small filled circles)
-                let (lex, ley) = rot(cx - s * 0.3, cy - s * 0.25, cx, cy, deg);
-                let (rex, rey) = rot(cx + s * 0.3, cy - s * 0.25, cx, cy, deg);
-                renderer.fill_circle(lex, ley, s * 0.12, color);
-                renderer.fill_circle(rex, rey, s * 0.12, color);
+                let (lex, ley) = rot(cx - s * 0.3, cy - s * 0.25, cx, cy, deg, sclx, scly);
+                let (rex, rey) = rot(cx + s * 0.3, cy - s * 0.25, cx, cy, deg, sclx, scly);
+                renderer.fill_circle(lex, ley, s * 0.12 * savg, color);
+                renderer.fill_circle(rex, rey, s * 0.12 * savg, color);
                 // Open mouth (oval) — drawn as a wider ellipse approximated with lines
                 let mouth_cx = cx;
                 let mouth_cy = cy + s * 0.3;
@@ -930,32 +962,32 @@ pub fn render_decor(
                     let y0 = mouth_cy + mouth_ry * a0.sin();
                     let x1 = mouth_cx + mouth_rx * a1.cos();
                     let y1 = mouth_cy + mouth_ry * a1.sin();
-                    rot_line(renderer, x0, y0, x1, y1, cx, cy, deg, 1.5, color);
+                    rot_line(renderer, x0, y0, x1, y1, cx, cy, deg, sclx, scly, 1.5, color);
                 }
                 // Dark fill inside mouth
-                let (mcx, mcy) = rot(mouth_cx, mouth_cy, cx, cy, deg);
-                renderer.fill_circle(mcx, mcy, mouth_ry * 0.6, dark);
+                let (mcx, mcy) = rot(mouth_cx, mouth_cy, cx, cy, deg, sclx, scly);
+                renderer.fill_circle(mcx, mcy, mouth_ry * 0.6 * savg, dark);
                 // Brow ridges
-                rot_line(renderer, cx - s * 0.5, cy - s * 0.45, cx - s * 0.1, cy - s * 0.5, cx, cy, deg, 1.5, color);
-                rot_line(renderer, cx + s * 0.5, cy - s * 0.45, cx + s * 0.1, cy - s * 0.5, cx, cy, deg, 1.5, color);
+                rot_line(renderer, cx - s * 0.5, cy - s * 0.45, cx - s * 0.1, cy - s * 0.5, cx, cy, deg, sclx, scly, 1.5, color);
+                rot_line(renderer, cx + s * 0.5, cy - s * 0.45, cx + s * 0.1, cy - s * 0.5, cx, cy, deg, sclx, scly, 1.5, color);
                 // Nose hint
-                rot_line(renderer, cx, cy - s * 0.1, cx - s * 0.08, cy + s * 0.05, cx, cy, deg, 1.0, color);
-                rot_line(renderer, cx, cy - s * 0.1, cx + s * 0.08, cy + s * 0.05, cx, cy, deg, 1.0, color);
+                rot_line(renderer, cx, cy - s * 0.1, cx - s * 0.08, cy + s * 0.05, cx, cy, deg, sclx, scly, 1.0, color);
+                rot_line(renderer, cx, cy - s * 0.1, cx + s * 0.08, cy + s * 0.05, cx, cy, deg, sclx, scly, 1.0, color);
             }
             DecorType::Scales => {
                 // Central stand (vertical post)
-                rot_line(renderer, cx, cy - s * 0.9, cx, cy + s * 0.8, cx, cy, deg, 1.5, color);
+                rot_line(renderer, cx, cy - s * 0.9, cx, cy + s * 0.8, cx, cy, deg, sclx, scly, 1.5, color);
                 // Base
-                rot_line(renderer, cx - s * 0.4, cy + s * 0.8, cx + s * 0.4, cy + s * 0.8, cx, cy, deg, 2.0, color);
+                rot_line(renderer, cx - s * 0.4, cy + s * 0.8, cx + s * 0.4, cy + s * 0.8, cx, cy, deg, sclx, scly, 2.0, color);
                 // Crossbeam (tilted slightly for visual interest)
-                rot_line(renderer, cx - s * 0.8, cy - s * 0.5, cx + s * 0.8, cy - s * 0.7, cx, cy, deg, 1.5, color);
+                rot_line(renderer, cx - s * 0.8, cy - s * 0.5, cx + s * 0.8, cy - s * 0.7, cx, cy, deg, sclx, scly, 1.5, color);
                 // Pivot triangle at top
-                rot_line(renderer, cx - s * 0.1, cy - s * 0.9, cx + s * 0.1, cy - s * 0.9, cx, cy, deg, 1.0, color);
-                rot_line(renderer, cx - s * 0.1, cy - s * 0.9, cx, cy - s * 0.7, cx, cy, deg, 1.0, color);
-                rot_line(renderer, cx + s * 0.1, cy - s * 0.9, cx, cy - s * 0.7, cx, cy, deg, 1.0, color);
+                rot_line(renderer, cx - s * 0.1, cy - s * 0.9, cx + s * 0.1, cy - s * 0.9, cx, cy, deg, sclx, scly, 1.0, color);
+                rot_line(renderer, cx - s * 0.1, cy - s * 0.9, cx, cy - s * 0.7, cx, cy, deg, sclx, scly, 1.0, color);
+                rot_line(renderer, cx + s * 0.1, cy - s * 0.9, cx, cy - s * 0.7, cx, cy, deg, sclx, scly, 1.0, color);
                 // Left chain and pan
-                rot_line(renderer, cx - s * 0.8, cy - s * 0.5, cx - s * 0.8, cy + s * 0.1, cx, cy, deg, 0.8, color);
-                rot_line(renderer, cx - s * 1.05, cy + s * 0.1, cx - s * 0.55, cy + s * 0.1, cx, cy, deg, 1.0, color);
+                rot_line(renderer, cx - s * 0.8, cy - s * 0.5, cx - s * 0.8, cy + s * 0.1, cx, cy, deg, sclx, scly, 0.8, color);
+                rot_line(renderer, cx - s * 1.05, cy + s * 0.1, cx - s * 0.55, cy + s * 0.1, cx, cy, deg, sclx, scly, 1.0, color);
                 // Left pan curve (arc via segments)
                 for i in 0..6 {
                     let a0 = std::f32::consts::PI * (i as f32 / 6.0);
@@ -966,11 +998,11 @@ pub fn render_decor(
                     rot_line(renderer,
                         pcx + pr * a0.cos(), pcy + pr * a0.sin(),
                         pcx + pr * a1.cos(), pcy + pr * a1.sin(),
-                        cx, cy, deg, 1.0, color);
+                        cx, cy, deg, sclx, scly, 1.0, color);
                 }
                 // Right chain and pan
-                rot_line(renderer, cx + s * 0.8, cy - s * 0.7, cx + s * 0.8, cy - s * 0.1, cx, cy, deg, 0.8, color);
-                rot_line(renderer, cx + s * 0.55, cy - s * 0.1, cx + s * 1.05, cy - s * 0.1, cx, cy, deg, 1.0, color);
+                rot_line(renderer, cx + s * 0.8, cy - s * 0.7, cx + s * 0.8, cy - s * 0.1, cx, cy, deg, sclx, scly, 0.8, color);
+                rot_line(renderer, cx + s * 0.55, cy - s * 0.1, cx + s * 1.05, cy - s * 0.1, cx, cy, deg, sclx, scly, 1.0, color);
                 // Right pan curve
                 for i in 0..6 {
                     let a0 = std::f32::consts::PI * (i as f32 / 6.0);
@@ -981,7 +1013,73 @@ pub fn render_decor(
                     rot_line(renderer,
                         pcx + pr * a0.cos(), pcy + pr * a0.sin(),
                         pcx + pr * a1.cos(), pcy + pr * a1.sin(),
-                        cx, cy, deg, 1.0, color);
+                        cx, cy, deg, sclx, scly, 1.0, color);
+                }
+            }
+            DecorType::Crack => {
+                // Jagged crack line with a short branch
+                rot_line(renderer, cx, cy - s * 0.8, cx + s * 0.15, cy - s * 0.45, cx, cy, deg, sclx, scly, 1.2, color);
+                rot_line(renderer, cx + s * 0.15, cy - s * 0.45, cx - s * 0.2, cy - s * 0.1, cx, cy, deg, sclx, scly, 1.2, color);
+                rot_line(renderer, cx - s * 0.2, cy - s * 0.1, cx + s * 0.1, cy + s * 0.25, cx, cy, deg, sclx, scly, 1.2, color);
+                rot_line(renderer, cx + s * 0.1, cy + s * 0.25, cx - s * 0.15, cy + s * 0.55, cx, cy, deg, sclx, scly, 1.2, color);
+                rot_line(renderer, cx - s * 0.15, cy + s * 0.55, cx + s * 0.05, cy + s * 0.8, cx, cy, deg, sclx, scly, 1.2, color);
+                // Branch
+                rot_line(renderer, cx - s * 0.2, cy - s * 0.1, cx - s * 0.5, cy + s * 0.15, cx, cy, deg, sclx, scly, 0.8, color);
+            }
+            DecorType::Stream => {
+                // Wavy stream flowing top to bottom with parallel banks
+                let water = [80, 130, 200, 140];
+                let bank_w = s * 0.25;
+                let segments = 8;
+                for bank in [-1.0f32, 1.0] {
+                    let bx = bank * bank_w;
+                    for i in 0..segments {
+                        let t0 = i as f32 / segments as f32;
+                        let t1 = (i + 1) as f32 / segments as f32;
+                        let y0 = cy - s * 0.9 + t0 * s * 1.8;
+                        let y1 = cy - s * 0.9 + t1 * s * 1.8;
+                        let wave0 = (t0 * std::f32::consts::TAU * 1.5).sin() * s * 0.15;
+                        let wave1 = (t1 * std::f32::consts::TAU * 1.5).sin() * s * 0.15;
+                        rot_line(renderer, cx + bx + wave0, y0, cx + bx + wave1, y1, cx, cy, deg, sclx, scly, 1.0, water);
+                    }
+                }
+                // Ripple lines across the stream
+                for i in 1..4 {
+                    let t = i as f32 / 4.0;
+                    let y = cy - s * 0.9 + t * s * 1.8;
+                    let wave = (t * std::f32::consts::TAU * 1.5).sin() * s * 0.15;
+                    rot_line(renderer, cx - bank_w * 0.5 + wave, y, cx + bank_w * 0.5 + wave, y, cx, cy, deg, sclx, scly, 0.5, water);
+                }
+            }
+            DecorType::Pool => {
+                // Oval pool with ripple rings (ellipse via line segments)
+                let water_fill = [80, 130, 200, 80];
+                let water_edge = [60, 100, 170, 180];
+                let rx = s * 0.7;
+                let ry = s * 0.7;
+                let segments = 24;
+                // Filled: approximate with horizontal strips
+                let strip_count = 12;
+                for i in 0..strip_count {
+                    let t = (i as f32 + 0.5) / strip_count as f32 * 2.0 - 1.0;
+                    let half_w = rx * (1.0 - t * t).max(0.0).sqrt();
+                    let y = cy + t * ry;
+                    let strip_h = ry * 2.0 / strip_count as f32;
+                    let (p1x, p1y) = rot(cx - half_w, y, cx, cy, deg, sclx, scly);
+                    let (p2x, _) = rot(cx + half_w, y, cx, cy, deg, sclx, scly);
+                    renderer.fill_rect(p1x, p1y - strip_h * 0.5 * savg, p2x - p1x, strip_h * savg, water_fill);
+                }
+                // Outline rings
+                for (scale, width) in [(1.0f32, 1.5f32), (0.6, 0.8), (0.25, 0.5)] {
+                    for i in 0..segments {
+                        let a0 = (i as f32 / segments as f32) * std::f32::consts::TAU;
+                        let a1 = ((i + 1) as f32 / segments as f32) * std::f32::consts::TAU;
+                        let x0 = cx + rx * scale * a0.cos();
+                        let y0 = cy + ry * scale * a0.sin();
+                        let x1 = cx + rx * scale * a1.cos();
+                        let y1 = cy + ry * scale * a1.sin();
+                        rot_line(renderer, x0, y0, x1, y1, cx, cy, deg, sclx, scly, width, water_edge);
+                    }
                 }
             }
         }
@@ -1009,6 +1107,10 @@ pub fn render_elevation_sections(
         let sy = room_px_y + section.y * GRID_PX;
         let sw = section.width * GRID_PX;
         let sh = section.length * GRID_PX;
+
+        if section.opaque {
+            renderer.fill_rect(sx, sy, sw, sh, theme.floor_color);
+        }
 
         match section.elevation {
             ElevationType::Raised => {
