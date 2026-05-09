@@ -28,6 +28,7 @@ jobs:
         with:
           name: dungeon-mapper-linux
           path: target/release/dungeon-mapper
+          retention-days: 1
 
   build-windows:
     runs-on: ubuntu-latest
@@ -50,9 +51,33 @@ jobs:
         with:
           name: dungeon-mapper-windows
           path: target/x86_64-pc-windows-gnu/release/dungeon-mapper.exe
+          retention-days: 1
+
+  build-keygen:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache signing tool
+        id: cache-keygen
+        uses: actions/cache@v4
+        with:
+          path: target/release/keygen
+          key: keygen-${{ hashFiles('tools/keygen.rs', 'Cargo.toml', 'Cargo.lock') }}
+
+      - name: Build signing tool
+        if: steps.cache-keygen.outputs.cache-hit != 'true'
+        run: cargo build --release --bin keygen
+
+      - name: Upload keygen
+        uses: actions/upload-artifact@v4
+        with:
+          name: keygen
+          path: target/release/keygen
+          retention-days: 1
 
   release:
-    needs: [build-linux, build-windows]
+    needs: [build-linux, build-windows, build-keygen]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -71,16 +96,20 @@ jobs:
           name: dungeon-mapper-windows
           path: artifacts/windows
 
-      - name: Build signing tool
-        run: cargo build --release --bin keygen
+      - name: Download keygen
+        uses: actions/download-artifact@v4
+        with:
+          name: keygen
+          path: artifacts/keygen
 
       - name: Sign binaries
         env:
           SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
         run: |
+          chmod +x artifacts/keygen/keygen
           echo "$SIGNING_KEY" > /tmp/signing.key
-          ./target/release/keygen --sign artifacts/linux/dungeon-mapper --key /tmp/signing.key
-          ./target/release/keygen --sign artifacts/windows/dungeon-mapper.exe --key /tmp/signing.key
+          ./artifacts/keygen/keygen --sign artifacts/linux/dungeon-mapper --key /tmp/signing.key
+          ./artifacts/keygen/keygen --sign artifacts/windows/dungeon-mapper.exe --key /tmp/signing.key
           rm /tmp/signing.key
 
       - name: Get version
@@ -101,3 +130,11 @@ jobs:
             artifacts/linux/dungeon-mapper.sig
             artifacts/windows/dungeon-mapper.exe
             artifacts/windows/dungeon-mapper.exe.sig
+
+      - name: Delete unsigned artifacts
+        uses: geekyeggo/delete-artifact@v5
+        with:
+          name: |
+            dungeon-mapper-linux
+            dungeon-mapper-windows
+            keygen
