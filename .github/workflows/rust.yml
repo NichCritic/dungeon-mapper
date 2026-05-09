@@ -8,7 +8,33 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.check.outputs.changed }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check if version changed
+        id: check
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          # Check if a release tag starting with this version already exists
+          if git tag -l "v${VERSION}-*" | grep -q .; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Version $VERSION already released, skipping build"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "New version $VERSION, will build and release"
+          fi
+
   build-linux:
+    needs: check-version
+    if: needs.check-version.outputs.changed == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -31,6 +57,8 @@ jobs:
           retention-days: 1
 
   build-windows:
+    needs: check-version
+    if: needs.check-version.outputs.changed == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -54,6 +82,8 @@ jobs:
           retention-days: 1
 
   build-keygen:
+    needs: check-version
+    if: needs.check-version.outputs.changed == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
