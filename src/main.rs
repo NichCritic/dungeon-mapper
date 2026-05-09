@@ -26,7 +26,7 @@ fn main() -> eframe::Result {
         "Dungeon Mapper",
         options,
         Box::new(|cc| {
-            cc.egui_ctx.set_visuals(egui::Visuals::dark());
+            cc.egui_ctx.set_theme(egui::Theme::Dark);
             egui_extras::install_image_loaders(&cc.egui_ctx);
             Ok(Box::new(app::DungeonApp::default()))
         }),
