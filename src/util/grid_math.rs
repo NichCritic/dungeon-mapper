@@ -11,12 +11,15 @@ pub fn world_to_grid(world: f32) -> i32 {
     (world / GRID_PX).round() as i32
 }
 
-/// View transform: maps between world coordinates and screen coordinates
+/// View transform: maps between world coordinates and screen coordinates.
+/// Optionally applies rotation (in radians) around the canvas center.
 #[derive(Clone, Debug)]
 pub struct ViewTransform {
     pub offset: egui::Vec2,
     pub zoom: f32,
     pub canvas_rect: egui::Rect,
+    /// Rotation in radians, applied around the canvas center after zoom+offset.
+    pub rotation: f32,
 }
 
 impl ViewTransform {
@@ -25,20 +28,43 @@ impl ViewTransform {
             offset,
             zoom,
             canvas_rect,
+            rotation: 0.0,
         }
     }
 
+    pub fn with_rotation(mut self, rotation: f32) -> Self {
+        self.rotation = rotation;
+        self
+    }
+
     pub fn world_to_screen(&self, world: egui::Pos2) -> egui::Pos2 {
-        egui::pos2(
-            world.x * self.zoom + self.offset.x + self.canvas_rect.min.x,
-            world.y * self.zoom + self.offset.y + self.canvas_rect.min.y,
-        )
+        let sx = world.x * self.zoom + self.offset.x + self.canvas_rect.min.x;
+        let sy = world.y * self.zoom + self.offset.y + self.canvas_rect.min.y;
+        if self.rotation == 0.0 {
+            return egui::pos2(sx, sy);
+        }
+        let cx = self.canvas_rect.center().x;
+        let cy = self.canvas_rect.center().y;
+        let dx = sx - cx;
+        let dy = sy - cy;
+        let (sin, cos) = self.rotation.sin_cos();
+        egui::pos2(cx + dx * cos - dy * sin, cy + dx * sin + dy * cos)
     }
 
     pub fn screen_to_world(&self, screen: egui::Pos2) -> egui::Pos2 {
+        let (sx, sy) = if self.rotation == 0.0 {
+            (screen.x, screen.y)
+        } else {
+            let cx = self.canvas_rect.center().x;
+            let cy = self.canvas_rect.center().y;
+            let dx = screen.x - cx;
+            let dy = screen.y - cy;
+            let (sin, cos) = (-self.rotation).sin_cos();
+            (cx + dx * cos - dy * sin, cy + dx * sin + dy * cos)
+        };
         egui::pos2(
-            (screen.x - self.canvas_rect.min.x - self.offset.x) / self.zoom,
-            (screen.y - self.canvas_rect.min.y - self.offset.y) / self.zoom,
+            (sx - self.canvas_rect.min.x - self.offset.x) / self.zoom,
+            (sy - self.canvas_rect.min.y - self.offset.y) / self.zoom,
         )
     }
 }

@@ -11,16 +11,6 @@ pub enum AoEShape {
     Line { length: f32, width: f32 },
 }
 
-impl AoEShape {
-    pub fn label(&self) -> String {
-        match self {
-            AoEShape::Circle { radius } => format!("Circle {}ft", radius * 5.0),
-            AoEShape::Square { size } => format!("Square {}ft", size * 5.0),
-            AoEShape::Line { length, width } => format!("Line {}x{}ft", length * 5.0, width * 5.0),
-        }
-    }
-}
-
 /// A placed AoE on the map.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AoEMarker {

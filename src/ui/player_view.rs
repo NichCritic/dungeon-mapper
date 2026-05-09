@@ -14,6 +14,8 @@ pub struct PlayerViewState {
     pub canvas_size: egui::Vec2,
     /// When true, pan and zoom are disabled on the player view.
     pub locked: bool,
+    /// Map rotation in 90° increments (0, 1, 2, 3 = 0°, 90°, 180°, 270°).
+    pub map_rotation: u8,
 }
 
 impl Default for PlayerViewState {
@@ -23,6 +25,7 @@ impl Default for PlayerViewState {
             render_cache: BackgroundRenderCache::default(),
             canvas_size: egui::Vec2::ZERO,
             locked: false,
+            map_rotation: 0,
         }
     }
 }
@@ -103,7 +106,9 @@ pub fn player_viewport(
             handle_pan_zoom(&response, &mut state.view);
         }
         state.canvas_size = rect.size();
-        let transform = ViewTransform::new(state.view.offset, state.view.zoom, rect);
+        let rotation_rad = state.map_rotation as f32 * std::f32::consts::FRAC_PI_2;
+        let base_transform = ViewTransform::new(state.view.offset, state.view.zoom, rect);
+        let transform = base_transform.clone().with_rotation(rotation_rad);
 
         let Some(layout) = &dungeon.layout else {
             painter.text(

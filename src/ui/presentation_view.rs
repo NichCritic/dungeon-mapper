@@ -100,7 +100,7 @@ fn presentation_input_hash(
 /// AoE marker controls in the sidebar.
 fn aoe_sidebar(
     ui: &mut egui::Ui,
-    presentation: &PresentationState,
+    view_state: &PresentationViewState,
     dungeon: &mut Dungeon,
 ) {
     use crate::presentation::aoe::{AoEMarker, AoEShape};
@@ -151,22 +151,29 @@ fn aoe_sidebar(
 
     ui.horizontal(|ui| {
         if ui.button("Add").clicked() {
-            let room = presentation.party_room.as_ref()
-                .and_then(|rid| dungeon.layout.as_ref().and_then(|l| l.room_by_id(rid)));
-            let fallback = dungeon.layout.as_ref().and_then(|l| l.rooms.first());
-            if let Some(rl) = room.or(fallback) {
-                let cx = rl.x as f32 + rl.width as f32 / 2.0;
-                let cy = rl.y as f32 + rl.height as f32 / 2.0;
-                let color_id = egui::Id::new("aoe_color");
-                let color: [u8; 4] = ui.ctx().memory(|m| m.data.get_temp(color_id).unwrap_or([255, 60, 60, 100]));
-                let grid = |ft: i32| ft as f32 / 5.0;
-                let shape = match shape_idx {
-                    0 => AoEShape::Circle { radius: grid(size_ft) },
-                    1 => AoEShape::Square { size: grid(size_ft) },
-                    _ => AoEShape::Line { length: grid(size_ft), width: grid(width_ft) },
-                };
-                dungeon.aoe_markers.push(AoEMarker::new(shape, cx, cy, color));
-            }
+            // Place at center of DM viewport
+            let canvas = view_state.canvas_size;
+            let (cx, cy) = if canvas.x > 0.0 && canvas.y > 0.0 {
+                let center_screen = egui::pos2(canvas.x / 2.0, canvas.y / 2.0);
+                // Build a minimal transform to convert screen center to world coords
+                let transform = crate::util::ViewTransform::new(
+                    view_state.view.offset, view_state.view.zoom,
+                    egui::Rect::from_min_size(egui::Pos2::ZERO, canvas),
+                );
+                let world = transform.screen_to_world(center_screen);
+                (world.x / crate::util::GRID_PX, world.y / crate::util::GRID_PX)
+            } else {
+                (0.0, 0.0)
+            };
+            let color_id = egui::Id::new("aoe_color");
+            let color: [u8; 4] = ui.ctx().memory(|m| m.data.get_temp(color_id).unwrap_or([255, 60, 60, 100]));
+            let grid = |ft: i32| ft as f32 / 5.0;
+            let shape = match shape_idx {
+                0 => AoEShape::Circle { radius: grid(size_ft) },
+                1 => AoEShape::Square { size: grid(size_ft) },
+                _ => AoEShape::Line { length: grid(size_ft), width: grid(width_ft) },
+            };
+            dungeon.aoe_markers.push(AoEMarker::new(shape, cx, cy, color));
         }
     });
 
@@ -189,20 +196,68 @@ fn aoe_sidebar(
         ui.ctx().memory_mut(|m| m.data.insert_temp(color_id, color));
     });
 
-    // List existing markers
+    // List existing markers; show size editing only for selected marker
+    let selected = view_state.selected_aoe;
     if !dungeon.aoe_markers.is_empty() {
         let mut remove_idx = None;
-        for (i, marker) in dungeon.aoe_markers.iter().enumerate() {
+        for i in 0..dungeon.aoe_markers.len() {
+            let is_selected = selected == Some(i);
             ui.horizontal(|ui| {
+                let marker = &dungeon.aoe_markers[i];
                 let c = egui::Color32::from_rgba_unmultiplied(
                     marker.color[0], marker.color[1], marker.color[2], 255,
                 );
-                ui.colored_label(c, format!("{}", marker.shape.label()));
-                ui.label(format!("({:.0},{:.0})", marker.x, marker.y));
+                let label = match &marker.shape {
+                    AoEShape::Circle { radius } => format!("Circle {}ft", (*radius * 5.0) as i32),
+                    AoEShape::Square { size } => format!("Square {}ft", (*size * 5.0) as i32),
+                    AoEShape::Line { length, width } => format!("Line {}x{}ft", (*length * 5.0) as i32, (*width * 5.0) as i32),
+                };
+                if is_selected {
+                    ui.colored_label(c, format!("> {}", label));
+                } else {
+                    ui.colored_label(c, label);
+                }
                 if ui.small_button("X").clicked() {
                     remove_idx = Some(i);
                 }
             });
+            if is_selected {
+                ui.horizontal(|ui| {
+                    ui.label("  Size:");
+                    match &dungeon.aoe_markers[i].shape {
+                        AoEShape::Circle { radius } => {
+                            let mut ft = (*radius * 5.0) as i32;
+                            if crate::ui::canvas_common::num_input_i32(ui, &mut ft, 35.0) {
+                                ft = ft.max(5);
+                                dungeon.aoe_markers[i].shape = AoEShape::Circle { radius: ft as f32 / 5.0 };
+                            }
+                            ui.label("ft");
+                        }
+                        AoEShape::Square { size } => {
+                            let mut ft = (*size * 5.0) as i32;
+                            if crate::ui::canvas_common::num_input_i32(ui, &mut ft, 35.0) {
+                                ft = ft.max(5);
+                                dungeon.aoe_markers[i].shape = AoEShape::Square { size: ft as f32 / 5.0 };
+                            }
+                            ui.label("ft");
+                        }
+                        AoEShape::Line { length, width } => {
+                            let mut lft = (*length * 5.0) as i32;
+                            let mut wft = (*width * 5.0) as i32;
+                            let mut changed = false;
+                            if crate::ui::canvas_common::num_input_i32(ui, &mut lft, 30.0) { changed = true; }
+                            ui.label("x");
+                            if crate::ui::canvas_common::num_input_i32(ui, &mut wft, 30.0) { changed = true; }
+                            ui.label("ft");
+                            if changed {
+                                lft = lft.max(5);
+                                wft = wft.max(5);
+                                dungeon.aoe_markers[i].shape = AoEShape::Line { length: lft as f32 / 5.0, width: wft as f32 / 5.0 };
+                            }
+                        }
+                    }
+                });
+            }
         }
         if let Some(idx) = remove_idx {
             dungeon.aoe_markers.remove(idx);
@@ -498,27 +553,46 @@ pub fn presentation_view(
         let vp_rect = egui::Rect::from_min_max(screen_min, screen_max);
 
         // Draw the viewport rectangle
+        let vp_color = if player_view_state.locked {
+            egui::Color32::from_rgb(255, 100, 50)
+        } else {
+            egui::Color32::from_rgb(50, 255, 50)
+        };
         painter.rect_stroke(
             vp_rect, 0.0,
-            egui::Stroke::new(2.0, egui::Color32::from_rgb(50, 255, 50)),
+            egui::Stroke::new(2.0, vp_color),
             egui::StrokeKind::Outside,
         );
 
-        // Drag handling: start drag when left-click lands anywhere inside the viewport rect
-        if response.drag_started_by(egui::PointerButton::Primary) {
+        // AoE: click to select, drag to move — checked first so smaller
+        // elements take precedence over the player viewport box.
+        if response.drag_started_by(egui::PointerButton::Primary) && !view_state.dragging_player_viewport {
             if let Some(pos) = response.interact_pointer_pos() {
-                if vp_rect.contains(pos) {
-                    view_state.dragging_player_viewport = true;
+                if let Some(idx) = crate::presentation::aoe::marker_at_screen_pos(pos, &transform, &dungeon.aoe_markers) {
+                    view_state.selected_aoe = Some(idx);
+                    view_state.dragging_aoe = true;
+                }
+            }
+        }
+
+        // Drag handling: only from edges (with margin), only if not locked,
+        // and only if no AoE was grabbed.
+        if !player_view_state.locked && !view_state.dragging_aoe {
+            const EDGE_MARGIN: f32 = 12.0;
+            if response.drag_started_by(egui::PointerButton::Primary) {
+                if let Some(pos) = response.interact_pointer_pos() {
+                    let inner = vp_rect.shrink(EDGE_MARGIN);
+                    if vp_rect.contains(pos) && !inner.contains(pos) {
+                        view_state.dragging_player_viewport = true;
+                    }
                 }
             }
         }
 
         if view_state.dragging_player_viewport && response.dragged_by(egui::PointerButton::Primary) {
             let delta_screen = response.drag_delta();
-            // Convert screen delta to world delta
             let world_dx = delta_screen.x / transform.zoom;
             let world_dy = delta_screen.y / transform.zoom;
-            // Shift the player view offset (world shift -> player screen shift)
             player_view_state.view.offset.x -= world_dx * pv_zoom;
             player_view_state.view.offset.y -= world_dy * pv_zoom;
         }
@@ -526,14 +600,14 @@ pub fn presentation_view(
         if response.drag_stopped_by(egui::PointerButton::Primary) {
             view_state.dragging_player_viewport = false;
         }
-    }
-
-    // AoE: click to select, drag to move, Delete key to remove
-    if response.drag_started_by(egui::PointerButton::Primary) && !view_state.dragging_player_viewport {
-        if let Some(pos) = response.interact_pointer_pos() {
-            if let Some(idx) = crate::presentation::aoe::marker_at_screen_pos(pos, &transform, &dungeon.aoe_markers) {
-                view_state.selected_aoe = Some(idx);
-                view_state.dragging_aoe = true;
+    } else {
+        // No player viewport visible — still handle AoE drag start
+        if response.drag_started_by(egui::PointerButton::Primary) {
+            if let Some(pos) = response.interact_pointer_pos() {
+                if let Some(idx) = crate::presentation::aoe::marker_at_screen_pos(pos, &transform, &dungeon.aoe_markers) {
+                    view_state.selected_aoe = Some(idx);
+                    view_state.dragging_aoe = true;
+                }
             }
         }
     }
@@ -2156,7 +2230,7 @@ pub fn presentation_sidebar(
         .id_salt("aoe_section")
         .default_open(true)
         .show(ui, |ui| {
-        aoe_sidebar(ui, presentation, dungeon);
+        aoe_sidebar(ui, view_state, dungeon);
     });
 
     ui.add_space(8.0);
@@ -2172,6 +2246,19 @@ pub fn presentation_sidebar(
     }
     ui.checkbox(&mut presentation.show_labels_player, "Show labels to players");
     ui.checkbox(&mut player_view_state.locked, "Lock player view (no scroll/pan)");
+    ui.horizontal(|ui| {
+        let label = match player_view_state.map_rotation {
+            0 => "0°",
+            1 => "90°",
+            2 => "180°",
+            3 => "270°",
+            _ => "?",
+        };
+        ui.label(format!("Map rotation: {}", label));
+        if ui.button("Rotate 90°").clicked() {
+            player_view_state.map_rotation = (player_view_state.map_rotation + 1) % 4;
+        }
+    });
 
     // Player view zoom: 1 inch per square on 40" screen
     if ui.button("Player: 1\"/square (40\" screen)").clicked() {
