@@ -45,6 +45,8 @@ jobs:
       - name: Build
         env:
           UPDATE_PUBLIC_KEY: ${{ secrets.UPDATE_PUBLIC_KEY }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
         run: cargo build --release
 
       - name: Upload Linux binary
@@ -70,6 +72,8 @@ jobs:
       - name: Build for Windows
         env:
           UPDATE_PUBLIC_KEY: ${{ secrets.UPDATE_PUBLIC_KEY }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
         run: cargo build --release --target x86_64-pc-windows-gnu
 
       - name: Upload Windows binary
