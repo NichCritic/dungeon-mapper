@@ -578,7 +578,7 @@ pub fn presentation_view(
         // Drag handling: only from edges (with margin), only if not locked,
         // and only if no AoE was grabbed.
         if !player_view_state.locked && !view_state.dragging_aoe {
-            const EDGE_MARGIN: f32 = 12.0;
+            const EDGE_MARGIN: f32 = 24.0;
             if response.drag_started_by(egui::PointerButton::Primary) {
                 if let Some(pos) = response.interact_pointer_pos() {
                     let inner = vp_rect.shrink(EDGE_MARGIN);
