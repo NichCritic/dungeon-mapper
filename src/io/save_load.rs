@@ -1,59 +1,71 @@
 use std::path::PathBuf;
 use std::sync::mpsc;
 
-use crate::model::Dungeon;
+use crate::model::{Campaign, Dungeon};
 
 /// Current save file format version. Increment when the data model changes.
-const CURRENT_VERSION: u32 = 1;
+const CURRENT_VERSION: u32 = 2;
 
-/// Versioned save file envelope.
+/// Versioned save file envelope (version 2+: campaign-based).
 #[derive(serde::Serialize, serde::Deserialize)]
 struct SaveFile {
     version: u32,
-    dungeon: serde_json::Value,
+    campaign: serde_json::Value,
 }
 
-/// Serialize a dungeon into a versioned JSON string.
-fn serialize_versioned(dungeon: &Dungeon) -> Result<String, String> {
-    let dungeon_value = serde_json::to_value(dungeon).map_err(|e| e.to_string())?;
+/// Serialize a campaign into a versioned JSON string.
+fn serialize_versioned(campaign: &Campaign) -> Result<String, String> {
+    let campaign_value = serde_json::to_value(campaign).map_err(|e| e.to_string())?;
     let save_file = SaveFile {
         version: CURRENT_VERSION,
-        dungeon: dungeon_value,
+        campaign: campaign_value,
     };
     serde_json::to_string_pretty(&save_file).map_err(|e| e.to_string())
 }
 
-/// Deserialize a dungeon from JSON, handling both versioned and legacy (unversioned) formats.
-/// Uses version-specific load adaptors rather than a migration chain — each version
-/// knows how to load directly into the current `Dungeon` struct.
-fn deserialize_versioned(json: &str) -> Result<Dungeon, String> {
+/// Deserialize a campaign from JSON, handling all format versions:
+/// - Version 0: legacy unversioned single dungeon (raw JSON is the dungeon)
+/// - Version 1: versioned single dungeon ({ version, dungeon })
+/// - Version 2+: campaign format ({ version, campaign })
+fn deserialize_versioned(json: &str) -> Result<Campaign, String> {
     let raw: serde_json::Value = serde_json::from_str(json).map_err(|e| e.to_string())?;
 
     if let Some(version) = raw.get("version").and_then(|v| v.as_u64()) {
-        // Versioned format: { "version": N, "dungeon": { ... } }
-        let dungeon_value = raw.get("dungeon")
-            .ok_or("Save file missing 'dungeon' field")?;
-        load_version(version as u32, dungeon_value)
+        let version = version as u32;
+        if version >= 2 {
+            // Campaign format
+            let campaign_value = raw.get("campaign")
+                .ok_or("Save file missing 'campaign' field")?;
+            load_campaign(version, campaign_value)
+        } else {
+            // Legacy dungeon format (version 1)
+            let dungeon_value = raw.get("dungeon")
+                .ok_or("Save file missing 'dungeon' field")?;
+            let dungeon = load_dungeon(version, dungeon_value)?;
+            Ok(Campaign::from_dungeon(dungeon))
+        }
     } else {
-        // Legacy format (pre-versioning): the JSON is the dungeon directly
-        load_version(0, &raw)
+        // Legacy format (pre-versioning, version 0): the JSON is the dungeon directly
+        let dungeon = load_dungeon(0, &raw)?;
+        Ok(Campaign::from_dungeon(dungeon))
     }
 }
 
 /// Load a dungeon from a JSON value using the appropriate adaptor for the given version.
-/// All versions load directly into the current `Dungeon` struct.
-/// New fields added with `#[serde(default)]` are handled automatically.
-/// Add explicit adaptor logic here only for structural changes (renames, restructures).
-fn load_version(version: u32, value: &serde_json::Value) -> Result<Dungeon, String> {
+fn load_dungeon(version: u32, value: &serde_json::Value) -> Result<Dungeon, String> {
     match version {
-        // Version 0: legacy unversioned files
-        // Version 1: first versioned format
-        // Both use the same struct layout — new fields have #[serde(default)]
         0 | 1 => serde_json::from_value(value.clone()).map_err(|e| e.to_string()),
+        v => Err(format!(
+            "Save file version {} is newer than this application supports (max: {})",
+            v, CURRENT_VERSION
+        )),
+    }
+}
 
-        // Future versions add arms here:
-        // 2 => load_v2(value),
-
+/// Load a campaign from a JSON value.
+fn load_campaign(version: u32, value: &serde_json::Value) -> Result<Campaign, String> {
+    match version {
+        2 => serde_json::from_value(value.clone()).map_err(|e| e.to_string()),
         v => Err(format!(
             "Save file version {} is newer than this application supports (max: {})",
             v, CURRENT_VERSION
@@ -63,12 +75,13 @@ fn load_version(version: u32, value: &serde_json::Value) -> Result<Dungeon, Stri
 
 pub enum FileOpResult {
     Saved(Result<PathBuf, String>),
-    Loaded(Result<(Dungeon, PathBuf), String>),
+    Loaded(Result<(Campaign, PathBuf), String>),
     ExportedPng(Result<(), String>),
     ExportedEncounters(Result<(), String>),
     ImportedEncounters(Result<EncounterImportData, String>),
     ExportedCreatures(Result<(), String>),
     ImportedCreatures(Result<Vec<crate::model::monster::CustomMonster>, String>),
+    ImportedMap(Result<Campaign, String>),
     Cancelled,
 }
 
@@ -92,11 +105,11 @@ pub struct CreatureExportData {
     pub custom_monsters: Vec<crate::model::monster::CustomMonster>,
 }
 
-/// Save a dungeon directly to a known file path (no dialog).
+/// Save a campaign directly to a known file path (no dialog).
 /// Returns a receiver that will produce the result.
-pub fn save_dungeon_to_path(dungeon: &Dungeon, path: PathBuf) -> mpsc::Receiver<FileOpResult> {
+pub fn save_campaign_to_path(campaign: &Campaign, path: PathBuf) -> mpsc::Receiver<FileOpResult> {
     let (tx, rx) = mpsc::channel();
-    let json = match serialize_versioned(dungeon) {
+    let json = match serialize_versioned(campaign) {
         Ok(j) => j,
         Err(e) => {
             let _ = tx.send(FileOpResult::Saved(Err(e.to_string())));
@@ -114,20 +127,20 @@ pub fn save_dungeon_to_path(dungeon: &Dungeon, path: PathBuf) -> mpsc::Receiver<
 
 /// Spawn an async save dialog on a background thread.
 /// Returns a receiver that will eventually produce the result.
-pub fn save_dungeon_async(dungeon: &Dungeon) -> mpsc::Receiver<FileOpResult> {
+pub fn save_campaign_async(campaign: &Campaign) -> mpsc::Receiver<FileOpResult> {
     let (tx, rx) = mpsc::channel();
-    let json = match serialize_versioned(dungeon) {
+    let json = match serialize_versioned(campaign) {
         Ok(j) => j,
         Err(e) => {
             let _ = tx.send(FileOpResult::Saved(Err(e.to_string())));
             return rx;
         }
     };
-    let name = dungeon.name.clone();
+    let name = campaign.name.clone();
     std::thread::spawn(move || {
         let handle = pollster::block_on(
             rfd::AsyncFileDialog::new()
-                .set_title("Save Dungeon")
+                .set_title("Save Campaign")
                 .add_filter("Dungeon File", &["dungeon"])
                 .set_file_name(format!("{}.dungeon", name))
                 .save_file(),
@@ -149,7 +162,7 @@ pub fn save_dungeon_async(dungeon: &Dungeon) -> mpsc::Receiver<FileOpResult> {
 }
 
 /// Spawn an async open dialog on a background thread.
-pub fn load_dungeon_async() -> mpsc::Receiver<FileOpResult> {
+pub fn load_campaign_async() -> mpsc::Receiver<FileOpResult> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         let handle = pollster::block_on(
@@ -164,11 +177,43 @@ pub fn load_dungeon_async() -> mpsc::Receiver<FileOpResult> {
                 match std::fs::read_to_string(&path) {
                     Ok(json) => {
                         let result = deserialize_versioned(&json)
-                            .map(|d| (d, path));
+                            .map(|c| (c, path));
                         let _ = tx.send(FileOpResult::Loaded(result));
                     }
                     Err(e) => {
                         let _ = tx.send(FileOpResult::Loaded(Err(e.to_string())));
+                    }
+                }
+            }
+            None => {
+                let _ = tx.send(FileOpResult::Cancelled);
+            }
+        }
+    });
+    rx
+}
+
+/// Open a file dialog to import a map from another .dungeon file.
+/// Returns the loaded campaign so the caller can pick which map(s) to import.
+pub fn import_map_async() -> mpsc::Receiver<FileOpResult> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let handle = pollster::block_on(
+            rfd::AsyncFileDialog::new()
+                .set_title("Import Map From...")
+                .add_filter("Dungeon File", &["dungeon"])
+                .pick_file(),
+        );
+        match handle {
+            Some(file) => {
+                let path = file.path().to_path_buf();
+                match std::fs::read_to_string(&path) {
+                    Ok(json) => {
+                        let result = deserialize_versioned(&json);
+                        let _ = tx.send(FileOpResult::ImportedMap(result));
+                    }
+                    Err(e) => {
+                        let _ = tx.send(FileOpResult::ImportedMap(Err(e.to_string())));
                     }
                 }
             }
@@ -328,6 +373,57 @@ pub fn export_creatures_async(
 }
 
 /// Import custom creatures from a JSON file.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_load_legacy_unversioned() {
+        let json = r#"{"name":"Test Dungeon","graph":{"rooms":[],"connections":[],"graph_positions":{}}}"#;
+        let campaign = deserialize_versioned(json).unwrap();
+        assert_eq!(campaign.maps.len(), 1);
+        assert_eq!(campaign.maps[0].name, "Test Dungeon");
+        assert_eq!(campaign.name, "Test Dungeon");
+    }
+
+    #[test]
+    fn test_load_version_1() {
+        let json = r#"{"version":1,"dungeon":{"name":"V1 Map","graph":{"rooms":[],"connections":[],"graph_positions":{}},"party":[{"id":"pc1","name":"Gandalf","class":"Wizard","ac":12,"max_hp":40,"current_hp":40,"initiative_modifier":2,"passive_perception":14}]}}"#;
+        let campaign = deserialize_versioned(json).unwrap();
+        assert_eq!(campaign.maps.len(), 1);
+        assert_eq!(campaign.maps[0].name, "V1 Map");
+        assert_eq!(campaign.party.len(), 1);
+        assert_eq!(campaign.party[0].name, "Gandalf");
+        assert!(campaign.maps[0].party.is_empty());
+    }
+
+    #[test]
+    fn test_roundtrip_campaign() {
+        let mut campaign = Campaign::new("Test Campaign".to_string());
+        campaign.maps[0].name = "First Map".to_string();
+        campaign.add_map("Second Map".to_string());
+        campaign.party.push(crate::model::PlayerCharacter::new("Fighter".to_string()));
+
+        let json = serialize_versioned(&campaign).unwrap();
+        let loaded = deserialize_versioned(&json).unwrap();
+
+        assert_eq!(loaded.name, "Test Campaign");
+        assert_eq!(loaded.maps.len(), 2);
+        assert_eq!(loaded.maps[0].name, "First Map");
+        assert_eq!(loaded.maps[1].name, "Second Map");
+        assert_eq!(loaded.party.len(), 1);
+        assert_eq!(loaded.party[0].name, "Fighter");
+    }
+
+    #[test]
+    fn test_unsupported_version() {
+        let json = r#"{"version":999,"campaign":{}}"#;
+        let result = deserialize_versioned(json);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("newer than this application supports"));
+    }
+}
+
 pub fn import_creatures_async() -> mpsc::Receiver<FileOpResult> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {

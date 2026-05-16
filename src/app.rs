@@ -1,7 +1,7 @@
 use crate::data::MonsterDatabase;
 use crate::history::UndoHistory;
 use crate::model::combat_stats::CombatStatsCache;
-use crate::model::Dungeon;
+use crate::model::{Campaign, Dungeon};
 use crate::presentation::PresentationState;
 use crate::server::PresentationServer;
 use crate::updater;
@@ -24,6 +24,7 @@ pub enum Tab {
 }
 
 pub struct DungeonApp {
+    pub campaign: Campaign,
     pub dungeon: Dungeon,
     pub active_tab: Tab,
     pub graph_state: GraphEditorState,
@@ -62,6 +63,8 @@ pub struct DungeonApp {
     pending_file_op: Option<std::sync::mpsc::Receiver<crate::io::save_load::FileOpResult>>,
     /// Pending background monster database load.
     pending_monster_db: Option<std::sync::mpsc::Receiver<MonsterDatabase>>,
+    /// Maps available for import (shown in import dialog).
+    import_candidates: Option<Campaign>,
 
     // Undo/Redo
     pub history: UndoHistory,
@@ -109,11 +112,13 @@ impl Default for DungeonApp {
             None
         };
 
-        let dungeon = Dungeon::default();
+        let campaign = Campaign::default();
+        let dungeon = campaign.active_dungeon().clone();
         let history = UndoHistory::new(&dungeon);
         let initial_hash = history.committed_hash();
 
         Self {
+            campaign,
             dungeon,
             active_tab: Tab::Graph,
             graph_state: GraphEditorState::default(),
@@ -140,6 +145,7 @@ impl Default for DungeonApp {
             help_mode: false,
             pending_file_op: None,
             pending_monster_db,
+            import_candidates: None,
             pending_update_check: updater::check_for_update(),
             available_update: None,
             pending_update_apply: None,
@@ -160,6 +166,51 @@ impl Default for DungeonApp {
 }
 
 impl DungeonApp {
+    /// Sync the campaign party into the working dungeon (before frame processing).
+    fn sync_party_to_dungeon(&mut self) {
+        self.dungeon.party = self.campaign.party.clone();
+    }
+
+    /// Sync the working dungeon's party back to campaign (after frame processing).
+    fn sync_party_from_dungeon(&mut self) {
+        self.campaign.party = self.dungeon.party.clone();
+    }
+
+    /// Sync the current working dungeon back into the campaign's map list.
+    fn sync_dungeon_to_campaign(&mut self) {
+        self.campaign.maps[self.campaign.active_map] = self.dungeon.clone();
+        // Clear per-map party (it lives on campaign)
+        self.campaign.maps[self.campaign.active_map].party.clear();
+    }
+
+    /// Load the active map from campaign into the working dungeon.
+    fn load_dungeon_from_campaign(&mut self) {
+        self.dungeon = self.campaign.active_dungeon().clone();
+        self.dungeon.party = self.campaign.party.clone();
+    }
+
+    /// Switch to a different map in the campaign.
+    fn switch_to_map(&mut self, index: usize) {
+        if index == self.campaign.active_map || index >= self.campaign.maps.len() {
+            return;
+        }
+        // Save current map back
+        self.sync_party_from_dungeon();
+        self.sync_dungeon_to_campaign();
+        // Switch
+        self.campaign.switch_map(index);
+        self.load_dungeon_from_campaign();
+        // Reset view state
+        self.graph_state = GraphEditorState::default();
+        self.spatial_state = SpatialViewState::default();
+        self.decor_state = DecorViewState::default();
+        self.styled_state = StyledViewState::default();
+        self.presenting = false;
+        self.presentation = None;
+        self.last_graph_snapshot = self.graph_hash();
+        self.history.reset(&self.dungeon);
+    }
+
     /// Sync presentation state into dungeon.session so it persists on save.
     fn sync_session(&mut self) {
         if let Some(pres) = &self.presentation {
@@ -492,6 +543,9 @@ impl DungeonApp {
 
 impl eframe::App for DungeonApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Sync campaign party into working dungeon at frame start
+        self.sync_party_to_dungeon();
+
         // Poll background monster database load
         if let Some(rx) = &self.pending_monster_db {
             if let Ok(db) = rx.try_recv() {
@@ -505,8 +559,9 @@ impl eframe::App for DungeonApp {
             if let Ok(result) = rx.try_recv() {
                 use crate::io::save_load::FileOpResult;
                 match result {
-                    FileOpResult::Loaded(Ok((d, path))) => {
-                        self.dungeon = d;
+                    FileOpResult::Loaded(Ok((campaign, path))) => {
+                        self.campaign = campaign;
+                        self.load_dungeon_from_campaign();
                         self.graph_state = GraphEditorState::default();
                         self.presenting = false;
                         self.presentation = None;
@@ -565,6 +620,10 @@ impl eframe::App for DungeonApp {
                         }
                     }
                     FileOpResult::ImportedCreatures(Err(e)) => eprintln!("Creature import error: {}", e),
+                    FileOpResult::ImportedMap(Ok(source_campaign)) => {
+                        self.import_candidates = Some(source_campaign);
+                    }
+                    FileOpResult::ImportedMap(Err(e)) => eprintln!("Map import error: {}", e),
                     FileOpResult::Cancelled => {}
                 }
                 self.pending_file_op = None;
@@ -602,6 +661,48 @@ impl eframe::App for DungeonApp {
             }
         }
 
+        // Import map dialog
+        if self.import_candidates.is_some() {
+            let mut close_dialog = false;
+            let mut import_indices: Vec<usize> = Vec::new();
+            egui::Window::new("Import Maps")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    let source = self.import_candidates.as_ref().unwrap();
+                    ui.label(format!("Source: {} ({} map{})", source.name, source.maps.len(), if source.maps.len() == 1 { "" } else { "s" }));
+                    ui.separator();
+                    for (i, map) in source.maps.iter().enumerate() {
+                        if ui.button(format!("Import \"{}\"", map.name)).clicked() {
+                            import_indices.push(i);
+                        }
+                    }
+                    ui.separator();
+                    if ui.button("Import All").clicked() {
+                        import_indices = (0..source.maps.len()).collect();
+                    }
+                    if ui.button("Cancel").clicked() {
+                        close_dialog = true;
+                    }
+                });
+            if !import_indices.is_empty() {
+                self.sync_party_from_dungeon();
+                self.sync_dungeon_to_campaign();
+                let source = self.import_candidates.take().unwrap();
+                for i in import_indices {
+                    if let Some(map) = source.maps.get(i) {
+                        self.campaign.import_dungeon(map.clone());
+                    }
+                }
+                // Also merge source campaign party
+                self.campaign.merge_party(source.party.clone());
+                self.sync_party_to_dungeon();
+            } else if close_dialog {
+                self.import_candidates = None;
+            }
+        }
+
         // Pre-warm render caches for all views (debounced, runs before UI so status bar sees pending state)
         self.prewarm_render_caches(ctx);
 
@@ -627,13 +728,15 @@ impl eframe::App for DungeonApp {
         // Ctrl+S: save to current file or open Save As dialog
         if save_pressed && self.pending_file_op.is_none() {
             self.sync_session();
+            self.sync_party_from_dungeon();
+            self.sync_dungeon_to_campaign();
             if let Some(path) = &self.current_file {
                 self.pending_file_op = Some(
-                    crate::io::save_load::save_dungeon_to_path(&self.dungeon, path.clone()),
+                    crate::io::save_load::save_campaign_to_path(&self.campaign, path.clone()),
                 );
             } else {
                 self.pending_file_op = Some(
-                    crate::io::save_load::save_dungeon_async(&self.dungeon),
+                    crate::io::save_load::save_campaign_async(&self.campaign),
                 );
             }
         }
@@ -662,7 +765,8 @@ impl eframe::App for DungeonApp {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
                     if ui.button("New").clicked() {
-                        self.dungeon = Dungeon::default();
+                        self.campaign = Campaign::default();
+                        self.dungeon = self.campaign.active_dungeon().clone();
                         self.graph_state = GraphEditorState::default();
                         self.spatial_state = SpatialViewState::default();
                         self.decor_state = DecorViewState::default();
@@ -676,20 +780,22 @@ impl eframe::App for DungeonApp {
                     }
                     if ui.button("Open...").clicked() {
                         if self.pending_file_op.is_none() {
-                            self.pending_file_op = Some(crate::io::save_load::load_dungeon_async());
+                            self.pending_file_op = Some(crate::io::save_load::load_campaign_async());
                         }
                         ui.close_menu();
                     }
                     if ui.button("Save  Ctrl+S").clicked() {
                         if self.pending_file_op.is_none() {
                             self.sync_session();
+                            self.sync_party_from_dungeon();
+                            self.sync_dungeon_to_campaign();
                             if let Some(path) = &self.current_file {
                                 self.pending_file_op = Some(
-                                    crate::io::save_load::save_dungeon_to_path(&self.dungeon, path.clone()),
+                                    crate::io::save_load::save_campaign_to_path(&self.campaign, path.clone()),
                                 );
                             } else {
                                 self.pending_file_op = Some(
-                                    crate::io::save_load::save_dungeon_async(&self.dungeon),
+                                    crate::io::save_load::save_campaign_async(&self.campaign),
                                 );
                             }
                         }
@@ -698,7 +804,9 @@ impl eframe::App for DungeonApp {
                     if ui.button("Save As...").clicked() {
                         if self.pending_file_op.is_none() {
                             self.sync_session();
-                            self.pending_file_op = Some(crate::io::save_load::save_dungeon_async(&self.dungeon));
+                            self.sync_party_from_dungeon();
+                            self.sync_dungeon_to_campaign();
+                            self.pending_file_op = Some(crate::io::save_load::save_campaign_async(&self.campaign));
                         }
                         ui.close_menu();
                     }
@@ -733,6 +841,73 @@ impl eframe::App for DungeonApp {
                         self.decor_state.selected_decor = None;
                         self.last_graph_snapshot = self.graph_hash();
                         ui.close_menu();
+                    }
+                });
+                ui.menu_button("Campaign", |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Name:");
+                        ui.text_edit_singleline(&mut self.campaign.name);
+                    });
+                    ui.separator();
+                    if ui.button("New Map").clicked() {
+                        self.sync_party_from_dungeon();
+                        self.sync_dungeon_to_campaign();
+                        let map_name = format!("Map {}", self.campaign.maps.len() + 1);
+                        self.campaign.add_map(map_name);
+                        let new_idx = self.campaign.maps.len() - 1;
+                        self.campaign.switch_map(new_idx);
+                        self.load_dungeon_from_campaign();
+                        self.graph_state = GraphEditorState::default();
+                        self.spatial_state = SpatialViewState::default();
+                        self.decor_state = DecorViewState::default();
+                        self.styled_state = StyledViewState::default();
+                        self.presenting = false;
+                        self.presentation = None;
+                        self.last_graph_snapshot = self.graph_hash();
+                        self.history.reset(&self.dungeon);
+                        ui.close_menu();
+                    }
+                    if ui.button("Import Map...").clicked() {
+                        if self.pending_file_op.is_none() {
+                            self.pending_file_op = Some(crate::io::save_load::import_map_async());
+                        }
+                        ui.close_menu();
+                    }
+                    if self.campaign.maps.len() > 1 {
+                        if ui.button("Remove Current Map").clicked() {
+                            self.sync_party_from_dungeon();
+                            self.sync_dungeon_to_campaign();
+                            let idx = self.campaign.active_map;
+                            self.campaign.remove_map(idx);
+                            self.load_dungeon_from_campaign();
+                            self.graph_state = GraphEditorState::default();
+                            self.spatial_state = SpatialViewState::default();
+                            self.decor_state = DecorViewState::default();
+                            self.styled_state = StyledViewState::default();
+                            self.presenting = false;
+                            self.presentation = None;
+                            self.last_graph_snapshot = self.graph_hash();
+                            self.history.reset(&self.dungeon);
+                            ui.close_menu();
+                        }
+                    }
+                    ui.separator();
+                    ui.label("Maps:");
+                    let active = self.campaign.active_map;
+                    let mut switch_to = None;
+                    for (i, map) in self.campaign.maps.iter().enumerate() {
+                        let label = if i == active {
+                            format!("> {}", map.name)
+                        } else {
+                            map.name.clone()
+                        };
+                        if ui.selectable_label(i == active, &label).clicked() && i != active {
+                            switch_to = Some(i);
+                            ui.close_menu();
+                        }
+                    }
+                    if let Some(idx) = switch_to {
+                        self.switch_to_map(idx);
                     }
                 });
 
@@ -778,16 +953,36 @@ impl eframe::App for DungeonApp {
                         ui.separator();
                     }
                     let unsaved = self.history.committed_hash() != self.last_saved_hash;
-                    let title = if unsaved {
-                        format!("{} *", self.dungeon.name)
+                    let title = if self.campaign.maps.len() > 1 {
+                        let base = format!("{} - {}", self.campaign.name, self.dungeon.name);
+                        if unsaved { format!("{} *", base) } else { base }
                     } else {
-                        self.dungeon.name.clone()
+                        if unsaved { format!("{} *", self.dungeon.name) } else { self.dungeon.name.clone() }
                     };
                     ui.label(&title);
                 });
             });
         });
         self.annotation_state.panel_rects.push(menu_response.response.rect);
+
+        // Map tab strip (shown when campaign has multiple maps)
+        if self.campaign.maps.len() > 1 && !self.presenting {
+            let mut switch_to = None;
+            egui::TopBottomPanel::top("map_tabs").show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    for (i, map) in self.campaign.maps.iter().enumerate() {
+                        if ui.selectable_label(i == self.campaign.active_map, &map.name).clicked()
+                            && i != self.campaign.active_map
+                        {
+                            switch_to = Some(i);
+                        }
+                    }
+                });
+            });
+            if let Some(idx) = switch_to {
+                self.switch_to_map(idx);
+            }
+        }
 
         // Handle "Recompute All" request from sidebar
         if self.spatial_state.recompute_requested {
@@ -1231,6 +1426,9 @@ impl eframe::App for DungeonApp {
             );
         }
 
+        // Sync party changes back to campaign
+        self.sync_party_from_dungeon();
+
         // Track state changes for undo/redo
         let pointer_down = ctx.input(|i| i.pointer.any_down());
         self.history.track(&self.dungeon, pointer_down);
@@ -1250,9 +1448,11 @@ impl eframe::App for DungeonApp {
             && committed_hash != self.last_autosave_hash
         {
             self.sync_session();
+            self.sync_party_from_dungeon();
+            self.sync_dungeon_to_campaign();
             let path = self.current_file.clone().unwrap();
             self.pending_file_op = Some(
-                crate::io::save_load::save_dungeon_to_path(&self.dungeon, path),
+                crate::io::save_load::save_campaign_to_path(&self.campaign, path),
             );
             self.last_autosave = std::time::Instant::now();
             self.autosave_due = false;

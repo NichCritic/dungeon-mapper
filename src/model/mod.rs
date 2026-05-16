@@ -1,4 +1,5 @@
 pub mod annotation;
+pub mod campaign;
 pub mod room;
 pub mod combat_stats;
 pub mod connection;
@@ -11,6 +12,7 @@ pub mod theme;
 pub mod dungeon;
 
 pub use annotation::*;
+pub use campaign::Campaign;
 pub use room::*;
 pub use connection::*;
 pub use encounter::*;

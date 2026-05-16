@@ -44,6 +44,7 @@ pub struct Dungeon {
     pub name: String,
     pub graph: DungeonGraph,
     pub layout: Option<SpatialLayout>,
+    #[serde(default)]
     pub theme: Theme,
     #[serde(default)]
     pub encounters: Vec<Encounter>,
