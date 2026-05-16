@@ -2,4 +2,5 @@
 Cargo.lock
 /5etools-src
 .claude/
+.cargo/config.toml
 signing-key.secret
