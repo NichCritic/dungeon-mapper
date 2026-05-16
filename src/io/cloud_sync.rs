@@ -528,6 +528,76 @@ pub fn sync_pull_async(
 }
 
 
+/// A file listing from the Drive folder.
+#[derive(Clone, Debug)]
+pub struct DriveFile {
+    pub id: String,
+    pub name: String,
+}
+
+/// List campaign files in the Drive folder.
+pub fn list_drive_files(state: &mut CloudSyncState) -> Result<Vec<DriveFile>, String> {
+    let token = ensure_valid_token(state)?;
+    let folder_id = ensure_drive_folder(state, &token)?;
+
+    let client = reqwest::blocking::Client::new();
+    let query = format!("'{}' in parents and trashed=false", folder_id);
+    let resp = client.get(DRIVE_FILES_URL)
+        .bearer_auth(&token)
+        .query(&[("q", query.as_str()), ("fields", "files(id,name)")])
+        .send()
+        .map_err(|e| e.to_string())?;
+    let json: serde_json::Value = resp.json().map_err(|e| e.to_string())?;
+    let files = json["files"].as_array()
+        .map(|arr| arr.iter().filter_map(|f| {
+            Some(DriveFile {
+                id: f["id"].as_str()?.to_string(),
+                name: f["name"].as_str()?.to_string(),
+            })
+        }).collect())
+        .unwrap_or_default();
+    Ok(files)
+}
+
+/// List Drive files in the background.
+pub fn list_drive_files_async(
+    mut state: CloudSyncState,
+) -> mpsc::Receiver<(Result<Vec<DriveFile>, String>, CloudSyncState)> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let result = list_drive_files(&mut state);
+        let _ = tx.send((result, state));
+    });
+    rx
+}
+
+/// Download a specific file from Drive by ID.
+pub fn open_from_drive(state: &mut CloudSyncState, file_id: &str) -> Result<String, String> {
+    let token = ensure_valid_token(state)?;
+    let content = download_from_drive(&token, file_id)?;
+    state.drive_file_id = Some(file_id.to_string());
+    // Parse the version so synced_version is set correctly
+    let remote_version = serde_json::from_str::<serde_json::Value>(&content).ok()
+        .and_then(|v| v.get("campaign")?.get("version")?.as_u64())
+        .unwrap_or(0);
+    state.synced_version = remote_version;
+    save_state(state);
+    Ok(content)
+}
+
+/// Open a file from Drive in the background.
+pub fn open_from_drive_async(
+    mut state: CloudSyncState,
+    file_id: String,
+) -> mpsc::Receiver<(Result<String, String>, CloudSyncState)> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let result = open_from_drive(&mut state, &file_id);
+        let _ = tx.send((result, state));
+    });
+    rx
+}
+
 // --- Utility functions ---
 
 fn now_unix() -> u64 {
