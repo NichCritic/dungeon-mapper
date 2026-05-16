@@ -1039,9 +1039,6 @@ impl eframe::App for DungeonApp {
                                     }
                                 }
                             }
-                            if let Some(status) = &self.cloud_status {
-                                ui.label(status.as_str());
-                            }
                         } else if self.pending_cloud_op.is_none() {
                             if ui.button("Login to Google Drive").clicked() {
                                 let rx = crate::io::cloud_sync::login_async();
