@@ -12,7 +12,6 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       changed: ${{ steps.check.outputs.changed }}
-      version: ${{ steps.check.outputs.version }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -23,7 +22,6 @@ jobs:
         run: |
           VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          # Check if a release tag starting with this version already exists
           if git tag -l "v${VERSION}-*" | grep -q .; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
             echo "Version $VERSION already released, skipping build"
