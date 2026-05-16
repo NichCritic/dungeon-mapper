@@ -1352,7 +1352,20 @@ impl eframe::App for DungeonApp {
                 } else {
                     crate::ui::status_bar::UpdateState::None
                 };
-                let update_clicked = crate::ui::status_bar::status_bar(ui, &self.dungeon, zoom, saved, &stale_renders, update_state);
+                let cloud_state = if !self.cloud_sync_enabled || !self.cloud_sync.is_logged_in() {
+                    crate::ui::status_bar::CloudState::Disabled
+                } else if self.pending_cloud_op.is_some() {
+                    crate::ui::status_bar::CloudState::Syncing
+                } else if let Some(status) = &self.cloud_status {
+                    if status.contains("error") || status.contains("Error") || status.contains("failed") || status.contains("Failed") || status.contains("Conflict") {
+                        crate::ui::status_bar::CloudState::Error(status.as_str())
+                    } else {
+                        crate::ui::status_bar::CloudState::Synced
+                    }
+                } else {
+                    crate::ui::status_bar::CloudState::Synced
+                };
+                let update_clicked = crate::ui::status_bar::status_bar(ui, &self.dungeon, zoom, saved, cloud_state, &stale_renders, update_state);
                 if update_clicked {
                     self.show_update_dialog = true;
                 }
