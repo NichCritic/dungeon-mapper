@@ -14,6 +14,12 @@ use crate::ui::styled_view::{self, StyledViewState};
 use crate::ui::presentation_view::{self, PresentationViewState, ServerAction};
 use crate::ui::player_view::{self, PlayerViewState};
 
+/// Result wrapper for async cloud sync operations.
+enum CloudSyncOp {
+    Login(crate::io::cloud_sync::LoginResult),
+    SyncDone(crate::io::cloud_sync::SyncResult, crate::io::cloud_sync::CloudSyncState),
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Tab {
     Graph,
@@ -71,6 +77,15 @@ pub struct DungeonApp {
     pending_monster_db: Option<std::sync::mpsc::Receiver<MonsterDatabase>>,
     /// Maps available for import (shown in import dialog).
     import_candidates: Option<Campaign>,
+
+    // Cloud sync
+    cloud_sync: crate::io::cloud_sync::CloudSyncState,
+    /// Whether cloud sync is enabled for the current file.
+    cloud_sync_enabled: bool,
+    /// Pending cloud sync operation (login, push, pull).
+    pending_cloud_op: Option<std::sync::mpsc::Receiver<CloudSyncOp>>,
+    /// Status message from last cloud operation.
+    cloud_status: Option<String>,
 
     // Undo/Redo
     pub history: UndoHistory,
@@ -155,6 +170,10 @@ impl Default for DungeonApp {
             pending_file_op: None,
             pending_monster_db,
             import_candidates: None,
+            cloud_sync: crate::io::cloud_sync::load_state(),
+            cloud_sync_enabled: false,
+            pending_cloud_op: None,
+            cloud_status: None,
             pending_update_check: updater::check_for_update(),
             available_update: None,
             pending_update_apply: None,
@@ -190,6 +209,8 @@ impl DungeonApp {
         self.campaign.maps[self.campaign.active_map] = self.dungeon.clone();
         // Clear per-map party (it lives on campaign)
         self.campaign.maps[self.campaign.active_map].party.clear();
+        // Bump version for conflict detection
+        self.campaign.version += 1;
     }
 
     /// Load the active map from campaign into the working dungeon.
@@ -225,6 +246,28 @@ impl DungeonApp {
         if let Some(pres) = &self.presentation {
             self.dungeon.session = pres.snapshot_session(&self.dungeon);
         }
+    }
+
+    /// Trigger an async push to Google Drive.
+    fn trigger_cloud_push(&mut self) {
+        let json = match crate::io::save_load::serialize_campaign_json(&self.campaign) {
+            Ok(j) => j,
+            Err(e) => {
+                self.cloud_status = Some(format!("Sync serialize error: {}", e));
+                return;
+            }
+        };
+        let state = self.cloud_sync.clone();
+        let name = self.campaign.name.clone();
+        let version = self.campaign.version;
+        let rx = crate::io::cloud_sync::sync_push_async(state, json, name, version);
+        let (tx2, rx2) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            if let Ok((result, new_state)) = rx.recv() {
+                let _ = tx2.send(CloudSyncOp::SyncDone(result, new_state));
+            }
+        });
+        self.pending_cloud_op = Some(rx2);
     }
 
     fn graph_hash(&self) -> u64 {
@@ -597,6 +640,10 @@ impl eframe::App for DungeonApp {
                     FileOpResult::Saved(Ok(path)) => {
                         self.current_file = Some(path);
                         self.last_saved_hash = self.history.committed_hash();
+                        // Auto-push to Drive if sync is enabled
+                        if self.cloud_sync_enabled && self.cloud_sync.is_logged_in() && self.pending_cloud_op.is_none() {
+                            self.trigger_cloud_push();
+                        }
                     }
                     FileOpResult::Saved(Err(e)) => eprintln!("Save error: {}", e),
                     FileOpResult::ExportedPng(Ok(())) => {}
@@ -647,6 +694,62 @@ impl eframe::App for DungeonApp {
                     FileOpResult::Cancelled => {}
                 }
                 self.pending_file_op = None;
+            }
+        }
+
+        // Poll pending cloud sync operation
+        if let Some(rx) = &self.pending_cloud_op {
+            if let Ok(op) = rx.try_recv() {
+                match op {
+                    CloudSyncOp::Login(crate::io::cloud_sync::LoginResult::Success(tokens)) => {
+                        self.cloud_sync.tokens = Some(tokens);
+                        crate::io::cloud_sync::save_state(&self.cloud_sync);
+                        self.cloud_status = Some("Logged in to Google Drive".into());
+                    }
+                    CloudSyncOp::Login(crate::io::cloud_sync::LoginResult::Error(e)) => {
+                        self.cloud_status = Some(format!("Login failed: {}", e));
+                    }
+                    CloudSyncOp::SyncDone(result, new_state) => {
+                        self.cloud_sync = new_state;
+                        match result {
+                            crate::io::cloud_sync::SyncResult::Uploaded => {
+                                self.cloud_status = Some("Synced to Drive".into());
+                            }
+                            crate::io::cloud_sync::SyncResult::Downloaded(json) => {
+                                // Load the newer campaign from Drive
+                                match crate::io::save_load::deserialize_campaign_json(&json) {
+                                    Ok(campaign) => {
+                                        self.campaign = campaign;
+                                        self.load_dungeon_from_campaign();
+                                        self.graph_state = GraphEditorState::default();
+                                        self.presenting = false;
+                                        self.presentation = None;
+                                        self.last_graph_snapshot = self.graph_hash();
+                                        self.history.reset(&self.dungeon);
+                                        self.last_saved_hash = self.history.committed_hash();
+                                        self.cloud_status = Some("Downloaded newer version from Drive".into());
+                                    }
+                                    Err(e) => {
+                                        self.cloud_status = Some(format!("Failed to parse downloaded file: {}", e));
+                                    }
+                                }
+                            }
+                            crate::io::cloud_sync::SyncResult::Conflict { local_version, remote_version } => {
+                                self.cloud_status = Some(format!(
+                                    "Conflict! Local v{} vs remote v{}. Pull to get remote version, or force push to overwrite.",
+                                    local_version, remote_version
+                                ));
+                            }
+                            crate::io::cloud_sync::SyncResult::NotLoggedIn => {
+                                self.cloud_status = Some("Not logged in".into());
+                            }
+                            crate::io::cloud_sync::SyncResult::Error(e) => {
+                                self.cloud_status = Some(format!("Sync error: {}", e));
+                            }
+                        }
+                    }
+                }
+                self.pending_cloud_op = None;
             }
         }
 
@@ -832,6 +935,45 @@ impl eframe::App for DungeonApp {
                             self.pending_file_op = Some(crate::io::save_load::save_campaign_async(&self.campaign));
                         }
                         ui.close_menu();
+                    }
+                    // Cloud sync section
+                    if crate::io::cloud_sync::is_available() {
+                        ui.separator();
+                        if self.cloud_sync.is_logged_in() {
+                            ui.checkbox(&mut self.cloud_sync_enabled, "Cloud Sync");
+                            if self.cloud_sync_enabled && self.pending_cloud_op.is_none() {
+                                if ui.button("Pull from Drive").clicked() {
+                                    let state = self.cloud_sync.clone();
+                                    let version = self.campaign.version;
+                                    let rx = crate::io::cloud_sync::sync_pull_async(state, version);
+                                    let (tx2, rx2) = std::sync::mpsc::channel();
+                                    std::thread::spawn(move || {
+                                        if let Ok((result, new_state)) = rx.recv() {
+                                            let _ = tx2.send(CloudSyncOp::SyncDone(result, new_state));
+                                        }
+                                    });
+                                    self.pending_cloud_op = Some(rx2);
+                                    ui.close_menu();
+                                }
+                            }
+                            if let Some(status) = &self.cloud_status {
+                                ui.label(status.as_str());
+                            }
+                        } else if self.pending_cloud_op.is_none() {
+                            if ui.button("Login to Google Drive").clicked() {
+                                let rx = crate::io::cloud_sync::login_async();
+                                let (tx2, rx2) = std::sync::mpsc::channel();
+                                std::thread::spawn(move || {
+                                    if let Ok(result) = rx.recv() {
+                                        let _ = tx2.send(CloudSyncOp::Login(result));
+                                    }
+                                });
+                                self.pending_cloud_op = Some(rx2);
+                                ui.close_menu();
+                            }
+                        } else {
+                            ui.label("Logging in...");
+                        }
                     }
                 });
                 ui.menu_button("Edit", |ui| {

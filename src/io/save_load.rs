@@ -23,6 +23,16 @@ fn serialize_versioned(campaign: &Campaign) -> Result<String, String> {
     serde_json::to_string_pretty(&save_file).map_err(|e| e.to_string())
 }
 
+/// Public entry point for deserializing campaign JSON (used by cloud sync).
+pub fn deserialize_campaign_json(json: &str) -> Result<Campaign, String> {
+    deserialize_versioned(json)
+}
+
+/// Serialize a campaign to JSON (used by cloud sync).
+pub fn serialize_campaign_json(campaign: &Campaign) -> Result<String, String> {
+    serialize_versioned(campaign)
+}
+
 /// Deserialize a campaign from JSON, handling all format versions:
 /// - Version 0: legacy unversioned single dungeon (raw JSON is the dungeon)
 /// - Version 1: versioned single dungeon ({ version, dungeon })

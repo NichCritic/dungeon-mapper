@@ -20,6 +20,7 @@ regex = "1"
 tungstenite = "0.24"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"], default-features = false }
+open = "5"
 self-replace = "1"
 semver = "1"
 

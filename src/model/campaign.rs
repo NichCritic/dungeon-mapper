@@ -14,6 +14,9 @@ pub struct Campaign {
     /// Player characters shared across all maps in the campaign.
     #[serde(default)]
     pub party: Vec<PlayerCharacter>,
+    /// Monotonically increasing version counter, bumped on each save.
+    #[serde(default)]
+    pub version: u64,
 }
 
 impl Campaign {
@@ -23,6 +26,7 @@ impl Campaign {
             maps: vec![Dungeon::default()],
             active_map: 0,
             party: Vec::new(),
+            version: 0,
         }
     }
 
@@ -35,6 +39,7 @@ impl Campaign {
             maps: vec![dungeon],
             active_map: 0,
             party,
+            version: 0,
         }
     }
 
