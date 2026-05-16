@@ -3,12 +3,14 @@ use super::dice::{AttackResult, roll_dice_expr};
 use crate::model::combat_stats::{ParsedAbility, ParsedAttack};
 
 /// A single line in the combat log.
+#[derive(Clone)]
 pub struct LogEntry {
     pub text: String,
     pub color: [u8; 3],
 }
 
 /// Scrollable combat log with colored text lines.
+#[derive(Clone)]
 pub struct CombatLog {
     pub entries: Vec<LogEntry>,
 }

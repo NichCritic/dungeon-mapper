@@ -52,6 +52,12 @@ pub struct DungeonApp {
     pub server_port: u16,
     /// Hash of the last PNG pushed to the server, to avoid redundant updates.
     last_server_push_hash: u64,
+    /// Which map the player view shows. None = same as DM's active map.
+    player_map_index: Option<usize>,
+    /// Dungeon snapshot for the player view when it differs from DM view.
+    player_dungeon: Option<Dungeon>,
+    /// Presentation state for the player view when it differs from DM view.
+    player_presentation: Option<PresentationState>,
 
     // Annotation mode
     pub annotation_mode: bool,
@@ -140,6 +146,9 @@ impl Default for DungeonApp {
             server: None,
             server_port: 8080,
             last_server_push_hash: 0,
+            player_map_index: None,
+            player_dungeon: None,
+            player_presentation: None,
             annotation_mode: false,
             annotation_state: AnnotationModeState::default(),
             help_mode: false,
@@ -395,8 +404,16 @@ impl DungeonApp {
 
     /// Render a player-view PNG for the web server.
     fn render_player_png(&self) -> Option<Vec<u8>> {
-        let layout = self.dungeon.layout.as_ref()?;
-        let presentation = self.presentation.as_ref()?;
+        // Use player-specific map if it differs from DM view
+        let (dungeon, pres) = if self.player_map_index.is_some()
+            && self.player_map_index != Some(self.campaign.active_map)
+        {
+            (self.player_dungeon.as_ref()?, self.player_presentation.as_ref()?)
+        } else {
+            (&self.dungeon, self.presentation.as_ref()?)
+        };
+        let layout = dungeon.layout.as_ref()?;
+        let presentation = pres;
 
         let (min_x, min_y, max_x, max_y) = layout.extents();
         let margin = 2;
@@ -422,12 +439,12 @@ impl DungeonApp {
         };
         crate::render::presentation::render_player_view(
             &mut renderer,
-            &self.dungeon.graph,
+            &dungeon.graph,
             layout,
-            &self.dungeon.theme,
+            &dungeon.theme,
             presentation,
-            &self.dungeon.light_sources,
-            self.dungeon.ambient_light,
+            &dungeon.light_sources,
+            dungeon.ambient_light,
             &options,
         );
 
@@ -565,6 +582,9 @@ impl eframe::App for DungeonApp {
                         self.graph_state = GraphEditorState::default();
                         self.presenting = false;
                         self.presentation = None;
+                        self.player_map_index = None;
+                        self.player_dungeon = None;
+                        self.player_presentation = None;
                         // Sync snapshot so auto-solve doesn't re-route saved corridors
                         self.last_graph_snapshot = self.graph_hash();
                         self.history.reset(&self.dungeon);
@@ -773,6 +793,9 @@ impl eframe::App for DungeonApp {
                         self.styled_state = StyledViewState::default();
                         self.presenting = false;
                         self.presentation = None;
+                        self.player_map_index = None;
+                        self.player_dungeon = None;
+                        self.player_presentation = None;
                         self.history.reset(&self.dungeon);
                         self.current_file = None;
                         self.last_saved_hash = 0;
@@ -920,6 +943,9 @@ impl eframe::App for DungeonApp {
                         self.player_viewport_open = false;
                         self.player_viewport_initialized = false;
                         self.combat_window_open = false;
+                        self.player_map_index = None;
+                        self.player_dungeon = None;
+                        self.player_presentation = None;
                         if let Some(server) = &mut self.server {
                             server.stop();
                         }
@@ -966,21 +992,63 @@ impl eframe::App for DungeonApp {
         self.annotation_state.panel_rects.push(menu_response.response.rect);
 
         // Map tab strip (shown when campaign has multiple maps)
-        if self.campaign.maps.len() > 1 && !self.presenting {
+        if self.campaign.maps.len() > 1 {
             let mut switch_to = None;
+            let mut push_to_players = false;
             egui::TopBottomPanel::top("map_tabs").show(ctx, |ui| {
                 ui.horizontal(|ui| {
+                    let player_idx = self.player_map_index.unwrap_or(self.campaign.active_map);
                     for (i, map) in self.campaign.maps.iter().enumerate() {
-                        if ui.selectable_label(i == self.campaign.active_map, &map.name).clicked()
-                            && i != self.campaign.active_map
-                        {
+                        let is_active = i == self.campaign.active_map;
+                        let is_player = self.presenting && i == player_idx;
+                        let label = if is_player && !is_active {
+                            format!("{} [player]", map.name)
+                        } else if is_player {
+                            format!("{} [player]", map.name)
+                        } else {
+                            map.name.clone()
+                        };
+                        if ui.selectable_label(is_active, &label).clicked() && !is_active {
                             switch_to = Some(i);
+                        }
+                    }
+                    if self.presenting {
+                        ui.separator();
+                        let dm_is_player = self.player_map_index.is_none()
+                            || self.player_map_index == Some(self.campaign.active_map);
+                        if !dm_is_player {
+                            if ui.button("Show to Players").clicked() {
+                                push_to_players = true;
+                            }
                         }
                     }
                 });
             });
+            if push_to_players {
+                // Push current DM map to player view
+                self.player_map_index = Some(self.campaign.active_map);
+                self.player_dungeon = Some(self.dungeon.clone());
+                self.player_presentation = self.presentation.clone();
+            }
             if let Some(idx) = switch_to {
-                self.switch_to_map(idx);
+                if self.presenting {
+                    // During presentation, switching DM map doesn't affect player view
+                    // If player was following DM, freeze it on the old map first
+                    if self.player_map_index.is_none() {
+                        self.player_map_index = Some(self.campaign.active_map);
+                        self.player_dungeon = Some(self.dungeon.clone());
+                        self.player_presentation = self.presentation.clone();
+                    }
+                    self.switch_to_map(idx);
+                    // Re-enter presentation on new map
+                    self.presenting = true;
+                    self.presentation = Some(PresentationState::new_from_dungeon(&self.dungeon));
+                    if self.dungeon.layout.is_none() && !self.dungeon.graph.rooms.is_empty() {
+                        self.solve_layout_full();
+                    }
+                } else {
+                    self.switch_to_map(idx);
+                }
             }
         }
 
@@ -1466,7 +1534,17 @@ impl eframe::App for DungeonApp {
 
         // Player viewport (second window)
         if self.presenting && self.player_viewport_open {
-            if let Some(presentation) = &self.presentation {
+            // Determine which dungeon/presentation to show players
+            let (player_dg, player_pres) = if self.player_map_index.is_some()
+                && self.player_map_index != Some(self.campaign.active_map)
+            {
+                // Player sees a different map than DM
+                (self.player_dungeon.as_ref(), self.player_presentation.as_ref())
+            } else {
+                // Player sees same map as DM
+                (Some(&self.dungeon), self.presentation.as_ref())
+            };
+            if let (Some(dungeon), Some(presentation)) = (player_dg, player_pres) {
                 let mut builder = egui::ViewportBuilder::default()
                     .with_title("Dungeon Mapper - Player View");
                 if !self.player_viewport_initialized {
@@ -1479,7 +1557,7 @@ impl eframe::App for DungeonApp {
                     |ctx, _class| {
                         player_view::player_viewport(
                             ctx,
-                            &self.dungeon,
+                            dungeon,
                             presentation,
                             &mut self.player_view_state,
                         );

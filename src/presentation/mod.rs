@@ -41,6 +41,7 @@ impl VisibilityProvider for PresentationSnapshot {
     }
 }
 
+#[derive(Clone)]
 pub struct PresentationState {
     /// Per-room visibility, directly controlled by the DM.
     pub room_visibility: HashMap<String, Visibility>,

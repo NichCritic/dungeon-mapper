@@ -100,6 +100,7 @@ fn adv_label(hidden: bool, surprised: bool) -> &'static str {
 }
 
 /// Tracks combat state for all active encounters.
+#[derive(Clone)]
 pub struct CombatTracker {
     pub instances: HashMap<MonsterInstanceId, MonsterInstance>,
     pub players: HashMap<String, PlayerCombatState>,
