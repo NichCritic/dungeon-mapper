@@ -14,6 +14,17 @@ use crate::ui::styled_view::{self, StyledViewState};
 use crate::ui::presentation_view::{self, PresentationViewState, ServerAction};
 use crate::ui::player_view::{self, PlayerViewState};
 
+/// Restart the application by spawning a new process and exiting.
+fn restart_app() -> ! {
+    let exe = std::env::current_exe().expect("Failed to get current exe path");
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    std::process::Command::new(exe)
+        .args(&args)
+        .spawn()
+        .expect("Failed to restart application");
+    std::process::exit(0);
+}
+
 /// Result wrapper for async cloud sync operations.
 enum CloudSyncOp {
     Login(crate::io::cloud_sync::LoginResult),
@@ -109,9 +120,10 @@ pub struct DungeonApp {
     pending_update_check: Option<std::sync::mpsc::Receiver<updater::UpdateStatus>>,
     available_update: Option<updater::UpdateInfo>,
     pending_update_apply: Option<std::sync::mpsc::Receiver<updater::ApplyStatus>>,
-    update_applied: bool,
+    update_ready_to_restart: bool,
     update_error: Option<String>,
     show_update_dialog: bool,
+    last_update_check: std::time::Instant,
 
     /// Hash of dungeon state used for render pre-warming debounce.
     last_prewarm_hash: u64,
@@ -182,9 +194,10 @@ impl Default for DungeonApp {
             pending_update_check: updater::check_for_update(),
             available_update: None,
             pending_update_apply: None,
-            update_applied: false,
+            update_ready_to_restart: false,
             update_error: None,
             show_update_dialog: false,
+            last_update_check: std::time::Instant::now(),
             history,
             current_file: None,
             last_saved_hash: initial_hash,
@@ -668,6 +681,9 @@ impl eframe::App for DungeonApp {
                     FileOpResult::Saved(Ok(path)) => {
                         self.current_file = Some(path);
                         self.last_saved_hash = self.history.committed_hash();
+                        if self.update_ready_to_restart {
+                            restart_app();
+                        }
                         // Auto-push to Drive if sync is enabled
                         if self.cloud_sync_enabled && self.cloud_sync.is_logged_in() && self.pending_cloud_op.is_none() {
                             self.trigger_cloud_push();
@@ -786,6 +802,7 @@ impl eframe::App for DungeonApp {
         // Poll update check
         if let Some(rx) = &self.pending_update_check {
             if let Ok(status) = rx.try_recv() {
+                self.last_update_check = std::time::Instant::now();
                 match status {
                     updater::UpdateStatus::Available(info) => {
                         self.available_update = Some(info);
@@ -797,6 +814,11 @@ impl eframe::App for DungeonApp {
                 }
                 self.pending_update_check = None;
             }
+        } else if self.available_update.is_none()
+            && !self.update_ready_to_restart
+            && self.last_update_check.elapsed() >= std::time::Duration::from_secs(60)
+        {
+            self.pending_update_check = updater::check_for_update();
         }
 
         // Poll update apply
@@ -804,7 +826,12 @@ impl eframe::App for DungeonApp {
             if let Ok(status) = rx.try_recv() {
                 match status {
                     updater::ApplyStatus::Success => {
-                        self.update_applied = true;
+                        let has_unsaved = self.history.committed_hash() != self.last_saved_hash;
+                        if has_unsaved {
+                            self.update_ready_to_restart = true;
+                        } else {
+                            restart_app();
+                        }
                     }
                     updater::ApplyStatus::Error(e) => {
                         self.update_error = Some(e);
@@ -1348,7 +1375,7 @@ impl eframe::App for DungeonApp {
             }
             ui.horizontal(|ui| {
                 let saved = self.history.committed_hash() == self.last_saved_hash;
-                let update_state = if self.update_applied {
+                let update_state = if self.update_ready_to_restart {
                     crate::ui::status_bar::UpdateState::Applied
                 } else if self.pending_update_apply.is_some() {
                     crate::ui::status_bar::UpdateState::Applying
@@ -1432,6 +1459,39 @@ impl eframe::App for DungeonApp {
             } else {
                 self.show_update_dialog = false;
             }
+        }
+
+        // Update restart dialog (shown when update applied but unsaved changes exist)
+        if self.update_ready_to_restart {
+            egui::Window::new("Update Ready")
+                .id(egui::Id::new("update_restart_dialog"))
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label("An update has been installed. You have unsaved changes.");
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Save and Restart").clicked() {
+                            self.sync_session();
+                            self.sync_party_from_dungeon();
+                            self.sync_dungeon_to_campaign();
+                            if let Some(path) = &self.current_file {
+                                self.pending_file_op = Some(
+                                    crate::io::save_load::save_campaign_to_path(&self.campaign, path.clone()),
+                                );
+                            } else {
+                                self.pending_file_op = Some(
+                                    crate::io::save_load::save_campaign_async(&self.campaign),
+                                );
+                            }
+                            // restart_app() will be called when the save completes
+                        }
+                        if ui.button("Restart Later").clicked() {
+                            self.update_ready_to_restart = false;
+                        }
+                    });
+                });
         }
 
         // Combat log panel (bottom, only during presentation with active combat)
