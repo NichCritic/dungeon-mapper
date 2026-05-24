@@ -753,6 +753,7 @@ impl eframe::App for DungeonApp {
                                 ));
                             }
                             crate::io::cloud_sync::SyncResult::NotLoggedIn => {
+                                self.cloud_sync_enabled = false;
                                 self.cloud_status = Some("Not logged in".into());
                             }
                             crate::io::cloud_sync::SyncResult::Error(e) => {
@@ -1037,6 +1038,12 @@ impl eframe::App for DungeonApp {
                                         self.pending_cloud_op = Some(rx2);
                                         ui.close_menu();
                                     }
+                                }
+                                if ui.button("Logout").clicked() {
+                                    self.cloud_sync.logout();
+                                    self.cloud_sync_enabled = false;
+                                    self.cloud_status = Some("Logged out".into());
+                                    ui.close_menu();
                                 }
                             }
                         } else if self.pending_cloud_op.is_none() {

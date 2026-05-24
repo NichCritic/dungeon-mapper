@@ -80,6 +80,14 @@ impl CloudSyncState {
         self.tokens.is_some()
     }
 
+    /// Clear tokens and persisted state (logout).
+    pub fn logout(&mut self) {
+        self.tokens = None;
+        self.drive_file_id = None;
+        self.drive_folder_id = None;
+        self.synced_version = 0;
+        save_state(self);
+    }
 }
 
 /// Get the path to the token storage file.
@@ -269,6 +277,13 @@ fn refresh_access_token(state: &mut CloudSyncState) -> Result<(), String> {
         .map_err(|e| format!("Refresh parse failed: {}", e))?;
 
     if let Some(err) = json.get("error").and_then(|v| v.as_str()) {
+        // Permanent failures — the refresh token is no longer valid.
+        // Clear tokens so the user can re-login.
+        if err == "invalid_grant" || err == "unauthorized_client" || err == "invalid_client" {
+            state.tokens = None;
+            save_state(state);
+            return Err(format!("Session expired ({}). Please log in again.", err));
+        }
         return Err(format!("Refresh failed: {}", err));
     }
 
