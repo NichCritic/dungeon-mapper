@@ -27,10 +27,78 @@ fn corridor_floor(graph: &DungeonGraph, edge: &StoredEdge) -> FloorAssignment {
     }
 }
 
+/// Merge per-floor forbidden sets for the given floors into a single set for routing.
+fn merged_forbidden(
+    floors: &[i32],
+    per_floor: &HashMap<i32, HashSet<(i32, i32)>>,
+) -> HashSet<(i32, i32)> {
+    let mut merged = HashSet::new();
+    for f in floors {
+        if let Some(cells) = per_floor.get(f) {
+            merged.extend(cells);
+        }
+    }
+    merged
+}
+
+/// Stamp corridor cells into the per-floor forbidden sets for the given floors.
+fn stamp_corridor_floors(
+    waypoints: &[GridPos],
+    w: i32,
+    floors: &[i32],
+    per_floor: &mut HashMap<i32, HashSet<(i32, i32)>>,
+) {
+    // Collect the cells once, then insert into each floor
+    let mut cells = Vec::new();
+    for pair in waypoints.windows(2) {
+        let min_x = pair[0].x.min(pair[1].x);
+        let max_x = pair[0].x.max(pair[1].x);
+        let min_y = pair[0].y.min(pair[1].y);
+        let max_y = pair[0].y.max(pair[1].y);
+        for y in (min_y - 1)..=(max_y + w) {
+            for x in (min_x - 1)..=(max_x + w) {
+                cells.push((x, y));
+            }
+        }
+    }
+    for f in floors {
+        let set = per_floor.entry(*f).or_default();
+        for &cell in &cells {
+            set.insert(cell);
+        }
+    }
+}
+
+/// Initialize per-floor forbidden sets with room interiors on their respective floors.
+fn init_per_floor_forbidden(
+    graph: &DungeonGraph,
+    layout: &SpatialLayout,
+) -> HashMap<i32, HashSet<(i32, i32)>> {
+    let mut per_floor: HashMap<i32, HashSet<(i32, i32)>> = HashMap::new();
+    for rl in &layout.rooms {
+        let room_floors = graph.room_by_id(&rl.room_id)
+            .map(|r| r.floor.floors())
+            .unwrap_or_else(|| vec![0]);
+        let mut cells = Vec::new();
+        for y in rl.y..(rl.y + rl.height as i32) {
+            for x in rl.x..(rl.x + rl.width as i32) {
+                cells.push((x, y));
+            }
+        }
+        for f in room_floors {
+            let set = per_floor.entry(f).or_default();
+            for &cell in &cells {
+                set.insert(cell);
+            }
+        }
+    }
+    per_floor
+}
+
 /// Grid-based corridor router.
 /// The A* pathfinder moves a width×width block through the grid,
 /// cell by cell. Every cell a corridor occupies is marked forbidden
-/// for all future corridors. No floating point, no exemptions.
+/// for future corridors on the same floor. No floating point, no exemptions.
 pub fn route_corridors(
     graph: &DungeonGraph,
     layout: &SpatialLayout,
@@ -43,16 +111,8 @@ pub fn route_corridors(
         }
     }
 
-    // Initialize forbidden cells with room interiors only.
-    // No border — corridors should reach the room wall.
-    let mut forbidden = HashSet::new();
-    for rl in &layout.rooms {
-        for y in rl.y..(rl.y + rl.height as i32) {
-            for x in rl.x..(rl.x + rl.width as i32) {
-                forbidden.insert((x, y));
-            }
-        }
-    }
+    // Initialize per-floor forbidden cells with room interiors.
+    let mut per_floor = init_per_floor_forbidden(graph, layout);
 
     // Sort edges by distance (shorter first)
     let mut sorted_edges: Vec<&StoredEdge> = graph.connections.iter().collect();
@@ -83,6 +143,10 @@ pub fn route_corridors(
         let cw = edge.connection.corridor_width;
         let w = cw as i32;
         let half = w / 2;
+
+        let floor = corridor_floor(graph, edge);
+        let c_floors = floor.floors();
+        let forbidden = merged_forbidden(&c_floors, &per_floor);
 
         let has_src_exit = edge.source_exit.is_some();
         let has_tgt_exit = edge.target_exit.is_some();
@@ -120,8 +184,6 @@ pub fn route_corridors(
             wps.iter().map(|p| GridPos { x: p.x + half, y: p.y + half }).collect()
         };
 
-        let floor = corridor_floor(graph, edge);
-
         let mk = |waypoints: Vec<GridPos>, invalid: bool| CorridorSegment {
             pinned_waypoints: pinned.clone(),
             connection_id: edge.connection.id.clone(),
@@ -146,7 +208,7 @@ pub fn route_corridors(
         };
 
         if let Some(waypoints) = result {
-            stamp_corridor(&waypoints, w, &mut forbidden);
+            stamp_corridor_floors(&waypoints, w, &c_floors, &mut per_floor);
             let mut centered = to_center(waypoints);
             fix_endpoints(&mut centered);
             corridors.push(mk(centered, false));
@@ -170,7 +232,7 @@ pub fn route_corridors(
                     GridPos { x: tx, y: sy },
                     GridPos { x: tx, y: ty },
                 ];
-                stamp_corridor(&waypoints, w, &mut forbidden);
+                stamp_corridor_floors(&waypoints, w, &c_floors, &mut per_floor);
                 let mut centered = to_center(waypoints);
                 fix_endpoints(&mut centered);
                 corridors.push(mk(centered, true));
@@ -196,15 +258,8 @@ pub fn route_corridors_for_rooms(
         }
     }
 
-    // Initialize forbidden cells with room interiors
-    let mut forbidden = HashSet::new();
-    for rl in &layout.rooms {
-        for y in rl.y..(rl.y + rl.height as i32) {
-            for x in rl.x..(rl.x + rl.width as i32) {
-                forbidden.insert((x, y));
-            }
-        }
-    }
+    // Initialize per-floor forbidden cells with room interiors
+    let mut per_floor = init_per_floor_forbidden(graph, layout);
 
     // Partition edges into affected vs unaffected
     let mut affected_edges: Vec<&StoredEdge> = Vec::new();
@@ -224,7 +279,7 @@ pub fn route_corridors_for_rooms(
         }
     }
 
-    // Keep unaffected corridors and stamp them into forbidden
+    // Keep unaffected corridors and stamp them into per-floor forbidden
     for c in &layout.corridors {
         if !affected_conn_ids.contains(&c.connection_id) {
             let w = c.width as i32;
@@ -232,7 +287,8 @@ pub fn route_corridors_for_rooms(
             let tl_waypoints: Vec<GridPos> = c.waypoints.iter()
                 .map(|p| GridPos { x: p.x - half, y: p.y - half })
                 .collect();
-            stamp_corridor(&tl_waypoints, w, &mut forbidden);
+            let c_floors = c.floor.floors();
+            stamp_corridor_floors(&tl_waypoints, w, &c_floors, &mut per_floor);
             unaffected_corridors.push(c.clone());
         }
     }
@@ -265,6 +321,10 @@ pub fn route_corridors_for_rooms(
         let cw = edge.connection.corridor_width;
         let w = cw as i32;
         let half = w / 2;
+
+        let floor = corridor_floor(graph, edge);
+        let c_floors = floor.floors();
+        let forbidden = merged_forbidden(&c_floors, &per_floor);
 
         let has_src_exit = edge.source_exit.is_some();
         let has_tgt_exit = edge.target_exit.is_some();
@@ -300,8 +360,6 @@ pub fn route_corridors_for_rooms(
             wps.iter().map(|p| GridPos { x: p.x + half, y: p.y + half }).collect()
         };
 
-        let floor = corridor_floor(graph, edge);
-
         let mk = |waypoints: Vec<GridPos>, invalid: bool| CorridorSegment {
             pinned_waypoints: pinned.clone(),
             connection_id: edge.connection.id.clone(),
@@ -325,7 +383,7 @@ pub fn route_corridors_for_rooms(
         };
 
         if let Some(waypoints) = result {
-            stamp_corridor(&waypoints, w, &mut forbidden);
+            stamp_corridor_floors(&waypoints, w, &c_floors, &mut per_floor);
             let mut centered = to_center(waypoints);
             fix_endpoints(&mut centered);
             new_corridors.push(mk(centered, false));
@@ -348,7 +406,7 @@ pub fn route_corridors_for_rooms(
                     GridPos { x: tx, y: sy },
                     GridPos { x: tx, y: ty },
                 ];
-                stamp_corridor(&waypoints, w, &mut forbidden);
+                stamp_corridor_floors(&waypoints, w, &c_floors, &mut per_floor);
                 let mut centered = to_center(waypoints);
                 fix_endpoints(&mut centered);
                 new_corridors.push(mk(centered, true));
@@ -494,22 +552,6 @@ fn try_close_rooms(src: &RoomLayout, tgt: &RoomLayout, w: i32) -> Option<Vec<Gri
     }
 
     None
-}
-
-fn stamp_corridor(waypoints: &[GridPos], w: i32, forbidden: &mut HashSet<(i32, i32)>) {
-    for pair in waypoints.windows(2) {
-        let min_x = pair[0].x.min(pair[1].x);
-        let max_x = pair[0].x.max(pair[1].x);
-        let min_y = pair[0].y.min(pair[1].y);
-        let max_y = pair[0].y.max(pair[1].y);
-        // Corridor occupies cells [min, max+w-1] in each axis from the top-left,
-        // plus 1-cell border
-        for y in (min_y - 1)..=(max_y + w) {
-            for x in (min_x - 1)..=(max_x + w) {
-                forbidden.insert((x, y));
-            }
-        }
-    }
 }
 
 /// Check if a w×w block at position (x,y) (top-left corner) is clear.
