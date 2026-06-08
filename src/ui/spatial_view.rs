@@ -2407,6 +2407,7 @@ fn duplicate_group(dungeon: &mut Dungeon, room_ids: &[String], group_idx: usize)
                 width: old_corridor.width,
                 invalid: false,
                 pinned_waypoints: Vec::new(),
+                floor: old_corridor.floor,
             })
         }).collect();
         layout.corridors.extend(new_corridors);

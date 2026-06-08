@@ -2,6 +2,31 @@ use std::collections::{HashMap, HashSet};
 
 use crate::model::*;
 
+/// Compute the floor assignment for a corridor by inheriting from its rooms.
+/// The corridor belongs to the union of both rooms' floors.
+fn corridor_floor(graph: &DungeonGraph, edge: &StoredEdge) -> FloorAssignment {
+    let src_floor = graph.room_by_id(&edge.source_room_id)
+        .map(|r| r.floor)
+        .unwrap_or_default();
+    let tgt_floor = graph.room_by_id(&edge.target_room_id)
+        .map(|r| r.floor)
+        .unwrap_or_default();
+
+    let mut all_floors: Vec<i32> = src_floor.floors();
+    for f in tgt_floor.floors() {
+        if !all_floors.contains(&f) {
+            all_floors.push(f);
+        }
+    }
+    all_floors.sort();
+
+    match all_floors.len() {
+        0 => FloorAssignment::default(),
+        1 => FloorAssignment::Single(all_floors[0]),
+        _ => FloorAssignment::Half(all_floors[0], all_floors[all_floors.len() - 1]),
+    }
+}
+
 /// Grid-based corridor router.
 /// The A* pathfinder moves a width×width block through the grid,
 /// cell by cell. Every cell a corridor occupies is marked forbidden
@@ -95,12 +120,15 @@ pub fn route_corridors(
             wps.iter().map(|p| GridPos { x: p.x + half, y: p.y + half }).collect()
         };
 
+        let floor = corridor_floor(graph, edge);
+
         let mk = |waypoints: Vec<GridPos>, invalid: bool| CorridorSegment {
             pinned_waypoints: pinned.clone(),
             connection_id: edge.connection.id.clone(),
             waypoints,
             width: cw,
             invalid,
+            floor,
         };
 
         // Helper to fix up corridor endpoints to match user-set exits exactly
@@ -272,12 +300,15 @@ pub fn route_corridors_for_rooms(
             wps.iter().map(|p| GridPos { x: p.x + half, y: p.y + half }).collect()
         };
 
+        let floor = corridor_floor(graph, edge);
+
         let mk = |waypoints: Vec<GridPos>, invalid: bool| CorridorSegment {
             pinned_waypoints: pinned.clone(),
             connection_id: edge.connection.id.clone(),
             waypoints,
             width: cw,
             invalid,
+            floor,
         };
 
         let fix_endpoints = |wps: &mut Vec<GridPos>| {

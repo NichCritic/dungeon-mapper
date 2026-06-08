@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use super::FloorAssignment;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RoomLayout {
     pub room_id: String,
@@ -17,13 +19,17 @@ pub struct CorridorSegment {
     pub connection_id: String,
     pub waypoints: Vec<GridPos>,
     pub width: u32,
-    /// True if this corridor overlaps another.
+    /// True if this corridor overlaps another on the same floor.
     #[serde(default)]
     pub invalid: bool,
     /// User-pinned waypoints that the solver must route through (in order).
     /// Includes start, any mid-goals, and end. Empty means fully auto-solved.
     #[serde(default)]
     pub pinned_waypoints: Vec<GridPos>,
+    /// Which floor(s) this corridor belongs to. Cross-floor connections become
+    /// half-floor corridors visible on both floors.
+    #[serde(default)]
+    pub floor: FloorAssignment,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
@@ -75,7 +81,7 @@ impl SpatialLayout {
     }
 
     /// Recompute the `invalid` flag on all corridors based on grid cell overlap.
-    /// Two corridors overlap if they share any grid cell.
+    /// Two corridors overlap only if they share a grid cell AND at least one floor.
     pub fn recheck_corridor_overlaps(&mut self) {
         use std::collections::HashSet;
 
@@ -99,10 +105,19 @@ impl SpatialLayout {
             })
             .collect();
 
+        // Pre-compute floor sets for each corridor
+        let corridor_floors: Vec<Vec<i32>> = self.corridors.iter()
+            .map(|c| c.floor.floors())
+            .collect();
+
         for i in 0..self.corridors.len() {
             let mut overlaps = false;
             for j in 0..self.corridors.len() {
                 if i == j {
+                    continue;
+                }
+                // Skip overlap check if corridors share no floors
+                if !corridor_floors[i].iter().any(|f| corridor_floors[j].contains(f)) {
                     continue;
                 }
                 if !corridor_cells[i].is_disjoint(&corridor_cells[j]) {
