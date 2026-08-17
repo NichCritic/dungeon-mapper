@@ -17,6 +17,10 @@ pub struct Connection {
     /// Maximum corridor length in Manhattan distance (grid squares). None = unconstrained.
     #[serde(default)]
     pub max_length: Option<u32>,
+    /// For Flush connections: when true, shared walls are kept (not auto-removed).
+    /// Use per-room Open Walls to selectively open individual walls.
+    #[serde(default)]
+    pub keep_walls: bool,
 }
 
 fn default_corridor_width() -> u32 {
@@ -30,6 +34,11 @@ pub enum ConnectionType {
     Locked,
     Secret,
     OneWay,
+    /// Rooms placed flush (adjacent, no corridor, shared wall removed).
+    Flush,
+    /// Corridor merges into the room — the room wall is removed at the junction.
+    /// For adjacent rooms (no corridor), shared wall removed like Flush.
+    Merge,
 }
 
 impl ConnectionType {
@@ -40,15 +49,19 @@ impl ConnectionType {
             ConnectionType::Locked => "Locked",
             ConnectionType::Secret => "Secret",
             ConnectionType::OneWay => "One-Way",
+            ConnectionType::Flush => "Flush",
+            ConnectionType::Merge => "Merge",
         }
     }
 
-    pub const ALL: [ConnectionType; 5] = [
+    pub const ALL: [ConnectionType; 7] = [
         ConnectionType::Open,
         ConnectionType::Door,
         ConnectionType::Locked,
         ConnectionType::Secret,
         ConnectionType::OneWay,
+        ConnectionType::Flush,
+        ConnectionType::Merge,
     ];
 }
 
@@ -62,6 +75,7 @@ impl Connection {
             double_door: false,
             min_length: None,
             max_length: None,
+            keep_walls: false,
         }
     }
 
@@ -111,6 +125,6 @@ mod tests {
 
     #[test]
     fn test_connection_type_all() {
-        assert_eq!(ConnectionType::ALL.len(), 5);
+        assert_eq!(ConnectionType::ALL.len(), 7);
     }
 }

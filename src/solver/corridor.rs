@@ -70,12 +70,18 @@ fn stamp_corridor_floors(
 }
 
 /// Initialize per-floor forbidden sets with room interiors on their respective floors.
-fn init_per_floor_forbidden(
+/// When `exclude_container_ids` is provided, those rooms' interiors are NOT added
+/// to the forbidden set (so corridors can route through container interiors).
+fn init_per_floor_forbidden_with_exclusions(
     graph: &DungeonGraph,
     layout: &SpatialLayout,
+    exclude_room_ids: &HashSet<String>,
 ) -> HashMap<i32, HashSet<(i32, i32)>> {
     let mut per_floor: HashMap<i32, HashSet<(i32, i32)>> = HashMap::new();
     for rl in &layout.rooms {
+        if exclude_room_ids.contains(&rl.room_id) {
+            continue;
+        }
         let room_floors = graph.room_by_id(&rl.room_id)
             .map(|r| r.floor.floors())
             .unwrap_or_else(|| vec![0]);
@@ -95,6 +101,14 @@ fn init_per_floor_forbidden(
     per_floor
 }
 
+/// Collect all container room IDs that need their interiors excluded from the
+/// forbidden set so corridors between their children can route through them.
+fn collect_container_ids(graph: &DungeonGraph) -> HashSet<String> {
+    graph.groups.iter()
+        .filter_map(|g| g.parent_room_id.clone())
+        .collect()
+}
+
 /// Grid-based corridor router.
 /// The A* pathfinder moves a width×width block through the grid,
 /// cell by cell. Every cell a corridor occupies is marked forbidden
@@ -111,8 +125,10 @@ pub fn route_corridors(
         }
     }
 
-    // Initialize per-floor forbidden cells with room interiors.
-    let mut per_floor = init_per_floor_forbidden(graph, layout);
+    // Exclude container room interiors from forbidden set so corridors can
+    // route through the parent's empty space between children.
+    let container_ids = collect_container_ids(graph);
+    let mut per_floor = init_per_floor_forbidden_with_exclusions(graph, layout, &container_ids);
 
     // Sort edges by distance (shorter first)
     let mut sorted_edges: Vec<&StoredEdge> = graph.connections.iter().collect();
@@ -132,6 +148,11 @@ pub fn route_corridors(
     let mut corridors = Vec::new();
 
     for edge in &sorted_edges {
+        // Flush connections have no corridor
+        if edge.connection.connection_type == ConnectionType::Flush {
+            continue;
+        }
+
         let src_rl = layout.room_by_id(&edge.source_room_id);
         let tgt_rl = layout.room_by_id(&edge.target_room_id);
 
@@ -151,6 +172,12 @@ pub fn route_corridors(
         let has_src_exit = edge.source_exit.is_some();
         let has_tgt_exit = edge.target_exit.is_some();
 
+        // Detect child-to-parent connections: create a short stub exit
+        let src_is_child_of_tgt = graph.parent_of(&edge.source_room_id)
+            .map(|p| p == edge.target_room_id).unwrap_or(false);
+        let tgt_is_child_of_src = graph.parent_of(&edge.target_room_id)
+            .map(|p| p == edge.source_room_id).unwrap_or(false);
+
         let result = if pinned.len() >= 2 {
             let pinned_tl: Vec<GridPos> = pinned.iter()
                 .map(|p| GridPos { x: p.x - half, y: p.y - half })
@@ -169,6 +196,13 @@ pub fn route_corridors(
                 edge_exits(tgt_rl, src_rl, w)
             };
             find_best_route(&src_exits, &tgt_exits, w, &forbidden)
+        } else if src_is_child_of_tgt {
+            // Source is a child room inside target (parent) — create stub exit
+            try_child_parent_exit(src_rl, tgt_rl, w)
+        } else if tgt_is_child_of_src {
+            // Target is a child room inside source (parent) — create stub exit (reversed)
+            try_child_parent_exit(tgt_rl, src_rl, w)
+                .map(|mut wps| { wps.reverse(); wps })
         } else if let Some(wall_path) = try_shared_wall(src_rl, tgt_rl, w) {
             Some(wall_path)
         } else if let Some(close_path) = try_close_rooms(src_rl, tgt_rl, w) {
@@ -258,8 +292,9 @@ pub fn route_corridors_for_rooms(
         }
     }
 
-    // Initialize per-floor forbidden cells with room interiors
-    let mut per_floor = init_per_floor_forbidden(graph, layout);
+    // Exclude container room interiors from forbidden set
+    let container_ids = collect_container_ids(graph);
+    let mut per_floor = init_per_floor_forbidden_with_exclusions(graph, layout, &container_ids);
 
     // Partition edges into affected vs unaffected
     let mut affected_edges: Vec<&StoredEdge> = Vec::new();
@@ -329,6 +364,12 @@ pub fn route_corridors_for_rooms(
         let has_src_exit = edge.source_exit.is_some();
         let has_tgt_exit = edge.target_exit.is_some();
 
+        // Detect child-to-parent connections
+        let src_is_child_of_tgt = graph.parent_of(&edge.source_room_id)
+            .map(|p| p == edge.target_room_id).unwrap_or(false);
+        let tgt_is_child_of_src = graph.parent_of(&edge.target_room_id)
+            .map(|p| p == edge.source_room_id).unwrap_or(false);
+
         let result = if pinned.len() >= 2 {
             let pinned_tl: Vec<GridPos> = pinned.iter()
                 .map(|p| GridPos { x: p.x - half, y: p.y - half })
@@ -346,6 +387,11 @@ pub fn route_corridors_for_rooms(
                 edge_exits(tgt_rl, src_rl, w)
             };
             find_best_route(&src_exits, &tgt_exits, w, &forbidden)
+        } else if src_is_child_of_tgt {
+            try_child_parent_exit(src_rl, tgt_rl, w)
+        } else if tgt_is_child_of_src {
+            try_child_parent_exit(tgt_rl, src_rl, w)
+                .map(|mut wps| { wps.reverse(); wps })
         } else if let Some(wall_path) = try_shared_wall(src_rl, tgt_rl, w) {
             Some(wall_path)
         } else if let Some(close_path) = try_close_rooms(src_rl, tgt_rl, w) {
@@ -552,6 +598,68 @@ fn try_close_rooms(src: &RoomLayout, tgt: &RoomLayout, w: i32) -> Option<Vec<Gri
     }
 
     None
+}
+
+/// Create a short stub corridor from a child room's wall into its parent's interior.
+/// The corridor is just 1 cell deep — enough to render a door on the child's wall.
+/// `child` is the room inside `parent`. Returns waypoints in top-left coordinates.
+fn try_child_parent_exit(
+    child: &RoomLayout,
+    parent: &RoomLayout,
+    w: i32,
+) -> Option<Vec<GridPos>> {
+    let cw = child.width as i32;
+    let ch = child.height as i32;
+    let pw = parent.width as i32;
+    let ph = parent.height as i32;
+
+    // Check that the child is actually inside the parent
+    if child.x < parent.x || child.y < parent.y
+        || child.x + cw > parent.x + pw
+        || child.y + ch > parent.y + ph
+    {
+        return None;
+    }
+
+    // Pick the face with the most space to the parent wall
+    let space_right = (parent.x + pw) - (child.x + cw);
+    let space_left = child.x - parent.x;
+    let space_bottom = (parent.y + ph) - (child.y + ch);
+    let space_top = child.y - parent.y;
+
+    let max_space = space_right.max(space_left).max(space_bottom).max(space_top);
+    if max_space < 1 {
+        return None;
+    }
+
+    // Choose best face and generate a stub exit
+    if space_right == max_space && ch >= w {
+        let mid_y = child.y + (ch - w) / 2;
+        Some(vec![
+            GridPos { x: child.x + cw - 1, y: mid_y },
+            GridPos { x: child.x + cw, y: mid_y },
+        ])
+    } else if space_left == max_space && ch >= w {
+        let mid_y = child.y + (ch - w) / 2;
+        Some(vec![
+            GridPos { x: child.x, y: mid_y },
+            GridPos { x: child.x - 1, y: mid_y },
+        ])
+    } else if space_bottom == max_space && cw >= w {
+        let mid_x = child.x + (cw - w) / 2;
+        Some(vec![
+            GridPos { x: mid_x, y: child.y + ch - 1 },
+            GridPos { x: mid_x, y: child.y + ch },
+        ])
+    } else if space_top == max_space && cw >= w {
+        let mid_x = child.x + (cw - w) / 2;
+        Some(vec![
+            GridPos { x: mid_x, y: child.y },
+            GridPos { x: mid_x, y: child.y - 1 },
+        ])
+    } else {
+        None
+    }
 }
 
 /// Check if a w×w block at position (x,y) (top-left corner) is clear.
@@ -905,4 +1013,109 @@ fn spread(min: i32, max: i32, step: i32) -> Vec<i32> {
     }
 
     result
+}
+
+/// Compute wall openings for rooms based on routed corridors.
+/// A wall opening occurs where a corridor's waypoint passes near a room's boundary.
+/// Tracked for: container rooms (cross-boundary corridors) and child rooms (child-to-parent exits).
+pub fn compute_wall_openings(
+    graph: &DungeonGraph,
+    layout: &mut SpatialLayout,
+) {
+    // Clear existing wall openings
+    for rl in &mut layout.rooms {
+        rl.wall_openings.clear();
+    }
+
+    let container_ids = collect_container_ids(graph);
+
+    // Snapshot all room rects for boundary checking
+    let room_rects: Vec<(String, i32, i32, i32, i32)> = layout.rooms.iter()
+        .map(|rl| (rl.room_id.clone(), rl.x, rl.y, rl.x + rl.width as i32, rl.y + rl.height as i32))
+        .collect();
+
+    // Collect openings per room
+    let mut openings: HashMap<String, Vec<GridPos>> = HashMap::new();
+
+    for corridor in &layout.corridors {
+        let edge = graph.connections.iter()
+            .find(|e| e.connection.id == corridor.connection_id);
+        let Some(edge) = edge else { continue };
+
+        // Determine which rooms need wall opening detection for this corridor
+        let src_parent = graph.parent_of(&edge.source_room_id);
+        let tgt_parent = graph.parent_of(&edge.target_room_id);
+        let src_is_child_of_tgt = src_parent.map(|p| p == edge.target_room_id).unwrap_or(false);
+        let tgt_is_child_of_src = tgt_parent.map(|p| p == edge.source_room_id).unwrap_or(false);
+
+        // Rooms whose walls might have openings from this corridor
+        let mut check_rooms: Vec<&str> = Vec::new();
+
+        // Container rooms that this corridor crosses
+        if let Some(p) = src_parent {
+            if !check_rooms.contains(&p) { check_rooms.push(p); }
+        }
+        if let Some(p) = tgt_parent {
+            if !check_rooms.contains(&p) { check_rooms.push(p); }
+        }
+        if container_ids.contains(&edge.source_room_id) {
+            let id = edge.source_room_id.as_str();
+            if !check_rooms.contains(&id) { check_rooms.push(id); }
+        }
+        if container_ids.contains(&edge.target_room_id) {
+            let id = edge.target_room_id.as_str();
+            if !check_rooms.contains(&id) { check_rooms.push(id); }
+        }
+
+        // Child rooms with exits to their parent
+        if src_is_child_of_tgt {
+            let id = edge.source_room_id.as_str();
+            if !check_rooms.contains(&id) { check_rooms.push(id); }
+        }
+        if tgt_is_child_of_src {
+            let id = edge.target_room_id.as_str();
+            if !check_rooms.contains(&id) { check_rooms.push(id); }
+        }
+
+        // Merge connections: both endpoint rooms need wall openings
+        if edge.connection.connection_type == ConnectionType::Merge {
+            let src_id = edge.source_room_id.as_str();
+            let tgt_id = edge.target_room_id.as_str();
+            if !check_rooms.contains(&src_id) { check_rooms.push(src_id); }
+            if !check_rooms.contains(&tgt_id) { check_rooms.push(tgt_id); }
+        }
+
+        // Check each corridor waypoint against each relevant room's boundary
+        for room_id in &check_rooms {
+            let Some((_, rx, ry, rx2, ry2)) = room_rects.iter().find(|(id, ..)| id == *room_id) else {
+                continue;
+            };
+
+            let w = corridor.width as i32;
+            let half = w / 2;
+            for wp in &corridor.waypoints {
+                let on_left = (wp.x - half..=wp.x + half).contains(rx);
+                let on_right = (wp.x - half..=wp.x + half).contains(rx2);
+                let on_top = (wp.y - half..=wp.y + half).contains(ry);
+                let on_bottom = (wp.y - half..=wp.y + half).contains(ry2);
+
+                let in_y_range = wp.y >= *ry && wp.y <= *ry2;
+                let in_x_range = wp.x >= *rx && wp.x <= *rx2;
+
+                if ((on_left || on_right) && in_y_range) || ((on_top || on_bottom) && in_x_range) {
+                    let entry = openings.entry(room_id.to_string()).or_default();
+                    if !entry.contains(wp) {
+                        entry.push(*wp);
+                    }
+                }
+            }
+        }
+    }
+
+    // Apply openings to room layouts
+    for rl in &mut layout.rooms {
+        if let Some(ops) = openings.remove(&rl.room_id) {
+            rl.wall_openings = ops;
+        }
+    }
 }

@@ -40,6 +40,7 @@ mod tests {
                 room_id: room_id.to_string(),
                 x, y, width: w, height: h,
                 violations: Vec::new(),
+                wall_openings: Vec::new(),
             }],
             corridors: Vec::new(),
             bounds: Vec::new(),

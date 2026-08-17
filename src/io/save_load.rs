@@ -4,7 +4,7 @@ use std::sync::mpsc;
 use crate::model::{Campaign, Dungeon};
 
 /// Current save file format version. Increment when the data model changes.
-const CURRENT_VERSION: u32 = 2;
+const CURRENT_VERSION: u32 = 3;
 
 /// Versioned save file envelope (version 2+: campaign-based).
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -75,7 +75,8 @@ fn load_dungeon(version: u32, value: &serde_json::Value) -> Result<Dungeon, Stri
 /// Load a campaign from a JSON value.
 fn load_campaign(version: u32, value: &serde_json::Value) -> Result<Campaign, String> {
     match version {
-        2 => serde_json::from_value(value.clone()).map_err(|e| e.to_string()),
+        // v2 → v3: added parent_room_id + containment_padding to RoomGroup (both #[serde(default)])
+        2 | 3 => serde_json::from_value(value.clone()).map_err(|e| e.to_string()),
         v => Err(format!(
             "Save file version {} is newer than this application supports (max: {})",
             v, CURRENT_VERSION

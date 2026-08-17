@@ -12,6 +12,10 @@ pub struct RoomLayout {
     /// Constraint violations for this room's placement.
     #[serde(default)]
     pub violations: Vec<String>,
+    /// Wall positions where corridors pierce this container room's boundary.
+    /// Derived during corridor routing for containment groups.
+    #[serde(default)]
+    pub wall_openings: Vec<GridPos>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

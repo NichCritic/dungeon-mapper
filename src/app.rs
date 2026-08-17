@@ -644,6 +644,9 @@ impl DungeonApp {
 
 impl eframe::App for DungeonApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Keep the event loop alive so the Wayland compositor doesn't mark us unresponsive
+        ctx.request_repaint_after(std::time::Duration::from_secs(2));
+
         // Sync campaign party into working dungeon at frame start
         self.sync_party_to_dungeon();
 

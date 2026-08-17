@@ -709,6 +709,7 @@ fn draw_groups(
         let rect = egui::Rect::from_min_max(screen_min, screen_max);
 
         let is_selected = state.selection.groups.contains(&group.id);
+        let is_containment = group.is_containment();
         let c = group.color;
         let fill = egui::Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]);
         let border_color = if is_selected {
@@ -717,14 +718,21 @@ fn draw_groups(
             egui::Color32::from_rgba_unmultiplied(c[0], c[1], c[2], (c[3] as u16 * 3).min(255) as u8)
         };
 
-        painter.rect_filled(rect, 8.0, fill);
-        painter.rect_stroke(rect, 8.0, egui::Stroke::new(1.5, border_color), egui::StrokeKind::Middle);
+        let rounding = if is_containment { 4.0 } else { 8.0 };
+        let stroke_width = if is_containment { 2.5 } else { 1.5 };
+        painter.rect_filled(rect, rounding, fill);
+        painter.rect_stroke(rect, rounding, egui::Stroke::new(stroke_width, border_color), egui::StrokeKind::Middle);
 
         // Label at top
+        let label_text = if is_containment {
+            format!("⊞ {}", group.label)
+        } else {
+            group.label.clone()
+        };
         painter.text(
             egui::pos2(rect.center().x, screen_min.y + 12.0),
             egui::Align2::CENTER_CENTER,
-            &group.label,
+            &label_text,
             egui::FontId::monospace(11.0 * transform.zoom),
             border_color,
         );
@@ -821,6 +829,8 @@ fn draw_connections(
                     ConnectionType::Locked => (egui::Color32::from_rgb(220, 190, 110), 3.0),
                     ConnectionType::Secret => (egui::Color32::from_rgb(180, 120, 180), 2.0),
                     ConnectionType::OneWay => (egui::Color32::from_rgb(220, 190, 110), 2.0),
+                    ConnectionType::Flush => (egui::Color32::from_rgb(100, 200, 100), 2.0),
+                    ConnectionType::Merge => (egui::Color32::from_rgb(100, 180, 220), 2.0),
                 }
             } else {
                 match edge.connection.connection_type {
@@ -829,6 +839,8 @@ fn draw_connections(
                     ConnectionType::Locked => (egui::Color32::from_rgb(200, 200, 200), 3.0),
                     ConnectionType::Secret => (egui::Color32::from_rgb(160, 80, 200), 2.0),
                     ConnectionType::OneWay => (egui::Color32::from_rgb(200, 200, 200), 2.0),
+                    ConnectionType::Flush => (egui::Color32::from_rgb(80, 180, 80), 2.0),
+                    ConnectionType::Merge => (egui::Color32::from_rgb(80, 160, 200), 2.0),
                 }
             };
 
@@ -875,13 +887,14 @@ fn draw_rooms(
             let bg_color = room.primary_color().linear_multiply(0.3);
             painter.rect_filled(node_rect, 6.0, bg_color);
 
-            // Border
+            // Border — thicker for container rooms
+            let is_container = dungeon.graph.is_container(&room.id);
             let border_color = if is_selected {
                 COLOR_SELECTION
             } else {
                 room.primary_color()
             };
-            let border_width = if is_selected { 2.5 } else { 1.5 };
+            let border_width = if is_selected { 2.5 } else if is_container { 3.0 } else { 1.5 };
             painter.rect_stroke(node_rect, 6.0, egui::Stroke::new(border_width, border_color), egui::StrokeKind::Middle);
 
             // Label

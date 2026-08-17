@@ -60,11 +60,11 @@ fn mixed_label(ui: &mut egui::Ui, all_same: bool) {
 
 fn multi_room_properties(ui: &mut egui::Ui, dungeon: &mut Dungeon, ids: &[String]) {
     // Snapshot values to avoid borrow conflicts
-    struct RoomSnap { hint: SizeHint, w: u32, h: u32, shape: RoomShape, rot: bool, tags: Vec<RoomTag>, floor: FloorAssignment }
+    struct RoomSnap { hint: SizeHint, w: u32, h: u32, shape: RoomShape, rot: bool, tags: Vec<RoomTag>, floor: FloorAssignment, env: RoomEnvironment }
     let snaps: Vec<RoomSnap> = ids.iter().filter_map(|id| {
         dungeon.graph.room_by_id(id).map(|r| {
             let (w, h) = r.grid_size();
-            RoomSnap { hint: r.size_hint, w, h, shape: r.shape, rot: r.allow_rotation, tags: r.tags.clone(), floor: r.floor }
+            RoomSnap { hint: r.size_hint, w, h, shape: r.shape, rot: r.allow_rotation, tags: r.tags.clone(), floor: r.floor, env: r.environment }
         })
     }).collect();
     if snaps.is_empty() { return; }
@@ -140,6 +140,29 @@ fn multi_room_properties(ui: &mut egui::Ui, dungeon: &mut Dungeon, ids: &[String
         for id in ids {
             if let Some(room) = dungeon.graph.room_by_id_mut(id) {
                 room.shape = shape;
+            }
+        }
+    }
+
+    // Environment
+    ui.add_space(8.0);
+    let all_same_env = snaps.iter().all(|s| s.env == snaps[0].env);
+    let env_label = if all_same_env { snaps[0].env.label() } else { "(mixed)" };
+    let mut env = snaps[0].env;
+    ui.horizontal(|ui| {
+        ui.label("Environment:");
+        egui::ComboBox::from_id_salt("multi_environment")
+            .selected_text(env_label)
+            .show_ui(ui, |ui| {
+                for e in RoomEnvironment::ALL {
+                    ui.selectable_value(&mut env, e, e.label());
+                }
+            });
+    });
+    if env != snaps[0].env {
+        for id in ids {
+            if let Some(room) = dungeon.graph.room_by_id_mut(id) {
+                room.environment = env;
             }
         }
     }
@@ -404,6 +427,50 @@ fn group_properties(ui: &mut egui::Ui, dungeon: &mut Dungeon, group_id: &str) {
     ui.label(format!("{} rooms", dungeon.graph.groups[idx].room_ids.len()));
 
     ui.add_space(8.0);
+    ui.label("Containment:");
+
+    // Container room dropdown
+    let current_parent_label = dungeon.graph.groups[idx].parent_room_id.as_ref()
+        .and_then(|pid| dungeon.graph.room_by_id(pid))
+        .map(|r| r.label.clone())
+        .unwrap_or_else(|| "None".to_string());
+
+    let member_ids = dungeon.graph.groups[idx].room_ids.clone();
+    let parent_id_snapshot = dungeon.graph.groups[idx].parent_room_id.clone();
+    let mut new_parent_id = parent_id_snapshot.clone();
+
+    egui::ComboBox::from_id_salt("container_room")
+        .selected_text(format!("Container: {}", current_parent_label))
+        .show_ui(ui, |ui| {
+            if ui.selectable_label(new_parent_id.is_none(), "None").clicked() {
+                new_parent_id = None;
+            }
+            for room in &dungeon.graph.rooms {
+                // Don't allow a room to contain itself or its own children
+                if member_ids.contains(&room.id) {
+                    continue;
+                }
+                let selected = new_parent_id.as_deref() == Some(&room.id);
+                if ui.selectable_label(selected, &room.label).clicked() {
+                    new_parent_id = Some(room.id.clone());
+                }
+            }
+        });
+    if new_parent_id != parent_id_snapshot {
+        dungeon.graph.groups[idx].parent_room_id = new_parent_id;
+    }
+
+    if dungeon.graph.groups[idx].parent_room_id.is_some() {
+        let mut padding = dungeon.graph.groups[idx].containment_padding;
+        ui.horizontal(|ui| {
+            ui.label("Padding:");
+            crate::ui::canvas_common::num_input_u32(ui, &mut padding, 40.0);
+            ui.label("sq");
+        });
+        dungeon.graph.groups[idx].containment_padding = padding;
+    }
+
+    ui.add_space(8.0);
     ui.label("Solver Constraints:");
 
     let group = &mut dungeon.graph.groups[idx];
@@ -427,9 +494,30 @@ fn group_properties(ui: &mut egui::Ui, dungeon: &mut Dungeon, group_id: &str) {
     ui.add_space(8.0);
     ui.label("Members:");
     let room_ids = dungeon.graph.groups[idx].room_ids.clone();
-    for rid in &room_ids {
-        if let Some(room) = dungeon.graph.room_by_id(rid) {
-            ui.label(format!("  {}", room.label));
+    let room_labels: Vec<(String, String)> = room_ids.iter()
+        .filter_map(|rid| dungeon.graph.room_by_id(rid).map(|r| (rid.clone(), r.label.clone())))
+        .collect();
+    let mut remove_id: Option<String> = None;
+    for (rid, label) in &room_labels {
+        ui.horizontal(|ui| {
+            ui.label(format!("  {}", label));
+            if ui.small_button("×").clicked() {
+                remove_id = Some(rid.clone());
+            }
+        });
+    }
+    if let Some(rid) = remove_id {
+        dungeon.graph.groups[idx].room_ids.retain(|id| *id != rid);
+    }
+
+    // Show containment validation warnings
+    if dungeon.graph.groups.get(idx).map(|g| g.is_containment()).unwrap_or(false) {
+        let errors = dungeon.graph.validate_containment();
+        if !errors.is_empty() {
+            ui.add_space(4.0);
+            for err in &errors {
+                ui.colored_label(egui::Color32::from_rgb(220, 60, 60), err);
+            }
         }
     }
 
@@ -497,6 +585,28 @@ fn room_properties(ui: &mut egui::Ui, room: &mut Room, focus_label: &mut bool) {
                 ui.selectable_value(&mut room.shape, shape, shape.label());
             }
         });
+
+    ui.add_space(8.0);
+    ui.label("Environment:");
+    egui::ComboBox::from_id_salt("room_environment")
+        .selected_text(room.environment.label())
+        .show_ui(ui, |ui| {
+            for env in RoomEnvironment::ALL {
+                ui.selectable_value(&mut room.environment, env, env.label());
+            }
+        });
+
+    // Open walls (only for rectangles)
+    if room.shape == RoomShape::Rectangle {
+        ui.add_space(8.0);
+        ui.label("Open Walls:");
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut room.open_walls.north, "N");
+            ui.checkbox(&mut room.open_walls.south, "S");
+            ui.checkbox(&mut room.open_walls.east, "E");
+            ui.checkbox(&mut room.open_walls.west, "W");
+        });
+    }
 
     // Shape-specific controls
     let (ew, eh) = room.grid_size();
@@ -646,6 +756,11 @@ fn connection_properties(ui: &mut egui::Ui, edge: &mut StoredEdge) {
                 ui.selectable_value(&mut edge.connection.connection_type, ct, ct.label());
             }
         });
+
+    if edge.connection.connection_type == ConnectionType::Flush {
+        ui.add_space(8.0);
+        ui.checkbox(&mut edge.connection.keep_walls, "Keep shared walls");
+    }
 
     ui.add_space(8.0);
     ui.horizontal(|ui| {

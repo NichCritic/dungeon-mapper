@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use petgraph::graph::UnGraph;
 use serde::{Deserialize, Serialize};
@@ -35,10 +35,20 @@ pub struct RoomGroup {
     pub spatial_x: Option<i32>,
     #[serde(default)]
     pub spatial_y: Option<i32>,
+    /// When set, this group's `room_ids` are physically contained inside this parent room.
+    #[serde(default)]
+    pub parent_room_id: Option<String>,
+    /// Grid squares of padding between children and parent walls (default 1).
+    #[serde(default = "default_containment_padding")]
+    pub containment_padding: u32,
 }
 
 fn default_group_color() -> [u8; 4] {
     [100, 150, 255, 40]
+}
+
+fn default_containment_padding() -> u32 {
+    1
 }
 
 impl RoomGroup {
@@ -52,7 +62,14 @@ impl RoomGroup {
             color: default_group_color(),
             spatial_x: None,
             spatial_y: None,
+            parent_room_id: None,
+            containment_padding: default_containment_padding(),
         }
+    }
+
+    /// Returns true if this is a containment group (has a parent room).
+    pub fn is_containment(&self) -> bool {
+        self.parent_room_id.is_some()
     }
 
     /// Compute the bounding rect of this group's rooms in the spatial layout.
@@ -145,6 +162,106 @@ impl DungeonGraph {
 
     pub fn connection_by_id_mut(&mut self, id: &str) -> Option<&mut StoredEdge> {
         self.connections.iter_mut().find(|e| e.connection.id == id)
+    }
+
+    /// Returns the IDs of all rooms that are children of the given parent room
+    /// (i.e. contained in a containment group whose parent_room_id matches).
+    pub fn children_of(&self, parent_room_id: &str) -> Vec<&str> {
+        self.groups.iter()
+            .filter(|g| g.parent_room_id.as_deref() == Some(parent_room_id))
+            .flat_map(|g| g.room_ids.iter().map(|s| s.as_str()))
+            .collect()
+    }
+
+    /// Returns the parent room ID if this room is a child in a containment group.
+    pub fn parent_of(&self, room_id: &str) -> Option<&str> {
+        self.groups.iter()
+            .find(|g| g.parent_room_id.is_some() && g.room_ids.contains(&room_id.to_string()))
+            .and_then(|g| g.parent_room_id.as_deref())
+    }
+
+    /// Returns the nesting depth of a room (0 = top-level, 1 = inside a container, etc.).
+    pub fn nesting_depth(&self, room_id: &str) -> u32 {
+        let mut depth = 0;
+        let mut current = room_id.to_string();
+        while let Some(parent) = self.parent_of(&current) {
+            depth += 1;
+            current = parent.to_string();
+            if depth > 20 { break; } // cycle guard
+        }
+        depth
+    }
+
+    /// Returns true if this room is a container (has children in a containment group).
+    pub fn is_container(&self, room_id: &str) -> bool {
+        self.groups.iter().any(|g| g.parent_room_id.as_deref() == Some(room_id))
+    }
+
+    /// Returns the containment group for a given parent room, if any.
+    pub fn containment_group(&self, parent_room_id: &str) -> Option<&RoomGroup> {
+        self.groups.iter().find(|g| g.parent_room_id.as_deref() == Some(parent_room_id))
+    }
+
+    /// Validate containment hierarchy: no cycles, room in at most one containment group,
+    /// container and children on same floor.
+    pub fn validate_containment(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+
+        // Check for rooms in multiple containment groups
+        let mut child_to_group: HashMap<&str, &str> = HashMap::new();
+        for group in &self.groups {
+            if group.parent_room_id.is_none() {
+                continue;
+            }
+            for rid in &group.room_ids {
+                if let Some(existing_group) = child_to_group.get(rid.as_str()) {
+                    errors.push(format!(
+                        "Room '{}' is in multiple containment groups ('{}' and '{}')",
+                        self.room_by_id(rid).map(|r| r.label.as_str()).unwrap_or("?"),
+                        existing_group, group.label
+                    ));
+                } else {
+                    child_to_group.insert(rid.as_str(), &group.label);
+                }
+            }
+        }
+
+        // Check for cycles in containment hierarchy
+        for room in &self.rooms {
+            let mut visited = HashSet::new();
+            let mut current = room.id.as_str();
+            while let Some(parent) = self.parent_of(current) {
+                if !visited.insert(parent) {
+                    errors.push(format!("Cycle in containment hierarchy involving room '{}'", room.label));
+                    break;
+                }
+                current = parent;
+                if visited.len() > 20 { break; }
+            }
+        }
+
+        // Check floor consistency: children should be on same floor as parent
+        for group in &self.groups {
+            let Some(parent_id) = &group.parent_room_id else { continue };
+            let parent_floor = self.room_by_id(parent_id).map(|r| r.floor);
+            for rid in &group.room_ids {
+                let child_floor = self.room_by_id(rid).map(|r| r.floor);
+                if let (Some(pf), Some(cf)) = (parent_floor, child_floor) {
+                    let parent_floors = pf.floors();
+                    let child_floors = cf.floors();
+                    if !child_floors.iter().any(|f| parent_floors.contains(f)) {
+                        let parent_label = self.room_by_id(parent_id).map(|r| r.label.as_str()).unwrap_or("?");
+                        let child_label = self.room_by_id(rid).map(|r| r.label.as_str()).unwrap_or("?");
+                        errors.push(format!(
+                            "Child '{}' is on a different floor than container '{}'",
+                            child_label, parent_label
+                        ));
+                    }
+                }
+            }
+        }
+
+        errors
     }
 
     /// Build a petgraph for algorithms (BFS, pathfinding, etc.)
@@ -273,5 +390,111 @@ mod tests {
         assert!(node_map.contains_key(&id1));
         assert!(node_map.contains_key(&id2));
         assert!(node_map.contains_key(&id3));
+    }
+
+    #[test]
+    fn test_containment_helpers() {
+        let mut graph = DungeonGraph::new();
+        let parent = Room::new("Hall".to_string());
+        let child1 = Room::new("Alcove A".to_string());
+        let child2 = Room::new("Alcove B".to_string());
+        let outside = Room::new("Corridor".to_string());
+        let parent_id = parent.id.clone();
+        let child1_id = child1.id.clone();
+        let child2_id = child2.id.clone();
+        let outside_id = outside.id.clone();
+
+        graph.add_room(parent);
+        graph.add_room(child1);
+        graph.add_room(child2);
+        graph.add_room(outside);
+
+        let mut group = RoomGroup::new("Hall Contents".to_string());
+        group.parent_room_id = Some(parent_id.clone());
+        group.room_ids = vec![child1_id.clone(), child2_id.clone()];
+        graph.groups.push(group);
+
+        // children_of
+        let children = graph.children_of(&parent_id);
+        assert_eq!(children.len(), 2);
+        assert!(children.contains(&child1_id.as_str()));
+        assert!(children.contains(&child2_id.as_str()));
+
+        // parent_of
+        assert_eq!(graph.parent_of(&child1_id), Some(parent_id.as_str()));
+        assert_eq!(graph.parent_of(&child2_id), Some(parent_id.as_str()));
+        assert_eq!(graph.parent_of(&parent_id), None);
+        assert_eq!(graph.parent_of(&outside_id), None);
+
+        // nesting_depth
+        assert_eq!(graph.nesting_depth(&parent_id), 0);
+        assert_eq!(graph.nesting_depth(&child1_id), 1);
+        assert_eq!(graph.nesting_depth(&outside_id), 0);
+
+        // is_container
+        assert!(graph.is_container(&parent_id));
+        assert!(!graph.is_container(&child1_id));
+        assert!(!graph.is_container(&outside_id));
+
+        // containment_group
+        assert!(graph.containment_group(&parent_id).is_some());
+        assert!(graph.containment_group(&outside_id).is_none());
+    }
+
+    #[test]
+    fn test_containment_validation() {
+        let mut graph = DungeonGraph::new();
+        let parent = Room::new("Hall".to_string());
+        let child = Room::new("Alcove".to_string());
+        let parent_id = parent.id.clone();
+        let child_id = child.id.clone();
+        graph.add_room(parent);
+        graph.add_room(child);
+
+        // Valid containment
+        let mut group = RoomGroup::new("Contents".to_string());
+        group.parent_room_id = Some(parent_id.clone());
+        group.room_ids = vec![child_id.clone()];
+        graph.groups.push(group);
+
+        assert!(graph.validate_containment().is_empty());
+
+        // Add child to second containment group -> duplicate error
+        let mut group2 = RoomGroup::new("Dup".to_string());
+        group2.parent_room_id = Some(parent_id.clone());
+        group2.room_ids = vec![child_id.clone()];
+        graph.groups.push(group2);
+
+        let errors = graph.validate_containment();
+        assert!(!errors.is_empty());
+        assert!(errors[0].contains("multiple containment groups"));
+    }
+
+    #[test]
+    fn test_nested_containment_depth() {
+        let mut graph = DungeonGraph::new();
+        let outer = Room::new("Outer".to_string());
+        let middle = Room::new("Middle".to_string());
+        let inner = Room::new("Inner".to_string());
+        let outer_id = outer.id.clone();
+        let middle_id = middle.id.clone();
+        let inner_id = inner.id.clone();
+        graph.add_room(outer);
+        graph.add_room(middle);
+        graph.add_room(inner);
+
+        let mut g1 = RoomGroup::new("Outer->Middle".to_string());
+        g1.parent_room_id = Some(outer_id.clone());
+        g1.room_ids = vec![middle_id.clone()];
+        graph.groups.push(g1);
+
+        let mut g2 = RoomGroup::new("Middle->Inner".to_string());
+        g2.parent_room_id = Some(middle_id.clone());
+        g2.room_ids = vec![inner_id.clone()];
+        graph.groups.push(g2);
+
+        assert_eq!(graph.nesting_depth(&outer_id), 0);
+        assert_eq!(graph.nesting_depth(&middle_id), 1);
+        assert_eq!(graph.nesting_depth(&inner_id), 2);
     }
 }

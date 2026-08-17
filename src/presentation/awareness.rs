@@ -408,8 +408,8 @@ mod tests {
     fn test_encounter_distance_feet() {
         let layout = SpatialLayout {
             rooms: vec![
-                RoomLayout { room_id: "r1".into(), x: 0, y: 0, width: 4, height: 4, violations: vec![] },
-                RoomLayout { room_id: "r2".into(), x: 10, y: 0, width: 4, height: 4, violations: vec![] },
+                RoomLayout { room_id: "r1".into(), x: 0, y: 0, width: 4, height: 4, violations: vec![], wall_openings: vec![] },
+                RoomLayout { room_id: "r2".into(), x: 10, y: 0, width: 4, height: 4, violations: vec![], wall_openings: vec![] },
             ],
             corridors: Vec::new(),
             bounds: Vec::new(),
@@ -423,7 +423,7 @@ mod tests {
     fn test_light_level_thresholds() {
         let layout = SpatialLayout {
             rooms: vec![
-                RoomLayout { room_id: "r1".into(), x: 0, y: 0, width: 4, height: 4, violations: vec![] },
+                RoomLayout { room_id: "r1".into(), x: 0, y: 0, width: 4, height: 4, violations: vec![], wall_openings: vec![] },
             ],
             corridors: Vec::new(),
             bounds: Vec::new(),

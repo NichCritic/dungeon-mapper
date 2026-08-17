@@ -240,9 +240,9 @@ fn render_player_view_generic(
         }
         if *vis == Visibility::Explored {
             let dimmed_theme = Theme { wall_color: dimmed_wall, ..theme.clone() };
-            render_room_walls(renderer, rl, graph, &dimmed_theme);
+            render_room_walls(renderer, rl, graph, layout, &dimmed_theme);
         } else {
-            render_room_walls(renderer, rl, graph, theme);
+            render_room_walls(renderer, rl, graph, layout, theme);
         }
     }
     repair_circle_junctions(renderer, graph, layout, theme);
@@ -311,7 +311,15 @@ fn render_doors_filtered_generic(
         let corr_vis = corridor_visibility_generic(&edge.connection.id, presentation, graph);
         let exits = [edge.source_exit.as_ref(), edge.target_exit.as_ref()];
 
-        for ((room_id, wp), exit) in room_ids.iter().zip(wp_ends.iter()).zip(exits.iter()) {
+        // For child-to-parent connections, only draw door on the child side
+        let src_is_child_of_tgt = graph.parent_of(&edge.source_room_id)
+            .map(|p| p == edge.target_room_id).unwrap_or(false);
+        let tgt_is_child_of_src = graph.parent_of(&edge.target_room_id)
+            .map(|p| p == edge.source_room_id).unwrap_or(false);
+
+        for (i, ((room_id, wp), exit)) in room_ids.iter().zip(wp_ends.iter()).zip(exits.iter()).enumerate() {
+            if i == 1 && src_is_child_of_tgt { continue; }
+            if i == 0 && tgt_is_child_of_src { continue; }
             let is_cave = graph.room_by_id(room_id).is_some_and(|r| r.shape == RoomShape::Cave);
             if is_cave { continue; }
             let room_shown = *presentation.room_visibility(room_id) != Visibility::Hidden;
@@ -326,7 +334,7 @@ fn render_doors_filtered_generic(
             let ph = (dy2 - dy1) * GRID_PX;
 
             match edge.connection.connection_type {
-                ConnectionType::Open | ConnectionType::Secret => {}
+                ConnectionType::Open | ConnectionType::Secret | ConnectionType::Flush | ConnectionType::Merge => {}
                 ConnectionType::Door | ConnectionType::OneWay => {
                     renderer.fill_rect(px, py, pw, ph, [255, 255, 255, 255]);
                     renderer.stroke_rect(px, py, pw, ph, 1.0, theme.wall_color);

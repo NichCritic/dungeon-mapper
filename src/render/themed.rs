@@ -26,12 +26,15 @@ pub fn render_themed(
 
     render_background(renderer, layout, theme);
 
-    // Sort rooms by floor so higher floors render on top of lower floors
+    // Sort rooms by (floor, nesting_depth) so containers render before children
     let mut room_order: Vec<usize> = (0..layout.rooms.len()).collect();
     room_order.sort_by_key(|&i| {
-        graph.room_by_id(&layout.rooms[i].room_id)
+        let room_id = &layout.rooms[i].room_id;
+        let floor = graph.room_by_id(room_id)
             .map(|r| *r.floor.floors().iter().max().unwrap_or(&0))
-            .unwrap_or(0)
+            .unwrap_or(0);
+        let depth = graph.nesting_depth(room_id);
+        (floor, depth)
     });
 
     // Sort corridors by floor (max floor of connected rooms)
@@ -95,7 +98,7 @@ pub fn render_themed(
                 continue;
             }
         }
-        render_room_walls(renderer, rl, graph, theme);
+        render_room_walls(renderer, rl, graph, layout, theme);
     }
     // Redraw corridor floors at circular room junctions to punch through
     // the circle wall stroke that covers the corridor opening.
@@ -145,6 +148,33 @@ pub fn render_exterior_shading(
     }
 }
 
+/// Compute the floor color for a room based on its environment type.
+pub fn room_floor_color(room: Option<&Room>, theme: &Theme) -> [u8; 4] {
+    match room.map(|r| r.environment).unwrap_or_default() {
+        RoomEnvironment::Indoor => theme.floor_color,
+        RoomEnvironment::Outdoor => {
+            // Tint toward a warm sandy/earthy tone
+            let [r, g, b, a] = theme.floor_color;
+            [
+                (r as u16 * 230 / 255).min(255) as u8,
+                (g as u16 * 225 / 255).min(255) as u8,
+                (b as u16 * 200 / 255).min(255) as u8,
+                a,
+            ]
+        }
+        RoomEnvironment::Covered => {
+            // Slightly darker than indoor
+            let [r, g, b, a] = theme.floor_color;
+            [
+                (r as u16 * 240 / 255).min(255) as u8,
+                (g as u16 * 240 / 255).min(255) as u8,
+                (b as u16 * 235 / 255).min(255) as u8,
+                a,
+            ]
+        }
+    }
+}
+
 /// Render one room's floor.
 pub fn render_room_floor(
     renderer: &mut dyn MapRenderer,
@@ -152,7 +182,21 @@ pub fn render_room_floor(
     graph: &DungeonGraph,
     theme: &Theme,
 ) {
-    render_room_floor_with_color(renderer, rl, graph, theme.floor_color);
+    let room = graph.room_by_id(&rl.room_id);
+    let mut color = room_floor_color(room, theme);
+
+    // Container rooms: tint floor with the containment group's color
+    if let Some(group) = graph.containment_group(&rl.room_id) {
+        let [gr, gg, gb, _ga] = group.color;
+        let [fr, fg, fb, fa] = color;
+        // Blend group color into floor at ~20% opacity
+        let blend = |f: u8, g: u8| -> u8 {
+            ((f as u16 * 80 + g as u16 * 20) / 100).min(255) as u8
+        };
+        color = [blend(fr, gr), blend(fg, gg), blend(fb, gb), fa];
+    }
+
+    render_room_floor_with_color(renderer, rl, graph, color);
 }
 
 /// Render one room's floor with a specific color.
@@ -362,6 +406,7 @@ pub fn render_room_walls(
     renderer: &mut dyn MapRenderer,
     rl: &RoomLayout,
     graph: &DungeonGraph,
+    layout: &SpatialLayout,
     theme: &Theme,
 ) {
     let wall_w = 2.0;
@@ -371,6 +416,10 @@ pub fn render_room_walls(
     let rh = rl.height as f32 * GRID_PX;
     let room = graph.room_by_id(&rl.room_id);
     let shape = room.map(|r| r.shape).unwrap_or_default();
+    let open = room.map(|r| r.open_walls).unwrap_or_default();
+
+    // Compute which walls are suppressed by flush connections
+    let flush = flush_walls_with_layout(&rl.room_id, rl, graph, layout);
 
     match shape {
         RoomShape::Circle => {
@@ -420,9 +469,136 @@ pub fn render_room_walls(
             renderer.stroke_rect(rx, ry, rw, rh, wall_w, theme.wall_color);
         }
         RoomShape::Rectangle => {
-            renderer.stroke_rect(rx, ry, rw, rh, wall_w, theme.wall_color);
+            // Draw each wall individually, skipping open walls, flush edges, and wall openings
+            // Compute wall opening gaps (corridor widths at boundary crossings)
+            let openings = &rl.wall_openings;
+
+            // Helper: draw a wall line with gaps cut for wall openings
+            let draw_wall_with_gaps = |renderer: &mut dyn MapRenderer, x1: f32, y1: f32, x2: f32, y2: f32, is_horizontal: bool| {
+                if openings.is_empty() {
+                    renderer.draw_line(x1, y1, x2, y2, wall_w, theme.wall_color);
+                    return;
+                }
+
+                // Collect gap ranges along this wall
+                let mut gaps: Vec<(f32, f32)> = Vec::new();
+                for wp in openings {
+                    let wpx = wp.x as f32 * GRID_PX;
+                    let wpy = wp.y as f32 * GRID_PX;
+                    // Find corridor width from the connection that created this opening
+                    let cw = layout.corridors.iter()
+                        .find(|c| c.waypoints.iter().any(|p| *p == *wp))
+                        .map(|c| c.width as f32 * GRID_PX)
+                        .unwrap_or(GRID_PX * 2.0);
+                    let half_cw = cw / 2.0;
+
+                    if is_horizontal {
+                        // Wall is horizontal; check if opening is on this wall (y matches)
+                        let wall_y = y1;
+                        if (wpy - wall_y).abs() < GRID_PX {
+                            gaps.push((wpx - half_cw, wpx + half_cw));
+                        }
+                    } else {
+                        // Wall is vertical; check if opening is on this wall (x matches)
+                        let wall_x = x1;
+                        if (wpx - wall_x).abs() < GRID_PX {
+                            gaps.push((wpy - half_cw, wpy + half_cw));
+                        }
+                    }
+                }
+
+                if gaps.is_empty() {
+                    renderer.draw_line(x1, y1, x2, y2, wall_w, theme.wall_color);
+                    return;
+                }
+
+                // Sort gaps and draw wall segments between them
+                gaps.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+                if is_horizontal {
+                    let mut cur_x = x1;
+                    for (gap_start, gap_end) in &gaps {
+                        if *gap_start > cur_x {
+                            renderer.draw_line(cur_x, y1, *gap_start, y2, wall_w, theme.wall_color);
+                        }
+                        cur_x = *gap_end;
+                    }
+                    if cur_x < x2 {
+                        renderer.draw_line(cur_x, y1, x2, y2, wall_w, theme.wall_color);
+                    }
+                } else {
+                    let mut cur_y = y1;
+                    for (gap_start, gap_end) in &gaps {
+                        if *gap_start > cur_y {
+                            renderer.draw_line(x1, cur_y, x2, *gap_start, wall_w, theme.wall_color);
+                        }
+                        cur_y = *gap_end;
+                    }
+                    if cur_y < y2 {
+                        renderer.draw_line(x1, cur_y, x2, y2, wall_w, theme.wall_color);
+                    }
+                }
+            };
+
+            // North wall
+            if !open.north && !flush.north {
+                draw_wall_with_gaps(renderer, rx, ry, rx + rw, ry, true);
+            }
+            // South wall
+            if !open.south && !flush.south {
+                draw_wall_with_gaps(renderer, rx, ry + rh, rx + rw, ry + rh, true);
+            }
+            // West wall
+            if !open.west && !flush.west {
+                draw_wall_with_gaps(renderer, rx, ry, rx, ry + rh, false);
+            }
+            // East wall
+            if !open.east && !flush.east {
+                draw_wall_with_gaps(renderer, rx + rw, ry, rx + rw, ry + rh, false);
+            }
         }
     }
+}
+
+/// Determine which walls of a room are suppressed by flush or merge connections.
+/// A wall is suppressed when this room shares that edge with a flush/merge-connected neighbor.
+pub fn flush_walls_with_layout(
+    room_id: &str,
+    rl: &RoomLayout,
+    graph: &DungeonGraph,
+    layout: &SpatialLayout,
+) -> OpenWalls {
+    let mut walls = OpenWalls::default();
+    for edge in &graph.connections {
+        let is_flush = edge.connection.connection_type == ConnectionType::Flush;
+        let is_merge = edge.connection.connection_type == ConnectionType::Merge;
+        if (!is_flush && !is_merge) || edge.connection.keep_walls {
+            continue;
+        }
+        let neighbor_id = if edge.source_room_id == room_id {
+            &edge.target_room_id
+        } else if edge.target_room_id == room_id {
+            &edge.source_room_id
+        } else {
+            continue;
+        };
+        let Some(nrl) = layout.room_by_id(neighbor_id) else { continue };
+
+        // Check which edge is shared (rooms must be adjacent)
+        let r_right = rl.x + rl.width as i32;
+        let r_bottom = rl.y + rl.height as i32;
+        let n_right = nrl.x + nrl.width as i32;
+        let n_bottom = nrl.y + nrl.height as i32;
+
+        // Rooms share an edge if they are flush on one axis and overlap on the other
+        let y_overlap = rl.y < n_bottom && nrl.y < r_bottom;
+        let x_overlap = rl.x < n_right && nrl.x < r_right;
+
+        if y_overlap && r_right == nrl.x { walls.east = true; }
+        if y_overlap && rl.x == n_right { walls.west = true; }
+        if x_overlap && r_bottom == nrl.y { walls.south = true; }
+        if x_overlap && rl.y == n_bottom { walls.north = true; }
+    }
+    walls
 }
 
 /// Build the set of all cells inside cave room bounding boxes.
@@ -1345,7 +1521,9 @@ pub fn render_doors(
         if !options.show_secrets && edge.connection.connection_type == ConnectionType::Secret {
             continue;
         }
-        if edge.connection.connection_type == ConnectionType::Open {
+        if matches!(edge.connection.connection_type,
+            ConnectionType::Open | ConnectionType::Flush | ConnectionType::Merge
+        ) {
             continue;
         }
         let corridor = layout.corridors.iter().find(|c| c.connection_id == edge.connection.id);
@@ -1360,7 +1538,16 @@ pub fn render_doors(
 
         let exits = [edge.source_exit.as_ref(), edge.target_exit.as_ref()];
 
-        for ((room_id, wp), exit) in room_ids.iter().zip(wp_ends.iter()).zip(exits.iter()) {
+        // For child-to-parent connections, only draw door on the child side
+        let src_is_child_of_tgt = graph.parent_of(&edge.source_room_id)
+            .map(|p| p == edge.target_room_id).unwrap_or(false);
+        let tgt_is_child_of_src = graph.parent_of(&edge.target_room_id)
+            .map(|p| p == edge.source_room_id).unwrap_or(false);
+
+        for (i, ((room_id, wp), exit)) in room_ids.iter().zip(wp_ends.iter()).zip(exits.iter()).enumerate() {
+            // Skip door on the parent side of child-to-parent connections
+            if i == 1 && src_is_child_of_tgt { continue; }
+            if i == 0 && tgt_is_child_of_src { continue; }
             // Skip drawing door on cave room walls — caves have irregular boundaries
             let is_cave = graph.room_by_id(room_id)
                 .is_some_and(|r| r.shape == RoomShape::Cave);
@@ -1375,7 +1562,7 @@ pub fn render_doors(
             let ph = (dy2 - dy1) * GRID_PX;
 
             match edge.connection.connection_type {
-                ConnectionType::Open => {}
+                ConnectionType::Open | ConnectionType::Flush | ConnectionType::Merge => {}
                 ConnectionType::Door | ConnectionType::OneWay => {
                     renderer.fill_rect(px, py, pw, ph, [255, 255, 255, 255]);
                     renderer.stroke_rect(px, py, pw, ph, 1.0, theme.wall_color);

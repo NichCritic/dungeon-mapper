@@ -21,6 +21,8 @@ enum DragTarget {
     Section(String, usize),
     /// Dragging a corridor exit handle: (connection_id, is_source_exit)
     Exit(String, bool),
+    /// Painting cave cells: (room_id, value to paint — true=floor, false=wall)
+    CavePaint(String, bool),
 }
 
 pub struct SpatialViewState {
@@ -40,6 +42,8 @@ pub struct SpatialViewState {
     pub cave_contours_dirty: bool,
     /// Currently viewed floor (None = show all floors)
     pub current_floor: Option<i32>,
+    /// When true, clicking/dragging on a cave room paints cells instead of moving it.
+    pub cave_edit_mode: bool,
 }
 
 impl Default for SpatialViewState {
@@ -57,6 +61,7 @@ impl Default for SpatialViewState {
             recompute_requested: false,
             cave_contours_dirty: false,
             current_floor: None,
+            cave_edit_mode: false,
         }
     }
 }
@@ -197,8 +202,8 @@ pub fn spatial_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Spatia
         draw_infinite_grid(&painter, &transform, rect);
         draw_groups_spatial(&painter, &transform, layout, &dungeon.graph, state);
         draw_bounds(&painter, &transform, layout);
-        draw_corridors(&painter, &transform, layout, &dungeon.graph, state);
         draw_rooms(&painter, &transform, layout, &dungeon.graph, state, dungeon.theme.floor_color);
+        draw_corridors(&painter, &transform, layout, &dungeon.graph, state);
         draw_doors(&painter, &transform, layout, &dungeon.graph, state);
         draw_waypoint_handles(&painter, &transform, layout, state);
         draw_exit_handles(&painter, &transform, layout, &dungeon.graph, state);
@@ -324,12 +329,12 @@ fn handle_spatial_interactions(
                 }
             }
 
-            // Check rooms
+            // Check rooms — prefer deepest-nested (smallest) room at click point
             let gx = world_to_grid(world.x);
             let gy = world_to_grid(world.y);
             if let Some(layout) = &dungeon.layout {
+                let mut best_hit: Option<(&RoomLayout, u32)> = None; // (room_layout, nesting_depth)
                 for rl in &layout.rooms {
-                    // Floor filtering: skip rooms not on the current floor
                     if let Some(floor) = state.current_floor {
                         if let Some(room) = dungeon.graph.room_by_id(&rl.room_id) {
                             if !room.floor.visible_on(floor) {
@@ -338,8 +343,7 @@ fn handle_spatial_interactions(
                         }
                     }
 
-                    // Use world-coordinate hit test with a small margin for narrow rooms
-                    let margin = GRID_PX * 0.4; // ~8px at 1x zoom
+                    let margin = GRID_PX * 0.4;
                     let room_x1 = rl.x as f32 * GRID_PX - margin;
                     let room_y1 = rl.y as f32 * GRID_PX - margin;
                     let room_x2 = (rl.x + rl.width as i32) as f32 * GRID_PX + margin;
@@ -349,39 +353,63 @@ fn handle_spatial_interactions(
                         && world.y >= room_y1
                         && world.y <= room_y2
                     {
-                        // If this is a cave room that's already selected, toggle the clicked cell
-                        if state.selected_room.as_deref() == Some(&rl.room_id) {
-                            if let Some(room) = dungeon.graph.room_by_id(&rl.room_id) {
-                                if room.shape == RoomShape::Cave {
-                                    if let Some(cave) = &room.cave_data {
-                                        if !cave.cells.is_empty() {
-                                            let lx = (gx - rl.x) as usize;
-                                            let ly = (gy - rl.y) as usize;
-                                            let w = rl.width as usize;
-                                            let idx = ly * w + lx;
-                                            let new_val = !cave.cells.get(idx).copied().unwrap_or(false);
-                                            if let Some(room) = dungeon.graph.room_by_id_mut(&rl.room_id) {
-                                                if let Some(cave) = &mut room.cave_data {
-                                                    if let Some(cell) = cave.cells.get_mut(idx) {
-                                                        *cell = new_val;
-                                                        cave.generation += 1;
-                                                    }
+                        let depth = dungeon.graph.nesting_depth(&rl.room_id);
+                        let area = rl.width * rl.height;
+                        let is_better = match &best_hit {
+                            None => true,
+                            Some((prev, prev_depth)) => {
+                                depth > *prev_depth
+                                    || (depth == *prev_depth && area < prev.width * prev.height)
+                            }
+                        };
+                        if is_better {
+                            best_hit = Some((rl, depth));
+                        }
+                    }
+                }
+
+                if let Some((rl, _)) = best_hit {
+                    let rl_id = rl.room_id.clone();
+                    // Cave edit mode
+                    if state.cave_edit_mode {
+                        if let Some(room) = dungeon.graph.room_by_id(&rl_id) {
+                            if room.shape == RoomShape::Cave {
+                                if let Some(cave) = &room.cave_data {
+                                    if !cave.cells.is_empty() {
+                                        let lx = (gx - rl.x) as usize;
+                                        let ly = (gy - rl.y) as usize;
+                                        let w = rl.width as usize;
+                                        let idx = ly * w + lx;
+                                        let paint_val = !cave.cells.get(idx).copied().unwrap_or(false);
+                                        if let Some(room) = dungeon.graph.room_by_id_mut(&rl_id) {
+                                            if let Some(cave) = &mut room.cave_data {
+                                                if let Some(cell) = cave.cells.get_mut(idx) {
+                                                    *cell = paint_val;
+                                                    cave.generation += 1;
                                                 }
                                             }
-                                            state.cave_contours_dirty = true;
-                                            return;
                                         }
+                                        state.cave_contours_dirty = true;
+                                        state.selected_room = Some(rl_id.clone());
+                                        state.selected_corridor = None;
+                                        state.selected_waypoint = None;
+                                        state.drag_target = DragTarget::CavePaint(rl_id, paint_val);
+                                        state.drag_accum = egui::Vec2::ZERO;
+                                        return;
                                     }
                                 }
                             }
                         }
-                        state.selected_room = Some(rl.room_id.clone());
-                        state.selected_corridor = None;
-                        state.selected_waypoint = None;
-                        state.drag_target = DragTarget::Room(rl.room_id.clone());
-                        state.drag_accum = egui::Vec2::ZERO;
-                        return;
                     }
+                    if state.selected_room.as_deref() != Some(&rl_id) {
+                        state.cave_edit_mode = false;
+                    }
+                    state.selected_room = Some(rl_id.clone());
+                    state.selected_corridor = None;
+                    state.selected_waypoint = None;
+                    state.drag_target = DragTarget::Room(rl_id);
+                    state.drag_accum = egui::Vec2::ZERO;
+                    return;
                 }
 
                 // Check group body (after rooms, so rooms take priority)
@@ -517,10 +545,10 @@ fn handle_spatial_interactions(
                     state.selected_room = None;
                     state.selected_group = None;
                 } else {
-                    // Check room hit (with margin for narrow rooms)
+                    // Check room hit — prefer deepest-nested room
                     let mut hit_room = false;
+                    let mut best_hit: Option<(&RoomLayout, u32)> = None;
                     for rl in &layout.rooms {
-                        // Floor filtering: skip rooms not on the current floor
                         if let Some(floor) = state.current_floor {
                             if let Some(room) = dungeon.graph.room_by_id(&rl.room_id) {
                                 if !room.floor.visible_on(floor) {
@@ -538,11 +566,60 @@ fn handle_spatial_interactions(
                             && world.y >= room_y1
                             && world.y <= room_y2
                         {
+                            let depth = dungeon.graph.nesting_depth(&rl.room_id);
+                            let area = rl.width * rl.height;
+                            let is_better = match &best_hit {
+                                None => true,
+                                Some((prev, prev_depth)) => {
+                                    depth > *prev_depth
+                                        || (depth == *prev_depth && area < prev.width * prev.height)
+                                }
+                            };
+                            if is_better {
+                                best_hit = Some((rl, depth));
+                            }
+                        }
+                    }
+                    if let Some((rl, _)) = best_hit {
+                        let rl_id = rl.room_id.clone();
+                        // Cave edit mode
+                        if state.cave_edit_mode {
+                            if let Some(room) = dungeon.graph.room_by_id(&rl_id) {
+                                if room.shape == RoomShape::Cave {
+                                    if let Some(cave) = &room.cave_data {
+                                        if !cave.cells.is_empty() {
+                                            let gx = (world.x / GRID_PX).floor() as i32;
+                                            let gy = (world.y / GRID_PX).floor() as i32;
+                                            let lx = gx - rl.x;
+                                            let ly = gy - rl.y;
+                                            if lx >= 0 && ly >= 0 && (lx as u32) < rl.width && (ly as u32) < rl.height {
+                                                let w = rl.width as usize;
+                                                let idx = ly as usize * w + lx as usize;
+                                                let new_val = !cave.cells.get(idx).copied().unwrap_or(false);
+                                                if let Some(room) = dungeon.graph.room_by_id_mut(&rl_id) {
+                                                    if let Some(cave) = &mut room.cave_data {
+                                                        if let Some(cell) = cave.cells.get_mut(idx) {
+                                                            *cell = new_val;
+                                                            cave.generation += 1;
+                                                        }
+                                                    }
+                                                }
+                                                state.cave_contours_dirty = true;
+                                                state.selected_room = Some(rl_id.clone());
+                                                hit_room = true;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if !hit_room {
                             // Check if click is on an elevation section
                             let room_px_x = rl.x as f32 * GRID_PX;
                             let room_px_y = rl.y as f32 * GRID_PX;
                             let mut hit_section = None;
-                            if let Some(room) = dungeon.graph.room_by_id(&rl.room_id) {
+                            if let Some(room) = dungeon.graph.room_by_id(&rl_id) {
                                 for (si, sec) in room.sections.iter().enumerate() {
                                     let sx = room_px_x + sec.x * GRID_PX;
                                     let sy = room_px_y + sec.y * GRID_PX;
@@ -551,19 +628,18 @@ fn handle_spatial_interactions(
                                     if world.x >= sx && world.x <= sx + sw
                                         && world.y >= sy && world.y <= sy + sh
                                     {
-                                        hit_section = Some((rl.room_id.clone(), si));
+                                        hit_section = Some((rl_id.clone(), si));
                                         break;
                                     }
                                 }
                             }
 
-                            state.selected_room = Some(rl.room_id.clone());
+                            state.selected_room = Some(rl_id);
                             state.selected_corridor = None;
                             state.selected_waypoint = None;
                             state.selected_group = None;
                             state.selected_section = hit_section;
                             hit_room = true;
-                            break;
                         }
                     }
                     if !hit_room {
@@ -594,6 +670,7 @@ fn handle_spatial_interactions(
                             state.selected_waypoint = None;
                             state.selected_group = None;
                             state.selected_section = None;
+                            state.cave_edit_mode = false;
                         }
                     }
                 }
@@ -666,6 +743,39 @@ fn handle_spatial_interactions(
             }
         }
 
+        // Cave paint drag — paint cells continuously as the cursor moves
+        if let DragTarget::CavePaint(ref room_id, paint_val) = state.drag_target {
+            let room_id = room_id.clone();
+            let paint_val = paint_val;
+            if let Some(ptr_pos) = response.interact_pointer_pos() {
+                let world = transform.screen_to_world(ptr_pos);
+                let gx = (world.x / GRID_PX).floor() as i32;
+                let gy = (world.y / GRID_PX).floor() as i32;
+                if let Some(layout) = &dungeon.layout {
+                    if let Some(rl) = layout.room_by_id(&room_id) {
+                        let lx = gx - rl.x;
+                        let ly = gy - rl.y;
+                        if lx >= 0 && ly >= 0 && (lx as u32) < rl.width && (ly as u32) < rl.height {
+                            let w = rl.width as usize;
+                            let idx = ly as usize * w + lx as usize;
+                            if let Some(room) = dungeon.graph.room_by_id_mut(&room_id) {
+                                if let Some(cave) = &mut room.cave_data {
+                                    if let Some(cell) = cave.cells.get_mut(idx) {
+                                        if *cell != paint_val {
+                                            *cell = paint_val;
+                                            cave.generation += 1;
+                                            state.cave_contours_dirty = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Don't fall through to grid-step drag logic
+        } else {
+
         state.drag_accum += response.drag_delta() / state.view.zoom;
 
         let grid_steps_x = (state.drag_accum.x / GRID_PX).round() as i32;
@@ -690,11 +800,76 @@ fn handle_spatial_interactions(
                         })
                         .collect();
 
+                    // Collect children to move along with this room (recursive)
+                    let mut children_to_move: Vec<String> = Vec::new();
+                    {
+                        let mut stack = vec![room_id.clone()];
+                        while let Some(rid) = stack.pop() {
+                            for child_id in dungeon.graph.children_of(&rid) {
+                                children_to_move.push(child_id.to_string());
+                                stack.push(child_id.to_string());
+                            }
+                        }
+                    }
+
+                    // Also collect connections for children (for waypoint/exit shifting)
+                    let mut child_connected_ids: Vec<(String, String, bool, bool)> = Vec::new(); // (conn_id, room_id, is_src, is_tgt)
+                    for child_id in &children_to_move {
+                        for e in &dungeon.graph.connections {
+                            let is_src = e.source_room_id == *child_id;
+                            let is_tgt = e.target_room_id == *child_id;
+                            if is_src || is_tgt {
+                                child_connected_ids.push((e.connection.id.clone(), child_id.clone(), is_src, is_tgt));
+                            }
+                        }
+                    }
+
                     if let Some(layout) = &mut dungeon.layout {
                         // Move the room
                         if let Some(rl) = layout.room_by_id_mut(&room_id) {
                             rl.x += grid_steps_x;
                             rl.y += grid_steps_y;
+                        }
+
+                        // Move all children along with the container
+                        for child_id in &children_to_move {
+                            if let Some(rl) = layout.room_by_id_mut(child_id) {
+                                rl.x += grid_steps_x;
+                                rl.y += grid_steps_y;
+                            }
+                        }
+
+                        // Shift pinned waypoints for children's corridors
+                        for corridor in &mut layout.corridors {
+                            for (conn_id, _, is_src, is_tgt) in &child_connected_ids {
+                                if corridor.connection_id != *conn_id { continue; }
+                                if !corridor.pinned_waypoints.is_empty() {
+                                    if *is_src {
+                                        corridor.pinned_waypoints.first_mut().unwrap().x += grid_steps_x;
+                                        corridor.pinned_waypoints.first_mut().unwrap().y += grid_steps_y;
+                                    }
+                                    if *is_tgt {
+                                        corridor.pinned_waypoints.last_mut().unwrap().x += grid_steps_x;
+                                        corridor.pinned_waypoints.last_mut().unwrap().y += grid_steps_y;
+                                    }
+                                }
+                            }
+                        }
+
+                        // Clamp child rooms to stay within parent bounds
+                        if let Some(parent_id) = dungeon.graph.parent_of(&room_id) {
+                            let padding = dungeon.graph.containment_group(parent_id)
+                                .map(|g| g.containment_padding as i32)
+                                .unwrap_or(1);
+                            let parent_bounds = layout.room_by_id(parent_id).map(|p| (p.x, p.y, p.width, p.height));
+                            if let (Some((px, py, pw, ph)), Some(rl)) = (parent_bounds, layout.room_by_id_mut(&room_id)) {
+                                let min_x = px + padding;
+                                let min_y = py + padding;
+                                let max_x = px + pw as i32 - padding - rl.width as i32;
+                                let max_y = py + ph as i32 - padding - rl.height as i32;
+                                rl.x = rl.x.clamp(min_x, max_x);
+                                rl.y = rl.y.clamp(min_y, max_y);
+                            }
                         }
 
                         // Shift pinned waypoints for connected corridors
@@ -719,8 +894,12 @@ fn handle_spatial_interactions(
                         }
                     }
 
-                    // Shift exit positions for connected edges
-                    for (conn_id, is_src, is_tgt) in &connected_ids {
+                    // Shift exit positions for connected edges (room + children)
+                    let all_exit_shifts: Vec<(String, bool, bool)> = connected_ids.iter()
+                        .map(|(c, s, t)| (c.clone(), *s, *t))
+                        .chain(child_connected_ids.iter().map(|(c, _, s, t)| (c.clone(), *s, *t)))
+                        .collect();
+                    for (conn_id, is_src, is_tgt) in &all_exit_shifts {
                         if let Some(edge) = dungeon.graph.connections.iter_mut()
                             .find(|e| e.connection.id == *conn_id)
                         {
@@ -912,11 +1091,13 @@ fn handle_spatial_interactions(
                     }
                 }
                 DragTarget::Exit(_, _) => {} // handled above, before grid-step check
+                DragTarget::CavePaint(_, _) => {} // handled above, before grid-step check
                 DragTarget::None => {}
             }
             state.drag_accum.x -= grid_steps_x as f32 * GRID_PX;
             state.drag_accum.y -= grid_steps_y as f32 * GRID_PX;
         }
+        } // end else (non-CavePaint drag)
     }
 
     // === DRAG STOP ===
@@ -982,6 +1163,7 @@ fn handle_spatial_interactions(
                     }
                 }
             }
+            DragTarget::CavePaint(_, _) => {} // painting already handled during drag
             DragTarget::None => {}
         }
         state.drag_target = DragTarget::None;
@@ -1052,15 +1234,23 @@ fn draw_groups_spatial(
             egui::Color32::from_rgba_unmultiplied(c[0], c[1], c[2], 150)
         };
 
-        // Dashed border
-        let stroke = egui::Stroke::new(1.5, border_color);
-        draw_dashed_line(painter, egui::pos2(rect.min.x, rect.min.y), egui::pos2(rect.max.x, rect.min.y), stroke, 6.0, 3.0);
-        draw_dashed_line(painter, egui::pos2(rect.max.x, rect.min.y), egui::pos2(rect.max.x, rect.max.y), stroke, 6.0, 3.0);
-        draw_dashed_line(painter, egui::pos2(rect.max.x, rect.max.y), egui::pos2(rect.min.x, rect.max.y), stroke, 6.0, 3.0);
-        draw_dashed_line(painter, egui::pos2(rect.min.x, rect.max.y), egui::pos2(rect.min.x, rect.min.y), stroke, 6.0, 3.0);
+        if group.is_containment() {
+            // Solid border for containment groups
+            let stroke = egui::Stroke::new(2.0, border_color);
+            painter.rect_stroke(rect, 0.0, stroke, egui::StrokeKind::Middle);
+        } else {
+            // Dashed border for constraint groups
+            let stroke = egui::Stroke::new(1.5, border_color);
+            draw_dashed_line(painter, egui::pos2(rect.min.x, rect.min.y), egui::pos2(rect.max.x, rect.min.y), stroke, 6.0, 3.0);
+            draw_dashed_line(painter, egui::pos2(rect.max.x, rect.min.y), egui::pos2(rect.max.x, rect.max.y), stroke, 6.0, 3.0);
+            draw_dashed_line(painter, egui::pos2(rect.max.x, rect.max.y), egui::pos2(rect.min.x, rect.max.y), stroke, 6.0, 3.0);
+            draw_dashed_line(painter, egui::pos2(rect.min.x, rect.max.y), egui::pos2(rect.min.x, rect.min.y), stroke, 6.0, 3.0);
+        }
 
-        // Fill
-        painter.rect_filled(rect, 0.0, fill);
+        // Fill (only for non-containment; containers show the room's floor)
+        if !group.is_containment() {
+            painter.rect_filled(rect, 0.0, fill);
+        }
 
         // Label
         if !group.label.is_empty() {
@@ -1425,12 +1615,15 @@ fn draw_rooms(
     state: &SpatialViewState,
     floor_color: [u8; 4],
 ) {
-    // Sort rooms by floor so higher floors render on top of lower floors
+    // Sort rooms by (floor, nesting_depth) so containers render before children
     let mut room_order: Vec<usize> = (0..layout.rooms.len()).collect();
     room_order.sort_by_key(|&i| {
-        graph.room_by_id(&layout.rooms[i].room_id)
+        let room_id = &layout.rooms[i].room_id;
+        let floor = graph.room_by_id(room_id)
             .map(|r| *r.floor.floors().iter().max().unwrap_or(&0))
-            .unwrap_or(0)
+            .unwrap_or(0);
+        let depth = graph.nesting_depth(room_id);
+        (floor, depth)
     });
     for ri in room_order {
         let rl = &layout.rooms[ri];
@@ -1526,8 +1719,12 @@ fn draw_rooms(
                 } else {
                     painter.rect_filled(rect, 0.0, fill);
                 }
-                // Always draw AABB border (dashed for caves)
-                let aabb_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(60, 60, 60, 80));
+                // AABB border — highlighted when in cave edit mode
+                let aabb_stroke = if is_selected && state.cave_edit_mode {
+                    egui::Stroke::new(2.0, egui::Color32::from_rgb(80, 180, 255))
+                } else {
+                    egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(60, 60, 60, 80))
+                };
                 painter.rect_stroke(rect, 0.0, aabb_stroke, egui::StrokeKind::Middle);
             }
             RoomShape::Rectangle => {
@@ -1779,7 +1976,9 @@ fn draw_doors(
         };
         let white = if dim < 1.0 { dim_color(egui::Color32::WHITE, dim) } else { egui::Color32::WHITE };
         let dark = if dim < 1.0 { dim_color(egui::Color32::from_rgb(30, 30, 30), dim) } else { egui::Color32::from_rgb(30, 30, 30) };
-        if edge.connection.connection_type == ConnectionType::Open {
+        if matches!(edge.connection.connection_type,
+            ConnectionType::Open | ConnectionType::Flush | ConnectionType::Merge
+        ) {
             continue;
         }
 
@@ -1803,7 +2002,17 @@ fn draw_doors(
 
         let exits = [edge.source_exit.as_ref(), edge.target_exit.as_ref()];
 
-        for ((room_id, wp), exit) in room_ids.iter().zip(wp_ends.iter()).zip(exits.iter()) {
+        // For child-to-parent connections, only draw door on the child side
+        let src_is_child_of_tgt = graph.parent_of(&edge.source_room_id)
+            .map(|p| p == edge.target_room_id).unwrap_or(false);
+        let tgt_is_child_of_src = graph.parent_of(&edge.target_room_id)
+            .map(|p| p == edge.source_room_id).unwrap_or(false);
+
+        for (i, ((room_id, wp), exit)) in room_ids.iter().zip(wp_ends.iter()).zip(exits.iter()).enumerate() {
+            // Skip door on the parent side of child-to-parent connections
+            if i == 1 && src_is_child_of_tgt { continue; } // target is parent
+            if i == 0 && tgt_is_child_of_src { continue; } // source is parent
+
             let Some(rl) = layout.room_by_id(room_id) else { continue };
 
             let door_depth = 0.3_f32;
@@ -1821,7 +2030,7 @@ fn draw_doors(
             let door_rect = egui::Rect::from_min_max(screen_min, screen_max);
 
             match edge.connection.connection_type {
-                ConnectionType::Open => {} // already skipped above
+                ConnectionType::Open | ConnectionType::Flush | ConnectionType::Merge => {} // already skipped above
                 ConnectionType::Door => {
                     painter.rect_filled(door_rect, 0.0, white);
                     painter.rect_stroke(door_rect, 0.0, egui::Stroke::new(1.5, dark), egui::StrokeKind::Middle);
@@ -1996,6 +2205,21 @@ pub fn spatial_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Spa
 
                 if ui.button("Rotate 90\u{00b0}").clicked() {
                     std::mem::swap(&mut rl.width, &mut rl.height);
+                }
+            }
+        }
+
+        // Cave edit mode toggle
+        if let Some(room) = dungeon.graph.room_by_id(&room_id) {
+            if room.shape == RoomShape::Cave && room.cave_data.as_ref().is_some_and(|c| !c.cells.is_empty()) {
+                ui.add_space(8.0);
+                ui.separator();
+                let label = if state.cave_edit_mode { "Stop Editing Cave" } else { "Edit Cave Cells" };
+                if ui.button(label).clicked() {
+                    state.cave_edit_mode = !state.cave_edit_mode;
+                }
+                if state.cave_edit_mode {
+                    ui.label("Click/drag to paint. First cell determines floor/wall.");
                 }
             }
         }
@@ -2388,6 +2612,7 @@ fn duplicate_group(dungeon: &mut Dungeon, room_ids: &[String], group_idx: usize)
                 width: rl.width,
                 height: rl.height,
                 violations: Vec::new(),
+                wall_openings: Vec::new(),
             })
         }).collect();
         layout.rooms.extend(new_rooms);

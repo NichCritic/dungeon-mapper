@@ -71,6 +71,12 @@ pub struct Room {
     /// Raised/lowered sub-regions within this room.
     #[serde(default)]
     pub sections: Vec<ElevationSection>,
+    /// Indoor/outdoor/covered environment type
+    #[serde(default)]
+    pub environment: RoomEnvironment,
+    /// Which walls are open (not drawn). Only applies to Rectangle rooms.
+    #[serde(default)]
+    pub open_walls: OpenWalls,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -340,6 +346,40 @@ impl ElevationType {
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub enum RoomEnvironment {
+    #[default]
+    Indoor,
+    Outdoor,
+    Covered,
+}
+
+impl RoomEnvironment {
+    pub const ALL: [RoomEnvironment; 3] = [
+        RoomEnvironment::Indoor,
+        RoomEnvironment::Outdoor,
+        RoomEnvironment::Covered,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            RoomEnvironment::Indoor => "Indoor",
+            RoomEnvironment::Outdoor => "Outdoor",
+            RoomEnvironment::Covered => "Covered",
+        }
+    }
+}
+
+/// Which walls of a rectangular room are open (no wall drawn).
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct OpenWalls {
+    pub north: bool,
+    pub south: bool,
+    pub east: bool,
+    pub west: bool,
+}
+
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub enum RoomShape {
     #[default]
     Rectangle,
@@ -450,6 +490,8 @@ impl Room {
             cave_data: None,
             floor: FloorAssignment::default(),
             sections: Vec::new(),
+            environment: RoomEnvironment::default(),
+            open_walls: OpenWalls::default(),
         }
     }
 
