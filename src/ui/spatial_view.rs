@@ -1615,16 +1615,8 @@ fn draw_rooms(
     state: &SpatialViewState,
     floor_color: [u8; 4],
 ) {
-    // Sort rooms by (floor, nesting_depth) so containers render before children
-    let mut room_order: Vec<usize> = (0..layout.rooms.len()).collect();
-    room_order.sort_by_key(|&i| {
-        let room_id = &layout.rooms[i].room_id;
-        let floor = graph.room_by_id(room_id)
-            .map(|r| *r.floor.floors().iter().max().unwrap_or(&0))
-            .unwrap_or(0);
-        let depth = graph.nesting_depth(room_id);
-        (floor, depth)
-    });
+    // Rooms in z-order so containers render before children
+    let room_order = layout.render_order(graph);
     for ri in room_order {
         let rl = &layout.rooms[ri];
         // Floor filtering: dim lower floors, hide higher floors

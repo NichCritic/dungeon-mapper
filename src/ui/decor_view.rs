@@ -348,10 +348,7 @@ pub fn decor_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut DecorVie
             } else if state.place_mode {
                 // Place new decor — auto-select room under cursor if needed
                 let target_room = state.selected_room.clone().or_else(|| {
-                    render_layout.rooms.iter().find(|rl| {
-                        gx >= rl.x && gx < rl.x + rl.width as i32
-                            && gy >= rl.y && gy < rl.y + rl.height as i32
-                    }).map(|rl| rl.room_id.clone())
+                    render_layout.room_at_grid(&dungeon.graph, gx, gy).map(|rl| rl.room_id.clone())
                 });
                 if let Some(sel_id) = target_room {
                     if let Some(rl) = render_layout.room_by_id(&sel_id) {

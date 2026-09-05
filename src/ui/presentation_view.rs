@@ -437,16 +437,9 @@ fn corridor_at_grid(layout: &SpatialLayout, gx: i32, gy: i32) -> Option<String> 
     None
 }
 
-/// Find the room under a grid position, returning the room_id.
-fn room_at_grid(layout: &SpatialLayout, gx: i32, gy: i32) -> Option<String> {
-    for rl in &layout.rooms {
-        if gx >= rl.x && gx < rl.x + rl.width as i32
-            && gy >= rl.y && gy < rl.y + rl.height as i32
-        {
-            return Some(rl.room_id.clone());
-        }
-    }
-    None
+/// Find the topmost rendered room under a grid position, returning the room_id.
+fn room_at_grid(layout: &SpatialLayout, graph: &DungeonGraph, gx: i32, gy: i32) -> Option<String> {
+    layout.room_at_grid(graph, gx, gy).map(|rl| rl.room_id.clone())
 }
 
 /// The DM's presentation canvas showing the full map with visibility overlay.
@@ -658,7 +651,7 @@ pub fn presentation_view(
                 let gx = (world.x / GRID_PX).floor() as i32;
                 let gy = (world.y / GRID_PX).floor() as i32;
 
-                if let Some(room_id) = room_at_grid(layout, gx, gy) {
+                if let Some(room_id) = room_at_grid(layout, &dungeon.graph, gx, gy) {
                     view_state.selected_room = Some(room_id);
                 } else {
                     view_state.selected_room = None;
@@ -736,7 +729,7 @@ pub fn presentation_view(
     
                     ui.close_menu();
                 }
-            } else if let Some(room_id) = room_at_grid(layout, gx, gy) {
+            } else if let Some(room_id) = room_at_grid(layout, &dungeon.graph, gx, gy) {
                 let label = dungeon.graph.room_by_id(&room_id)
                     .map(|r| r.label.as_str())
                     .unwrap_or("Room");
