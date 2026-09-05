@@ -10,6 +10,7 @@ pub enum RenderCommand {
     FillCircle { cx: f32, cy: f32, r: f32, color: [u8; 4] },
     StrokeCircle { cx: f32, cy: f32, r: f32, width: f32, color: [u8; 4] },
     Line { x1: f32, y1: f32, x2: f32, y2: f32, width: f32, color: [u8; 4] },
+    Polygon { pts: Vec<(f32, f32)>, color: [u8; 4] },
 }
 
 /// A MapRenderer that records drawing commands instead of rendering them.
@@ -44,6 +45,10 @@ impl MapRenderer for RecordingRenderer {
         self.commands.push(RenderCommand::Line { x1, y1, x2, y2, width, color });
     }
 
+    fn fill_polygon(&mut self, pts: &[(f32, f32)], color: [u8; 4]) {
+        self.commands.push(RenderCommand::Polygon { pts: pts.to_vec(), color });
+    }
+
     fn draw_text(&mut self, _text: &str, _x: f32, _y: f32, _size: f32, _color: [u8; 4]) {
         // Text is drawn as a live egui overlay, not cached.
     }
@@ -62,8 +67,9 @@ pub fn replay_commands(
     let mut shapes = Vec::with_capacity(commands.len());
 
     for cmd in commands {
-        match *cmd {
+        match cmd {
             RenderCommand::FillRect { x, y, w, h, color: c } => {
+                let (x, y, w, h, c) = (*x, *y, *w, *h, *c);
                 let min = transform.world_to_screen(egui::pos2(x, y));
                 let max = transform.world_to_screen(egui::pos2(x + w, y + h));
                 shapes.push(egui::Shape::rect_filled(
@@ -73,6 +79,7 @@ pub fn replay_commands(
                 ));
             }
             RenderCommand::StrokeRect { x, y, w, h, width, color: c } => {
+                let (x, y, w, h, width, c) = (*x, *y, *w, *h, *width, *c);
                 let min = transform.world_to_screen(egui::pos2(x, y));
                 let max = transform.world_to_screen(egui::pos2(x + w, y + h));
                 shapes.push(egui::Shape::rect_stroke(
@@ -83,6 +90,7 @@ pub fn replay_commands(
                 ));
             }
             RenderCommand::FillCircle { cx, cy, r, color: c } => {
+                let (cx, cy, r, c) = (*cx, *cy, *r, *c);
                 let center = transform.world_to_screen(egui::pos2(cx, cy));
                 shapes.push(egui::Shape::circle_filled(
                     center,
@@ -91,6 +99,7 @@ pub fn replay_commands(
                 ));
             }
             RenderCommand::StrokeCircle { cx, cy, r, width, color: c } => {
+                let (cx, cy, r, width, c) = (*cx, *cy, *r, *width, *c);
                 let center = transform.world_to_screen(egui::pos2(cx, cy));
                 shapes.push(egui::Shape::circle_stroke(
                     center,
@@ -99,12 +108,21 @@ pub fn replay_commands(
                 ));
             }
             RenderCommand::Line { x1, y1, x2, y2, width, color: c } => {
+                let (x1, y1, x2, y2, width, c) = (*x1, *y1, *x2, *y2, *width, *c);
                 let from = transform.world_to_screen(egui::pos2(x1, y1));
                 let to = transform.world_to_screen(egui::pos2(x2, y2));
                 shapes.push(egui::Shape::line_segment(
                     [from, to],
                     egui::Stroke::new(width * transform.zoom, color(c)),
                 ));
+            }
+            RenderCommand::Polygon { pts, color: c } => {
+                let c = *c;
+                let screen: Vec<egui::Pos2> = pts
+                    .iter()
+                    .map(|&(x, y)| transform.world_to_screen(egui::pos2(x, y)))
+                    .collect();
+                shapes.push(egui::Shape::convex_polygon(screen, color(c), egui::Stroke::NONE));
             }
         }
     }

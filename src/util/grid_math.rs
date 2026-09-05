@@ -1,5 +1,7 @@
 /// Pixels per grid square at default zoom
 pub const GRID_PX: f32 = 20.0;
+/// Base half-size of a decor glyph in world pixels (before per-item scale).
+pub const DECOR_HALF_SIZE: f32 = GRID_PX * 0.4;
 
 /// Convert grid position to world pixel position
 pub fn grid_to_world(grid: i32) -> f32 {
