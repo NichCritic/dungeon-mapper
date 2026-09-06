@@ -124,10 +124,10 @@ pub fn roll_attack(attack: &ParsedAttack, target_ac: u8) -> AttackResult {
 }
 
 /// Roll an attack with advantage/disadvantage on the attack roll.
-pub fn roll_attack_with_advantage(attack: &ParsedAttack, target_ac: u8, advantage: AdvantageState) -> AttackResult {
+/// Roll a single d20, applying advantage or disadvantage (best/worst of two).
+pub fn roll_d20(advantage: AdvantageState) -> u32 {
     let mut rng = rand::thread_rng();
-
-    let attack_roll = match advantage {
+    match advantage {
         AdvantageState::Normal => rng.gen_range(1..=20u32),
         AdvantageState::Advantage => {
             let r1 = rng.gen_range(1..=20u32);
@@ -139,7 +139,12 @@ pub fn roll_attack_with_advantage(attack: &ParsedAttack, target_ac: u8, advantag
             let r2 = rng.gen_range(1..=20u32);
             r1.min(r2)
         }
-    };
+    }
+}
+
+pub fn roll_attack_with_advantage(attack: &ParsedAttack, target_ac: u8, advantage: AdvantageState) -> AttackResult {
+    let mut rng = rand::thread_rng();
+    let attack_roll = roll_d20(advantage);
     let attack_total = attack_roll as i32 + attack.to_hit as i32;
     let is_crit = attack_roll == 20;
     let is_fumble = attack_roll == 1;
@@ -180,6 +185,16 @@ pub fn roll_attack_with_advantage(attack: &ParsedAttack, target_ac: u8, advantag
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_roll_d20_stays_in_range() {
+        for adv in [AdvantageState::Normal, AdvantageState::Advantage, AdvantageState::Disadvantage] {
+            for _ in 0..200 {
+                let r = roll_d20(adv);
+                assert!((1..=20).contains(&r), "{:?} rolled {}", adv, r);
+            }
+        }
+    }
 
     #[test]
     fn test_roll_dice_simple() {

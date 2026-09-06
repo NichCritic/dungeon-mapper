@@ -186,4 +186,16 @@ impl CombatLog {
     pub fn log_info(&mut self, text: String) {
         self.log(text, COLOR_WHITE);
     }
+
+    /// Log one creature's saving throw against a DC.
+    pub fn log_save(&mut self, name: &str, ability: &str, die: i32, modifier: i32, total: i32, dc: u8, passed: bool) {
+        let (verdict, color) = if passed { ("SUCCESS", COLOR_HIT) } else { ("FAIL", COLOR_MISS) };
+        self.log(
+            format!(
+                "{} {} save: d20({}) {} {} = {} vs DC {} - {}",
+                name, ability, die, if modifier < 0 { "-" } else { "+" }, modifier.abs(), total, dc, verdict,
+            ),
+            color,
+        );
+    }
 }

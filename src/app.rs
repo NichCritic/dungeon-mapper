@@ -64,7 +64,6 @@ pub struct DungeonApp {
     pub presentation_view_state: PresentationViewState,
     pub player_viewport_open: bool,
     pub player_view_state: PlayerViewState,
-    pub combat_window_open: bool,
     /// True after the player viewport has been shown at least once (avoids re-applying initial size every frame).
     player_viewport_initialized: bool,
     pub server: Option<PresentationServer>,
@@ -172,7 +171,6 @@ impl Default for DungeonApp {
             presentation_view_state: PresentationViewState::default(),
             player_viewport_open: false,
             player_view_state: PlayerViewState::default(),
-            combat_window_open: false,
             player_viewport_initialized: false,
             server: None,
             server_port: 8080,
@@ -637,6 +635,64 @@ impl DungeonApp {
             if let Some(png) = self.render_player_png() {
                 server.push_update(png);
                 self.last_server_push_hash = hash;
+            }
+        }
+    }
+
+    /// Draw every managed standalone window (edit-mode and presentation) and act on any
+    /// file request they raised. Independent of the active tab so windows survive tab switches.
+    fn draw_dock_windows(&mut self, ctx: &egui::Context) {
+        encounters_view::draw_windows(
+            ctx,
+            &mut self.dungeon,
+            &self.monster_db,
+            &mut self.combat_stats_cache,
+            &mut self.encounters_state,
+        );
+        if self.presenting {
+            if let Some(presentation) = &mut self.presentation {
+                presentation_view::draw_windows(
+                    ctx,
+                    &mut self.dungeon,
+                    presentation,
+                    &self.monster_db,
+                    &mut self.combat_stats_cache,
+                );
+            }
+        }
+        self.dispatch_encounter_file_request();
+    }
+
+    fn dispatch_encounter_file_request(&mut self) {
+        // Dispatch encounter/creature file ops
+        if let Some(req) = self.encounters_state.file_request.take() {
+            if self.pending_file_op.is_none() {
+                use encounters_view::EncounterFileRequest;
+                self.pending_file_op = Some(match req {
+                    EncounterFileRequest::ExportEncounter(idx) => {
+                        let slice = if idx < self.dungeon.encounters.len() {
+                            &self.dungeon.encounters[idx..idx+1]
+                        } else {
+                            &[]
+                        };
+                        crate::io::save_load::export_encounters_async(
+                            slice,
+                            &self.dungeon.custom_monsters,
+                        )
+                    }
+                    EncounterFileRequest::ImportEncounters { target_room } => {
+                        self.encounters_state.import_target_room = target_room;
+                        crate::io::save_load::import_encounters_async()
+                    }
+                    EncounterFileRequest::ExportCreatures => {
+                        crate::io::save_load::export_creatures_async(
+                            &self.dungeon.custom_monsters,
+                        )
+                    }
+                    EncounterFileRequest::ImportCreatures => {
+                        crate::io::save_load::import_creatures_async()
+                    }
+                });
             }
         }
     }
@@ -1201,7 +1257,7 @@ impl eframe::App for DungeonApp {
                         self.presenting = false;
                         self.player_viewport_open = false;
                         self.player_viewport_initialized = false;
-                        self.combat_window_open = false;
+                        crate::ui::window_dock::WindowDock::close_presentation_windows(ui.ctx());
                         self.player_map_index = None;
                         self.player_dungeon = None;
                         self.player_presentation = None;
@@ -1499,15 +1555,32 @@ impl eframe::App for DungeonApp {
 
         // Combat log panel (bottom, only during presentation with active combat)
         if self.presenting {
-            if let Some(presentation) = &self.presentation {
-                if let Some(tracker) = &presentation.combat_tracker {
+            if let Some(presentation) = &mut self.presentation {
+                if let Some(tracker) = &mut presentation.combat_tracker {
                     if !tracker.log.entries.is_empty() {
                         egui::TopBottomPanel::bottom("combat_log_panel")
                             .resizable(true)
                             .default_height(150.0)
                             .min_height(60.0)
                             .show(ctx, |ui| {
-                                ui.heading("Combat Log");
+                                ui.horizontal(|ui| {
+                                    ui.heading("Combat Log");
+                                    if ui.small_button("Save Log").clicked() {
+                                        let text = tracker.log.export_text();
+                                        std::thread::spawn(move || {
+                                            if let Some(path) = rfd::FileDialog::new()
+                                                .set_file_name("combat_log.txt")
+                                                .add_filter("Text", &["txt"])
+                                                .save_file()
+                                            {
+                                                let _ = std::fs::write(path, text);
+                                            }
+                                        });
+                                    }
+                                    if ui.small_button("Clear Log").clicked() {
+                                        tracker.log.entries.clear();
+                                    }
+                                });
                                 egui::ScrollArea::vertical()
                                     .stick_to_bottom(true)
                                     .auto_shrink([false, false])
@@ -1523,17 +1596,9 @@ impl eframe::App for DungeonApp {
             }
         }
 
-        // Combat tracker floating window (when popped out of sidebar)
-        if self.presenting && self.combat_window_open {
-            if let Some(presentation) = &mut self.presentation {
-                presentation_view::combat_tracker_window(
-                    ctx,
-                    presentation,
-                    &self.dungeon,
-                    &mut self.combat_window_open,
-                );
-            }
-        }
+        // Tab bar of minimized windows (above the combat log), then the windows themselves
+        crate::ui::window_dock::window_bar(ctx);
+        self.draw_dock_windows(ctx);
 
         // Right sidebar
         let sidebar_response = egui::SidePanel::right("properties")
@@ -1550,7 +1615,6 @@ impl eframe::App for DungeonApp {
                                 &mut self.presentation_view_state,
                                 &mut self.player_view_state,
                                 &mut self.player_viewport_open,
-                                &mut self.combat_window_open,
                                 &mut server_action,
                                 &self.monster_db,
                                 &mut self.combat_stats_cache,
@@ -1616,40 +1680,8 @@ impl eframe::App for DungeonApp {
                                     ui,
                                     &mut self.dungeon,
                                     &self.monster_db,
-                                    &mut self.combat_stats_cache,
                                     &mut self.encounters_state,
                                 );
-                                // Dispatch encounter/creature file ops
-                                if let Some(req) = self.encounters_state.file_request.take() {
-                                    if self.pending_file_op.is_none() {
-                                        use encounters_view::EncounterFileRequest;
-                                        self.pending_file_op = Some(match req {
-                                            EncounterFileRequest::ExportEncounter(idx) => {
-                                                let slice = if idx < self.dungeon.encounters.len() {
-                                                    &self.dungeon.encounters[idx..idx+1]
-                                                } else {
-                                                    &[]
-                                                };
-                                                crate::io::save_load::export_encounters_async(
-                                                    slice,
-                                                    &self.dungeon.custom_monsters,
-                                                )
-                                            }
-                                            EncounterFileRequest::ImportEncounters { target_room } => {
-                                                self.encounters_state.import_target_room = target_room;
-                                                crate::io::save_load::import_encounters_async()
-                                            }
-                                            EncounterFileRequest::ExportCreatures => {
-                                                crate::io::save_load::export_creatures_async(
-                                                    &self.dungeon.custom_monsters,
-                                                )
-                                            }
-                                            EncounterFileRequest::ImportCreatures => {
-                                                crate::io::save_load::import_creatures_async()
-                                            }
-                                        });
-                                    }
-                                }
                             }
                             Tab::Styled => {
                                 styled_view::styled_sidebar(

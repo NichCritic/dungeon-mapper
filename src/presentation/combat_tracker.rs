@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -108,6 +108,11 @@ pub struct CombatTracker {
     pub initiative_order: Vec<CombatantId>,
     pub current_turn: usize,
     pub log: CombatLog,
+    /// Ids of the encounters taking part, in the order they joined. Monsters added to one of
+    /// these encounters (e.g. from the bestiary) are pulled into combat by [`Self::sync_encounter`].
+    pub encounters: Vec<String>,
+    /// Instances the DM removed from combat; never re-created by a sync.
+    pub removed: HashSet<MonsterInstanceId>,
 }
 
 impl CombatTracker {
@@ -195,6 +200,8 @@ impl CombatTracker {
             initiative_order: Vec::new(),
             current_turn: 0,
             log: CombatLog::new(),
+            encounters: encounters.iter().map(|e| e.id.clone()).collect(),
+            removed: HashSet::new(),
         }
     }
 
@@ -206,7 +213,35 @@ impl CombatTracker {
         custom_monsters: &[CustomMonster],
         cache: &mut CombatStatsCache,
     ) {
+        if !self.encounters.contains(&encounter.id) {
+            self.encounters.push(encounter.id.clone());
+        }
+        self.spawn_missing_instances(encounter, monster_db, custom_monsters, cache);
+        // Re-sort initiative if order already exists
+        if !self.initiative_order.is_empty() {
+            self.sort_initiative();
+        }
+    }
+
+    /// Create tracker instances for every monster in `encounter` that has none yet
+    /// (skipping ones the DM removed). Returns the ids that were created.
+    fn spawn_missing_instances(
+        &mut self,
+        encounter: &Encounter,
+        monster_db: &MonsterDatabase,
+        custom_monsters: &[CustomMonster],
+        cache: &mut CombatStatsCache,
+    ) -> Vec<MonsterInstanceId> {
+        let mut created = Vec::new();
         for (m_idx, em) in encounter.monsters.iter().enumerate() {
+            let missing: Vec<usize> = (0..em.count as usize)
+                .filter(|&i| {
+                    let id = MonsterInstanceId { encounter_id: encounter.id.clone(), monster_index: m_idx, instance: i };
+                    !self.instances.contains_key(&id) && !self.removed.contains(&id)
+                })
+                .collect();
+            if missing.is_empty() { continue; }
+
             let monster = resolve_monster(&em.monster_ref, monster_db, custom_monsters);
             let Some(monster) = monster else { continue };
 
@@ -220,24 +255,18 @@ impl CombatTracker {
                 }
             }
 
-            let attacks = stats.attacks.clone();
-                let multiattack_text = stats.multiattack_text.clone();
-                let abilities = stats.abilities.clone();
-
-            for i in 0..em.count as usize {
+            for i in missing {
                 let id = MonsterInstanceId {
                     encounter_id: encounter.id.clone(),
                     monster_index: m_idx,
                     instance: i,
                 };
-                // Skip if this instance already exists (e.g. encounter already in combat)
-                if self.instances.contains_key(&id) { continue; }
                 let label = if em.count > 1 {
                     format!("{} #{}", monster.name, i + 1)
                 } else {
                     monster.name.clone()
                 };
-                self.instances.insert(id, MonsterInstance {
+                self.instances.insert(id.clone(), MonsterInstance {
                     label,
                     ac: stats.ac.unwrap_or(10),
                     max_hp: stats.max_hp,
@@ -247,21 +276,65 @@ impl CombatTracker {
                     conditions: vec![false; STANDARD_CONDITIONS.len()],
                     is_dead: false,
                     dex_mod,
-                    attacks: attacks.clone(),
-                    multiattack_text: multiattack_text.clone(),
-                    abilities: abilities.clone(),
+                    attacks: stats.attacks.clone(),
+                    multiattack_text: stats.multiattack_text.clone(),
+                    abilities: stats.abilities.clone(),
                     surprised: false,
                     hidden: false,
                 });
+                created.push(id);
             }
         }
-        // Re-sort initiative if order already exists
+        created
+    }
+
+    /// Pull any monsters newly added to a participating encounter (from the bestiary or the
+    /// encounter editor) into combat, rolling their initiative if combat is under way.
+    /// Returns the ids that joined.
+    pub fn sync_encounter(
+        &mut self,
+        encounter: &Encounter,
+        monster_db: &MonsterDatabase,
+        custom_monsters: &[CustomMonster],
+        cache: &mut CombatStatsCache,
+    ) -> Vec<MonsterInstanceId> {
+        if !self.encounters.contains(&encounter.id) {
+            return Vec::new();
+        }
+        let created = self.spawn_missing_instances(encounter, monster_db, custom_monsters, cache);
+        if created.is_empty() {
+            return created;
+        }
         if !self.initiative_order.is_empty() {
+            let mut rng = rand::thread_rng();
+            for id in &created {
+                if let Some(inst) = self.instances.get_mut(id) {
+                    self.log.log_info(format!("{} joins the combat", inst.label));
+                    Self::roll_monster_initiative(inst, &mut rng, &mut self.log);
+                }
+            }
             self.sort_initiative();
+        }
+        created
+    }
+
+    /// Remove a monster from combat. It will not come back on a later sync.
+    pub fn remove_instance(&mut self, id: &MonsterInstanceId) {
+        let Some(inst) = self.instances.remove(id) else { return };
+        self.log.log_info(format!("{} removed from combat", inst.label));
+        self.removed.insert(id.clone());
+        let cid = CombatantId::Monster(id.clone());
+        if let Some(pos) = self.initiative_order.iter().position(|c| *c == cid) {
+            self.initiative_order.remove(pos);
+            if pos < self.current_turn {
+                self.current_turn -= 1;
+            }
+            if self.current_turn >= self.initiative_order.len() {
+                self.current_turn = 0;
+            }
         }
     }
 
-    /// Toggle hidden status on any combatant.
     pub fn toggle_hidden(&mut self, id: &CombatantId) {
         match id {
             CombatantId::Monster(mid) => {
@@ -398,11 +471,7 @@ impl CombatTracker {
             if let Some(total) = inst.initiative {
                 self.log.log_info(format!("{} initiative: {} (preset)", inst.label, total));
             } else {
-                let die = roll_with_adv_disadv(&mut rng, inst.hidden, inst.surprised);
-                let total = die + inst.dex_mod as i32;
-                inst.initiative = Some(total);
-                let adv = adv_label(inst.hidden, inst.surprised);
-                self.log.log_initiative(&inst.label, die, inst.dex_mod as i32, total, adv);
+                Self::roll_monster_initiative(inst, &mut rng, &mut self.log);
             }
         }
         for pc in self.players.values_mut() {
@@ -420,8 +489,19 @@ impl CombatTracker {
     }
 
 
-    /// Sort initiative order by initiative value (descending).
+    /// Roll and log initiative for one monster instance.
+    fn roll_monster_initiative(inst: &mut MonsterInstance, rng: &mut impl rand::Rng, log: &mut CombatLog) {
+        let die = roll_with_adv_disadv(rng, inst.hidden, inst.surprised);
+        let total = die + inst.dex_mod as i32;
+        inst.initiative = Some(total);
+        let adv = adv_label(inst.hidden, inst.surprised);
+        log.log_initiative(&inst.label, die, inst.dex_mod as i32, total, adv);
+    }
+
+    /// Sort initiative order by initiative value (descending), keeping the current turn on the
+    /// same combatant when it is still present.
     pub fn sort_initiative(&mut self) {
+        let current = self.current_combatant_id().cloned();
         let mut order: Vec<CombatantId> = Vec::new();
 
         // Add all monster instances
@@ -438,8 +518,10 @@ impl CombatTracker {
             let init_b = self.get_initiative(b).unwrap_or(0);
             init_b.cmp(&init_a) // descending
         });
+        self.current_turn = current
+            .and_then(|c| order.iter().position(|o| *o == c))
+            .unwrap_or(0);
         self.initiative_order = order;
-        self.current_turn = 0;
     }
 
     /// Get the initiative value for a combatant.
@@ -582,6 +664,58 @@ mod tests {
         }
     }
 
+    fn goblin_id(instance: usize) -> MonsterInstanceId {
+        MonsterInstanceId { encounter_id: "enc".into(), monster_index: 0, instance }
+    }
+
+    #[test]
+    fn sort_initiative_keeps_current_combatant() {
+        let mut tracker = make_tracker_with_goblin(&goblin_id(0));
+        for i in 1..3 {
+            let mut inst = tracker.instances[&goblin_id(0)].clone();
+            inst.label = format!("Goblin #{}", i + 1);
+            tracker.instances.insert(goblin_id(i), inst);
+        }
+        tracker.instances.get_mut(&goblin_id(0)).unwrap().initiative = Some(15);
+        tracker.instances.get_mut(&goblin_id(1)).unwrap().initiative = Some(10);
+        tracker.instances.get_mut(&goblin_id(2)).unwrap().initiative = Some(5);
+        tracker.sort_initiative();
+        tracker.next_turn(); // now on goblin 1 (init 10)
+        assert_eq!(tracker.current_combatant_id(), Some(&CombatantId::Monster(goblin_id(1))));
+
+        // A newcomer with higher initiative shifts the order but not whose turn it is
+        let mut inst = tracker.instances[&goblin_id(0)].clone();
+        inst.initiative = Some(20);
+        tracker.instances.insert(goblin_id(3), inst);
+        tracker.sort_initiative();
+        assert_eq!(tracker.current_combatant_id(), Some(&CombatantId::Monster(goblin_id(1))));
+        assert_eq!(tracker.current_turn, 2);
+    }
+
+    #[test]
+    fn remove_instance_adjusts_turn_and_blocks_resync() {
+        let mut tracker = make_tracker_with_goblin(&goblin_id(0));
+        let mut inst = tracker.instances[&goblin_id(0)].clone();
+        inst.initiative = Some(5);
+        tracker.instances.insert(goblin_id(1), inst);
+        tracker.instances.get_mut(&goblin_id(0)).unwrap().initiative = Some(15);
+        tracker.sort_initiative();
+        tracker.next_turn(); // on goblin 1
+        assert_eq!(tracker.current_turn, 1);
+
+        // Removing someone earlier in the order keeps the turn on the same combatant
+        tracker.remove_instance(&goblin_id(0));
+        assert_eq!(tracker.current_turn, 0);
+        assert_eq!(tracker.current_combatant_id(), Some(&CombatantId::Monster(goblin_id(1))));
+        assert!(tracker.removed.contains(&goblin_id(0)));
+        assert!(!tracker.instances.contains_key(&goblin_id(0)));
+
+        // Removing the last one leaves an empty, valid order
+        tracker.remove_instance(&goblin_id(1));
+        assert!(tracker.initiative_order.is_empty());
+        assert_eq!(tracker.current_turn, 0);
+    }
+
     fn make_tracker_with_goblin(id: &MonsterInstanceId) -> CombatTracker {
         let mut tracker = CombatTracker {
             instances: HashMap::new(),
@@ -590,6 +724,8 @@ mod tests {
             initiative_order: Vec::new(),
             current_turn: 0,
             log: CombatLog::new(),
+            encounters: Vec::new(),
+            removed: HashSet::new(),
         };
         tracker.instances.insert(id.clone(), MonsterInstance {
             label: "Goblin".into(), ac: 12, max_hp: 10, current_hp: 10, temp_hp: 0,
@@ -630,6 +766,8 @@ mod tests {
             players: HashMap::new(),
             round: 1, initiative_order: Vec::new(), current_turn: 0,
             log: CombatLog::new(),
+            encounters: Vec::new(),
+            removed: HashSet::new(),
         };
         tracker.instances.insert(id.clone(), MonsterInstance {
             label: "Goblin".into(), ac: 12, max_hp: 10, current_hp: 10, temp_hp: 5,
@@ -657,6 +795,8 @@ mod tests {
             players: HashMap::new(),
             round: 1, initiative_order: Vec::new(), current_turn: 0,
             log: CombatLog::new(),
+            encounters: Vec::new(),
+            removed: HashSet::new(),
         };
         tracker.instances.insert(id.clone(), MonsterInstance {
             label: "Goblin".into(), ac: 12, max_hp: 10, current_hp: 3, temp_hp: 0,
@@ -686,6 +826,8 @@ mod tests {
             players: HashMap::new(),
             round: 1, initiative_order: Vec::new(), current_turn: 0,
             log: CombatLog::new(),
+            encounters: Vec::new(),
+            removed: HashSet::new(),
         };
         tracker.instances.insert(id.clone(), MonsterInstance {
             label: "Goblin".into(), ac: 12, max_hp: 10, current_hp: 0, temp_hp: 0,
@@ -728,6 +870,8 @@ mod tests {
             ],
             current_turn: 0,
             log: CombatLog::new(),
+            encounters: Vec::new(),
+            removed: HashSet::new(),
         };
 
         tracker.next_turn();
@@ -751,6 +895,8 @@ mod tests {
             ],
             current_turn: 0,
             log: CombatLog::new(),
+            encounters: Vec::new(),
+            removed: HashSet::new(),
         };
 
         tracker.prev_turn();
@@ -765,6 +911,8 @@ mod tests {
             players: HashMap::new(),
             round: 1, initiative_order: Vec::new(), current_turn: 0,
             log: CombatLog::new(),
+            encounters: Vec::new(),
+            removed: HashSet::new(),
         };
         for i in 0..3 {
             let id = MonsterInstanceId {
@@ -855,6 +1003,8 @@ mod tests {
             players: HashMap::new(),
             round: 1, initiative_order: Vec::new(), current_turn: 0,
             log: CombatLog::new(),
+            encounters: Vec::new(),
+            removed: HashSet::new(),
         };
         tracker.players.insert("pc1".into(), PlayerCombatState {
             name: "Fighter".into(),
@@ -880,6 +1030,8 @@ mod tests {
             players: HashMap::new(),
             round: 1, initiative_order: Vec::new(), current_turn: 0,
             log: CombatLog::new(),
+            encounters: Vec::new(),
+            removed: HashSet::new(),
         };
         tracker.players.insert("pc1".into(), PlayerCombatState {
             name: "Fighter".into(),

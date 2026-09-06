@@ -15,6 +15,7 @@ use crate::presentation::combat_sim::{
 use crate::render::recording::replay_commands;
 use crate::render::themed::RenderOptions;
 use crate::ui::canvas_common::{handle_pan_zoom, ViewState, COLOR_PLACEHOLDER_TEXT};
+use crate::ui::window_dock::{dock_window, DockWindow, WindowDock};
 use crate::util::{ViewTransform, GRID_PX};
 
 use std::collections::HashMap;
@@ -315,11 +316,8 @@ pub fn encounters_sidebar(
     ui: &mut egui::Ui,
     dungeon: &mut Dungeon,
     monster_db: &MonsterDatabase,
-    combat_stats_cache: &mut CombatStatsCache,
     state: &mut EncountersViewState,
 ) {
-    let sim_state = &mut state.sim_state;
-
     if monster_db.is_empty() {
         ui.colored_label(
             egui::Color32::from_rgb(255, 200, 100),
@@ -360,17 +358,15 @@ pub fn encounters_sidebar(
             let new_id = enc.id.clone();
             dungeon.encounters.push(enc);
             ui.ctx().memory_mut(|mem| {
-                mem.data.insert_temp(egui::Id::new("encounter_editor_open"), true);
                 mem.data.insert_temp(egui::Id::new("encounter_editor_target"), new_id);
             });
+            WindowDock::open(ui.ctx(), DockWindow::EncounterEditor);
         }
         if ui.button("Import").clicked() {
             state.file_request = Some(EncounterFileRequest::ImportEncounters { target_room: None });
         }
         if ui.button("Monsters").clicked() {
-            ui.ctx().memory_mut(|mem| {
-                mem.data.insert_temp(egui::Id::new("monster_browser_open"), true);
-            });
+            WindowDock::open(ui.ctx(), DockWindow::MonsterBrowser);
         }
     });
 
@@ -387,9 +383,7 @@ pub fn encounters_sidebar(
             mem.data.get_temp(egui::Id::new("encounter_editor_target"))
         );
         if editing.as_ref() == Some(&id) {
-            ui.ctx().memory_mut(|mem| {
-                mem.data.insert_temp(egui::Id::new("encounter_editor_open"), false);
-            });
+            WindowDock::close(ui.ctx(), DockWindow::EncounterEditor);
         }
     }
     if let Some(enc_id) = move_enc_to_room {
@@ -400,19 +394,26 @@ pub fn encounters_sidebar(
         }
     }
 
-    // Pop-out windows
-    encounter_editor_window(ui.ctx(), dungeon, monster_db, &mut state.file_request);
-    monster_browser_window(ui.ctx(), dungeon, monster_db, &mut state.file_request);
-    custom_monster_editor_window(ui.ctx(), dungeon);
-    monster_workshop_window(ui.ctx(), dungeon, monster_db);
-    monte_carlo_window(ui.ctx(), dungeon, monster_db, combat_stats_cache, sim_state);
-
     ui.add_space(12.0);
     if ui.button("Monte Carlo Simulator").clicked() {
-        ui.ctx().memory_mut(|mem| {
-            mem.data.insert_temp(egui::Id::new("monte_carlo_open"), true);
-        });
+        WindowDock::open(ui.ctx(), DockWindow::MonteCarlo);
     }
+}
+
+/// Draw every encounter-related standalone window. Called once per frame from the app,
+/// independent of which tab or mode is active.
+pub fn draw_windows(
+    ctx: &egui::Context,
+    dungeon: &mut Dungeon,
+    monster_db: &MonsterDatabase,
+    combat_stats_cache: &mut CombatStatsCache,
+    state: &mut EncountersViewState,
+) {
+    encounter_editor_window(ctx, dungeon, monster_db, &mut state.file_request);
+    monster_browser_window(ctx, dungeon, monster_db, &mut state.file_request);
+    custom_monster_editor_window(ctx, dungeon);
+    monster_workshop_window(ctx, dungeon, monster_db);
+    monte_carlo_window(ctx, dungeon, monster_db, combat_stats_cache, &mut state.sim_state);
 }
 
 /// Compact encounter list. If a room is selected, encounters in that room appear
@@ -528,9 +529,9 @@ fn encounter_compact_row(
         let label = format!("{} {}", enc.name, summary);
         if ui.selectable_label(false, &label).clicked() {
             ui.ctx().memory_mut(|mem| {
-                mem.data.insert_temp(egui::Id::new("encounter_editor_open"), true);
                 mem.data.insert_temp(egui::Id::new("encounter_editor_target"), enc.id.clone());
             });
+            WindowDock::open(ui.ctx(), DockWindow::EncounterEditor);
         }
         if show_move_button {
             if ui.small_button("\u{2191}").on_hover_text("Move to selected room").clicked() {
@@ -550,22 +551,16 @@ pub fn encounter_editor_window(
     monster_db: &MonsterDatabase,
     file_request: &mut Option<EncounterFileRequest>,
 ) {
-    let mut open: bool = ctx.memory(|mem|
-        mem.data.get_temp(egui::Id::new("encounter_editor_open")).unwrap_or(false)
-    );
+    if !WindowDock::is_visible(ctx, DockWindow::EncounterEditor) { return; }
     let target_id: Option<String> = ctx.memory(|mem|
         mem.data.get_temp(egui::Id::new("encounter_editor_target"))
     );
-
-    if !open { return; }
     let Some(editing_id) = target_id else { return; };
 
     // Find the encounter index by ID
     let Some(enc_idx) = dungeon.encounters.iter().position(|e| e.id == editing_id) else {
         // Encounter was deleted, close editor
-        ctx.memory_mut(|mem| {
-            mem.data.insert_temp(egui::Id::new("encounter_editor_open"), false);
-        });
+        WindowDock::close(ctx, DockWindow::EncounterEditor);
         return;
     };
 
@@ -580,12 +575,7 @@ pub fn encounter_editor_window(
     let mut edit_custom_id: Option<String> = None;
     let mut add_monster = false;
 
-    egui::Window::new(title)
-        .id(egui::Id::new("encounter_editor_window"))
-        .open(&mut open)
-        .default_size([400.0, 500.0])
-        .resizable(true)
-        .show(ctx, |ui| {
+    dock_window(ctx, DockWindow::EncounterEditor, title, |w| w.default_size([400.0, 500.0]).resizable(true), |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 let enc_id = dungeon.encounters[enc_idx].id.clone();
                 let enc = &mut dungeon.encounters[enc_idx];
@@ -787,17 +777,14 @@ pub fn encounter_editor_window(
         ctx.memory_mut(|mem| {
             mem.data.insert_temp(egui::Id::new("custom_editor_id"), id);
         });
+        WindowDock::open(ctx, DockWindow::CustomMonsterEditor);
     }
     if add_monster {
         ctx.memory_mut(|mem| {
-            mem.data.insert_temp(egui::Id::new("monster_browser_open"), true);
             mem.data.insert_temp(egui::Id::new("monster_browser_target"), enc_idx);
         });
+        WindowDock::open(ctx, DockWindow::MonsterBrowser);
     }
-
-    ctx.memory_mut(|mem| {
-        mem.data.insert_temp(egui::Id::new("encounter_editor_open"), open);
-    });
 }
 
 /// Floating Monte Carlo simulator window.
@@ -808,17 +795,9 @@ fn monte_carlo_window(
     combat_stats_cache: &mut CombatStatsCache,
     sim_state: &mut SimulationState,
 ) {
-    let mut open: bool = ctx.memory(|mem|
-        mem.data.get_temp(egui::Id::new("monte_carlo_open")).unwrap_or(false)
-    );
+    if !WindowDock::is_visible(ctx, DockWindow::MonteCarlo) { return; }
 
-    if !open { return; }
-
-    egui::Window::new("Monte Carlo Simulator")
-        .open(&mut open)
-        .default_size([400.0, 400.0])
-        .resizable(true)
-        .show(ctx, |ui| {
+    dock_window(ctx, DockWindow::MonteCarlo, "Monte Carlo Simulator", |w| w.default_size([400.0, 400.0]).resizable(true), |ui| {
             let enc_names: Vec<(usize, String)> = dungeon.encounters.iter().enumerate()
                 .map(|(i, e)| (i, e.name.clone()))
                 .collect();
@@ -919,10 +898,6 @@ fn monte_carlo_window(
                 });
             }
         });
-
-    ctx.memory_mut(|mem| {
-        mem.data.insert_temp(egui::Id::new("monte_carlo_open"), open);
-    });
 }
 
 /// Floating monster browser window.
@@ -932,16 +907,12 @@ pub fn monster_browser_window(
     monster_db: &MonsterDatabase,
     file_request: &mut Option<EncounterFileRequest>,
 ) {
-    let mut open: bool = ctx.memory(|mem|
-        mem.data.get_temp(egui::Id::new("monster_browser_open")).unwrap_or(false)
-    );
+    if !WindowDock::is_visible(ctx, DockWindow::MonsterBrowser) {
+        return;
+    }
     let target_enc: Option<usize> = ctx.memory(|mem|
         mem.data.get_temp(egui::Id::new("monster_browser_target"))
     );
-
-    if !open {
-        return;
-    }
 
     // Read filter state from temp storage
     let mut search: String = ctx.memory(|mem|
@@ -966,11 +937,7 @@ pub fn monster_browser_window(
         mem.data.get_temp(egui::Id::new("mb_selected"))
     );
 
-    egui::Window::new("Monster Browser")
-        .open(&mut open)
-        .default_size([500.0, 600.0])
-        .resizable(true)
-        .show(ctx, |ui| {
+    dock_window(ctx, DockWindow::MonsterBrowser, "Monster Browser", |w| w.default_size([500.0, 600.0]).resizable(true), |ui| {
             // Search and filters
             ui.horizontal(|ui| {
                 ui.label("Search:");
@@ -991,9 +958,7 @@ pub fn monster_browser_window(
             // Actions
             ui.horizontal(|ui| {
                 if ui.button("Monster Workshop").clicked() {
-                    ctx.memory_mut(|mem| {
-                        mem.data.insert_temp(egui::Id::new("monster_workshop_open"), true);
-                    });
+                    WindowDock::open(ctx, DockWindow::MonsterWorkshop);
                 }
                 if ui.button("Export Creatures").clicked() {
                     *file_request = Some(EncounterFileRequest::ExportCreatures);
@@ -1205,7 +1170,6 @@ pub fn monster_browser_window(
 
     // Persist filter state
     ctx.memory_mut(|mem| {
-        mem.data.insert_temp(egui::Id::new("monster_browser_open"), open);
         mem.data.insert_temp(egui::Id::new("mb_search"), search);
         mem.data.insert_temp(egui::Id::new("mb_cr_min"), cr_min_str);
         mem.data.insert_temp(egui::Id::new("mb_cr_max"), cr_max_str);
@@ -1386,6 +1350,7 @@ fn custom_monster_editor_window(
     ctx: &egui::Context,
     dungeon: &mut Dungeon,
 ) {
+    if !WindowDock::is_visible(ctx, DockWindow::CustomMonsterEditor) { return; }
     let editor_id: Option<String> = ctx.memory(|mem|
         mem.data.get_temp(egui::Id::new("custom_editor_id"))
     );
@@ -1397,18 +1362,13 @@ fn custom_monster_editor_window(
         ctx.memory_mut(|mem| {
             mem.data.remove::<String>(egui::Id::new("custom_editor_id"));
         });
+        WindowDock::close(ctx, DockWindow::CustomMonsterEditor);
         return;
     };
 
-    let mut open = true;
     let title = format!("Edit: {}", dungeon.custom_monsters[cm_idx].monster.name);
 
-    egui::Window::new(title)
-        .id(egui::Id::new("custom_monster_editor_window"))
-        .open(&mut open)
-        .default_size([450.0, 600.0])
-        .resizable(true)
-        .show(ctx, |ui| {
+    dock_window(ctx, DockWindow::CustomMonsterEditor, title, |w| w.default_size([450.0, 600.0]).resizable(true), |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 let m = &mut dungeon.custom_monsters[cm_idx].monster;
 
@@ -1529,12 +1489,6 @@ fn custom_monster_editor_window(
                 feature_list_editor(ui, "Legendary Actions", &mut m.legendary, "cm_legendary");
             });
         });
-
-    if !open {
-        ctx.memory_mut(|mem| {
-            mem.data.remove::<String>(egui::Id::new("custom_editor_id"));
-        });
-    }
 }
 
 /// Helper: edit a speed value with a drag value and clear button.
@@ -1612,11 +1566,7 @@ fn monster_workshop_window(
     dungeon: &mut Dungeon,
     monster_db: &MonsterDatabase,
 ) {
-    let mut open: bool = ctx.memory(|mem|
-        mem.data.get_temp(egui::Id::new("monster_workshop_open")).unwrap_or(false)
-    );
-
-    if !open {
+    if !WindowDock::is_visible(ctx, DockWindow::MonsterWorkshop) {
         return;
     }
 
@@ -1661,11 +1611,7 @@ fn monster_workshop_window(
         MergeStrategy::ALL.get(idx).cloned().unwrap_or(MergeStrategy::Max)
     };
 
-    egui::Window::new("Monster Workshop")
-        .open(&mut open)
-        .default_size([550.0, 700.0])
-        .resizable(true)
-        .show(ctx, |ui| {
+    dock_window(ctx, DockWindow::MonsterWorkshop, "Monster Workshop", |w| w.default_size([550.0, 700.0]).resizable(true), |ui| {
             // --- Custom Monsters List ---
             if !dungeon.custom_monsters.is_empty() {
                 ui.label(egui::RichText::new("Custom Monsters").strong().size(14.0));
@@ -1682,6 +1628,7 @@ fn monster_workshop_window(
                     ctx.memory_mut(|mem| {
                         mem.data.insert_temp(egui::Id::new("custom_editor_id"), id);
                     });
+                    WindowDock::open(ctx, DockWindow::CustomMonsterEditor);
                 }
                 ui.separator();
             }
@@ -1892,7 +1839,6 @@ fn monster_workshop_window(
     // Persist state
     let overrides_json = serde_json::to_string(&overrides).unwrap_or_else(|_| "{}".to_string());
     ctx.memory_mut(|mem| {
-        mem.data.insert_temp(egui::Id::new("monster_workshop_open"), open);
         mem.data.insert_temp(egui::Id::new("merge_a_src"), merge_a_src);
         mem.data.insert_temp(egui::Id::new("merge_a_name"), merge_a_name);
         mem.data.insert_temp(egui::Id::new("merge_b_src"), merge_b_src);

@@ -6,6 +6,7 @@ pub mod encounters_view;
 pub mod graph_editor;
 pub mod spatial_view;
 pub mod styled_view;
+pub mod window_dock;
 pub mod sidebar;
 pub mod status_bar;
 pub mod presentation_view;

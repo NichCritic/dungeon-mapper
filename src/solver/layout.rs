@@ -488,13 +488,15 @@ fn effective_grid_size(
         .unwrap_or(1);
     let gap = 1u32; // 1-square gap between children
 
-    // Collect child sizes (recursively computed)
-    let child_sizes: Vec<(u32, u32)> = children.iter()
+    // Collect child sizes (recursively computed), largest first — the same order
+    // place_children_in_container packs them in, so the estimate matches placement.
+    let mut child_sizes: Vec<(u32, u32)> = children.iter()
         .filter_map(|cid| {
             size_overrides.get(*cid).copied()
                 .or_else(|| graph.room_by_id(cid).map(|r| effective_grid_size(r, graph, size_overrides)))
         })
         .collect();
+    child_sizes.sort_by(|a, b| child_pack_order(*a, *b));
 
     if child_sizes.is_empty() {
         return base;
@@ -531,6 +533,12 @@ fn effective_grid_size(
     let min_h = content_h + padding * 2;
 
     (base.0.max(min_w), base.1.max(min_h))
+}
+
+/// Packing order for a container's children: tallest first, then widest.
+/// Shared by the size estimate and the placement so they agree.
+fn child_pack_order(a: (u32, u32), b: (u32, u32)) -> std::cmp::Ordering {
+    b.1.cmp(&a.1).then(b.0.cmp(&a.0))
 }
 
 /// Build a map of effective sizes for all rooms, computing containers bottom-up.
@@ -618,8 +626,17 @@ fn place_children_in_container(
         .map(|g| g.containment_padding)
         .unwrap_or(1) as i32;
 
-    let children: HashSet<String> = graph.children_of(parent_id).into_iter()
+    // Ordered largest-first (ties broken by id) so placement is deterministic and
+    // matches the container size estimate; the set is for membership tests.
+    let mut ordered_children: Vec<String> = graph.children_of(parent_id).into_iter()
         .map(|s| s.to_string()).collect();
+    ordered_children.sort_by(|a, b| {
+        let size_of = |id: &str| sizes.get(id).copied()
+            .or_else(|| graph.room_by_id(id).map(|r| r.grid_size()))
+            .unwrap_or((1, 1));
+        child_pack_order(size_of(a), size_of(b)).then_with(|| a.cmp(b))
+    });
+    let children: HashSet<String> = ordered_children.iter().cloned().collect();
     if children.is_empty() {
         return;
     }
@@ -633,7 +650,7 @@ fn place_children_in_container(
     };
 
     // Place first child at the inner top-left, then BFS from it
-    let first_child = children.iter()
+    let first_child = ordered_children.iter()
         .find(|id| !state.placed.contains(id.as_str()));
     let Some(first_id) = first_child else { return };
     let first_room = graph.room_by_id(first_id).unwrap();
@@ -791,7 +808,7 @@ fn place_children_in_container(
     }
 
     // Place any remaining unconnected children via scan within bounds
-    for child_id in &children {
+    for child_id in &ordered_children {
         if state.placed.contains(child_id.as_str()) { continue; }
         let Some(child_room) = graph.room_by_id(child_id) else { continue };
         let (nw, nh) = sizes.get(child_id.as_str()).copied()
