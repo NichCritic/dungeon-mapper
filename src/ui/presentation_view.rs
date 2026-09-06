@@ -12,6 +12,7 @@ use crate::render::recording::replay_commands;
 use crate::render::themed::RenderOptions;
 use crate::ui::canvas_common::{handle_pan_zoom, ViewState, COLOR_PLACEHOLDER_TEXT};
 use crate::ui::window_dock::{dock_window, DockWindow, WindowDock};
+use crate::presentation::tokens::{self, TokenDrag, TokenStyle};
 use crate::util::{ViewTransform, GRID_PX};
 
 use crate::render::bg_cache::BackgroundRenderCache;
@@ -46,6 +47,10 @@ pub struct PresentationViewState {
     pub selected_aoe: Option<usize>,
     /// True while dragging the selected AoE marker.
     dragging_aoe: bool,
+    /// Currently selected map token.
+    pub selected_token: Option<TokenKind>,
+    /// In-progress token drag.
+    token_drag: Option<TokenDrag>,
 }
 
 impl Default for PresentationViewState {
@@ -59,11 +64,11 @@ impl Default for PresentationViewState {
             dragging_player_viewport: false,
             selected_aoe: None,
             dragging_aoe: false,
+            selected_token: None,
+            token_drag: None,
         }
     }
 }
-
-impl PresentationViewState {}
 
 pub fn render_cache_hash(layout: &SpatialLayout, theme: &Theme) -> u64 {
     presentation_input_hash(layout, theme)
@@ -659,9 +664,9 @@ fn mass_save_window(
                         match row.result {
                             Some((die, total, passed)) => {
                                 let (mark, color) = if passed {
-                                    ("\u{2713}", egui::Color32::from_rgb(100, 255, 100))
+                                    ("\u{2714}", egui::Color32::from_rgb(100, 255, 100))
                                 } else {
-                                    ("\u{2717}", egui::Color32::from_rgb(255, 100, 100))
+                                    ("\u{2716}", egui::Color32::from_rgb(255, 100, 100))
                                 };
                                 ui.colored_label(color, format!("d20({}) {} {} = {} {}",
                                     die, if row.modifier < 0 { "-" } else { "+" }, row.modifier.abs(), total, mark));
@@ -1078,7 +1083,7 @@ fn room_center_px(rl: &crate::model::RoomLayout) -> (f32, f32) {
 }
 
 /// Find the corridor under a grid position, returning the connection_id.
-fn corridor_at_grid(layout: &SpatialLayout, gx: i32, gy: i32) -> Option<String> {
+pub fn corridor_at_grid(layout: &SpatialLayout, gx: i32, gy: i32) -> Option<String> {
     for corridor in &layout.corridors {
         let cw = corridor.width as i32;
         let half = cw / 2;
@@ -1108,6 +1113,7 @@ pub fn presentation_view(
     presentation: &mut PresentationState,
     view_state: &mut PresentationViewState,
     player_view_state: &mut crate::ui::player_view::PlayerViewState,
+    monster_db: &MonsterDatabase,
 ) {
     let (response, painter) = ui.allocate_painter(
         ui.available_size(),
@@ -1186,6 +1192,59 @@ pub fn presentation_view(
     // AoE markers (visible on DM view, with center crosshairs)
     crate::presentation::aoe::render_aoe_markers(&painter, &transform, &dungeon.aoe_markers, true);
 
+    // Map tokens: prune ones whose creature is gone, resolve display data, draw, and
+    // handle DM drag/select. Tokens take precedence over AoE markers and the player
+    // viewport box for the primary button.
+    {
+        let mut toks = std::mem::take(&mut dungeon.tokens);
+        tokens::prune_stale(&mut toks, dungeon);
+        dungeon.tokens = toks;
+    }
+    let token_infos = tokens::resolve_tokens(dungeon, monster_db, presentation.combat_tracker.as_ref());
+    // Tracker rows can ask the map to jump to a token
+    let center_req: Option<MonsterInstanceId> = ui.ctx().memory_mut(|m| {
+        let id = egui::Id::new("center_on_token");
+        let v = m.data.get_temp::<MonsterInstanceId>(id);
+        m.data.remove::<MonsterInstanceId>(id);
+        v
+    });
+    if let Some(mid) = center_req {
+        let kind = TokenKind::Monster(mid);
+        if let Some(tok) = dungeon.tokens.iter().find(|t| t.kind == kind) {
+            view_state.view.center_on(tok.x * GRID_PX, tok.y * GRID_PX, rect.size());
+            view_state.selected_token = Some(kind);
+        }
+    }
+    tokens::render_tokens(&painter, ui.ctx(), &transform, &dungeon.tokens, &token_infos, &TokenStyle {
+        show_names: true,
+        selected: view_state.selected_token.as_ref(),
+        player_view: false,
+    });
+    let drag_before = view_state.token_drag.clone();
+    let token_busy = tokens::handle_token_drag(
+        &response, &transform, &mut dungeon.tokens, &token_infos,
+        &mut view_state.token_drag, &mut view_state.selected_token,
+    );
+    // A player token that just finished moving: keep the room-level party position in step
+    if let (Some(d), None) = (drag_before, &view_state.token_drag) {
+        if let Some(tok) = dungeon.tokens.get(d.idx) {
+            if matches!(tok.kind, TokenKind::Player(_)) {
+                let rooms: Vec<Option<String>> = dungeon.tokens.iter()
+                    .filter(|t| matches!(t.kind, TokenKind::Player(_)))
+                    .map(|t| room_at_grid(layout, &dungeon.graph, t.x.floor() as i32, t.y.floor() as i32))
+                    .collect();
+                if let Some(Some(first)) = rooms.first() {
+                    if rooms.iter().all(|r| r.as_ref() == Some(first)) {
+                        presentation.party_room = Some(first.clone());
+                    }
+                }
+            }
+        }
+    }
+    if tokens::delete_selected(ui, &mut dungeon.tokens, &mut view_state.selected_token) {
+        // nothing else to do; undo history picks up the change
+    }
+
     // --- Player viewport rectangle ---
     // Compute the world-space rect the player currently sees from their view state.
     let pv_zoom = player_view_state.view.zoom;
@@ -1217,7 +1276,7 @@ pub fn presentation_view(
 
         // AoE: click to select, drag to move — checked first so smaller
         // elements take precedence over the player viewport box.
-        if response.drag_started_by(egui::PointerButton::Primary) && !view_state.dragging_player_viewport {
+        if !token_busy && response.drag_started_by(egui::PointerButton::Primary) && !view_state.dragging_player_viewport {
             if let Some(pos) = response.interact_pointer_pos() {
                 if let Some(idx) = crate::presentation::aoe::marker_at_screen_pos(pos, &transform, &dungeon.aoe_markers) {
                     view_state.selected_aoe = Some(idx);
@@ -1227,8 +1286,8 @@ pub fn presentation_view(
         }
 
         // Drag handling: only from edges (with margin), only if not locked,
-        // and only if no AoE was grabbed.
-        if !player_view_state.locked && !view_state.dragging_aoe {
+        // and only if no token or AoE was grabbed.
+        if !player_view_state.locked && !view_state.dragging_aoe && !token_busy {
             const EDGE_MARGIN: f32 = 24.0;
             if response.drag_started_by(egui::PointerButton::Primary) {
                 if let Some(pos) = response.interact_pointer_pos() {
@@ -1253,7 +1312,7 @@ pub fn presentation_view(
         }
     } else {
         // No player viewport visible — still handle AoE drag start
-        if response.drag_started_by(egui::PointerButton::Primary) {
+        if !token_busy && response.drag_started_by(egui::PointerButton::Primary) {
             if let Some(pos) = response.interact_pointer_pos() {
                 if let Some(idx) = crate::presentation::aoe::marker_at_screen_pos(pos, &transform, &dungeon.aoe_markers) {
                     view_state.selected_aoe = Some(idx);
@@ -1297,8 +1356,8 @@ pub fn presentation_view(
         }
     }
 
-    // Left-click: select room or AoE, deselect on empty space
-    if response.clicked() && !view_state.dragging_aoe {
+    // Left-click: select room or AoE, deselect on empty space (tokens handled above)
+    if response.clicked() && !view_state.dragging_aoe && !token_busy {
         if let Some(pos) = response.interact_pointer_pos() {
             // Check AoE first
             if let Some(idx) = crate::presentation::aoe::marker_at_screen_pos(pos, &transform, &dungeon.aoe_markers) {
@@ -1450,6 +1509,34 @@ pub fn presentation_view(
                         view_state.view.center_on(cx, cy, view_state.canvas_size);
                     }
                     ui.close_menu();
+                }
+
+                // Tokens
+                if let Some(rl) = layout.room_by_id(&room_id) {
+                    ui.separator();
+                    for enc_id in presentation.encounter_ids_in_room(&room_id) {
+                        let Some(enc) = dungeon.encounters.iter().find(|e| e.id == enc_id) else { continue };
+                        if ui.button(format!("Place tokens: {}", enc.name)).clicked() {
+                            let sizes = tokens::encounter_sizes(enc, &dungeon.custom_monsters, monster_db);
+                            tokens::place_encounter_tokens(&mut dungeon.tokens, enc, rl, &sizes);
+                            ui.close_menu();
+                        }
+                    }
+                    if !dungeon.party.is_empty() {
+                        if ui.button("Place party tokens here").clicked() {
+                            tokens::place_party_tokens(&mut dungeon.tokens, &dungeon.party, rl);
+                            presentation.party_room = Some(room_id.clone());
+                            ui.close_menu();
+                        }
+                    }
+                    let here = tokens::tokens_in_room(&dungeon.tokens, rl);
+                    if !here.is_empty() {
+                        if ui.button(format!("Remove {} token(s) here", here.len())).clicked() {
+                            let mut i = 0;
+                            dungeon.tokens.retain(|_| { let keep = !here.contains(&i); i += 1; keep });
+                            ui.close_menu();
+                        }
+                    }
                 }
             } else {
                 ui.label("(no room or corridor here)");
@@ -2243,8 +2330,11 @@ fn combat_tracker_ui(
                                     }
 
                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                        if ui.small_button("\u{2715}").on_hover_text("Remove from combat").clicked() {
+                                        if ui.small_button("\u{00d7}").on_hover_text("Remove from combat").clicked() {
                                             remove_actions.push(inst_id.clone());
+                                        }
+                                        if ui.small_button("\u{2316}").on_hover_text("Center map on this creature's token").clicked() {
+                                            ui.ctx().memory_mut(|m| m.data.insert_temp(egui::Id::new("center_on_token"), inst_id.clone()));
                                         }
                                     });
                                 });
@@ -2371,6 +2461,12 @@ pub fn presentation_sidebar(
             let from = view_state.selected_room.clone().or_else(|| presentation.party_room.clone());
             open_distance_checks(ui.ctx(), from);
         }
+        if !dungeon.tokens.is_empty() {
+            if ui.button("Clear Tokens").on_hover_text("Remove every token from this map").clicked() {
+                dungeon.tokens.clear();
+                view_state.selected_token = None;
+            }
+        }
     });
 
     ui.add_space(8.0);
@@ -2473,6 +2569,20 @@ pub fn presentation_sidebar(
             ui.heading("Party");
             ui.separator();
             party_section(ui, dungeon, presentation, in_combat);
+            if !dungeon.party.is_empty() {
+                ui.horizontal(|ui| {
+                    if ui.small_button("Place Tokens Here").on_hover_text("One token per party member in this room").clicked() {
+                        if let Some(rl) = dungeon.layout.as_ref().and_then(|l| l.room_by_id(&sel_room_id)) {
+                            tokens::place_party_tokens(&mut dungeon.tokens, &dungeon.party, rl);
+                        }
+                    }
+                    if dungeon.tokens.iter().any(|t| matches!(t.kind, TokenKind::Player(_))) {
+                        if ui.small_button("Remove Party Tokens").clicked() {
+                            tokens::remove_party_tokens(&mut dungeon.tokens);
+                        }
+                    }
+                });
+            }
         }
 
         // Encounters in this room
@@ -2494,9 +2604,22 @@ pub fn presentation_sidebar(
                     EncounterType::Static => "S",
                     EncounterType::Wandering(_) => "W",
                 };
-                if ui.selectable_label(false, format!("[{}] {}", type_marker, enc.name)).clicked() {
-                    open_combat_prep(ui.ctx(), &enc.id);
-                }
+                ui.horizontal(|ui| {
+                    if ui.selectable_label(false, format!("[{}] {}", type_marker, enc.name)).clicked() {
+                        open_combat_prep(ui.ctx(), &enc.id);
+                    }
+                    let has_tokens = tokens::encounter_has_tokens(&dungeon.tokens, &enc.id);
+                    let label = if has_tokens { "Re-place Tokens" } else { "Tokens" };
+                    if ui.small_button(label).on_hover_text("Put one token per monster in this room").clicked() {
+                        if let Some(rl) = dungeon.layout.as_ref().and_then(|l| l.room_by_id(&sel_room_id)) {
+                            let sizes = tokens::encounter_sizes(enc, &dungeon.custom_monsters, monster_db);
+                            tokens::place_encounter_tokens(&mut dungeon.tokens, enc, rl, &sizes);
+                        }
+                    }
+                    if has_tokens && ui.small_button("\u{00d7}").on_hover_text("Remove this encounter's tokens").clicked() {
+                        tokens::remove_encounter_tokens(&mut dungeon.tokens, &enc.id);
+                    }
+                });
                 let summary = encounter_monster_summary(enc, dungeon, monster_db);
                 if !summary.is_empty() {
                     ui.indent(format!("enc_monsters_{}", enc.id), |ui| {
@@ -2590,7 +2713,20 @@ pub fn presentation_sidebar(
 
             ui.horizontal(|ui| {
                 if ui.button("Tick").on_hover_text("Move wandering encounters").clicked() {
+                    let before: std::collections::HashMap<String, String> = dungeon.encounters.iter()
+                        .map(|e| (e.id.clone(), presentation.encounter_room(e).to_string()))
+                        .collect();
                     presentation.tick_encounters(dungeon);
+                    // Tokens follow encounters that moved
+                    for enc in &dungeon.encounters {
+                        let now = presentation.encounter_room(enc);
+                        if before.get(&enc.id).map(|r| r.as_str()) == Some(now) { continue; }
+                        if !tokens::encounter_has_tokens(&dungeon.tokens, &enc.id) { continue; }
+                        if let Some(rl) = dungeon.layout.as_ref().and_then(|l| l.room_by_id(now)) {
+                            let sizes = tokens::encounter_sizes(enc, &dungeon.custom_monsters, monster_db);
+                            tokens::place_encounter_tokens(&mut dungeon.tokens, enc, rl, &sizes);
+                        }
+                    }
                     if presentation.autobattle {
                         run_autobattles(presentation, dungeon, monster_db, combat_stats_cache);
                     }
@@ -3238,6 +3374,14 @@ fn combat_prep_window(
 
             // Action buttons
             ui.horizontal(|ui| {
+                if ui.button("Place Tokens").on_hover_text("Put one token per monster in the encounter's room").clicked() {
+                    let enc = &dungeon.encounters[enc_idx];
+                    let room_id = presentation.encounter_room(enc).to_string();
+                    if let Some(rl) = dungeon.layout.as_ref().and_then(|l| l.room_by_id(&room_id)) {
+                        let sizes = tokens::encounter_sizes(enc, &dungeon.custom_monsters, monster_db);
+                        tokens::place_encounter_tokens(&mut dungeon.tokens, enc, rl, &sizes);
+                    }
+                }
                 if in_combat {
                     if ui.button("Add to Combat").clicked() {
                         if let Some(tracker) = &mut presentation.combat_tracker {

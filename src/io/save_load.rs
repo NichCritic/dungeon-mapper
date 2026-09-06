@@ -4,7 +4,7 @@ use std::sync::mpsc;
 use crate::model::{Campaign, Dungeon};
 
 /// Current save file format version. Increment when the data model changes.
-const CURRENT_VERSION: u32 = 3;
+const CURRENT_VERSION: u32 = 4;
 
 /// Versioned save file envelope (version 2+: campaign-based).
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -76,7 +76,8 @@ fn load_dungeon(version: u32, value: &serde_json::Value) -> Result<Dungeon, Stri
 fn load_campaign(version: u32, value: &serde_json::Value) -> Result<Campaign, String> {
     match version {
         // v2 → v3: added parent_room_id + containment_padding to RoomGroup (both #[serde(default)])
-        2 | 3 => serde_json::from_value(value.clone()).map_err(|e| e.to_string()),
+        // v3 → v4: added Dungeon.tokens (#[serde(default)])
+        2 | 3 | 4 => serde_json::from_value(value.clone()).map_err(|e| e.to_string()),
         v => Err(format!(
             "Save file version {} is newer than this application supports (max: {})",
             v, CURRENT_VERSION
@@ -424,6 +425,31 @@ mod tests {
         assert_eq!(loaded.maps[1].name, "Second Map");
         assert_eq!(loaded.party.len(), 1);
         assert_eq!(loaded.party[0].name, "Fighter");
+    }
+
+    #[test]
+    fn test_version_4_tokens_roundtrip_and_v3_loads() {
+        use crate::model::{MapToken, MonsterInstanceId, TokenKind};
+        let mut campaign = Campaign::new("Tokens".to_string());
+        campaign.maps[0].tokens.push(MapToken {
+            kind: TokenKind::Monster(MonsterInstanceId { encounter_id: "e".into(), monster_index: 0, instance: 1 }),
+            x: 3.5,
+            y: 4.5,
+        });
+        campaign.maps[0].tokens.push(MapToken { kind: TokenKind::Player("pc1".into()), x: 1.5, y: 1.5 });
+
+        let json = serialize_versioned(&campaign).unwrap();
+        let raw: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(raw["version"], 4);
+        let loaded = deserialize_versioned(&json).unwrap();
+        assert_eq!(loaded.maps[0].tokens.len(), 2);
+        assert_eq!(loaded.maps[0].tokens[0].x, 3.5);
+        assert!(matches!(loaded.maps[0].tokens[1].kind, TokenKind::Player(ref id) if id == "pc1"));
+
+        // A v3 file has no tokens field and still loads
+        let v3 = r#"{"version":3,"campaign":{"name":"Old","maps":[{"name":"M","graph":{"rooms":[],"connections":[],"graph_positions":{}}}]}}"#;
+        let old = deserialize_versioned(v3).unwrap();
+        assert!(old.maps[0].tokens.is_empty());
     }
 
     #[test]

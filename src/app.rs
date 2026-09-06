@@ -1714,6 +1714,7 @@ impl eframe::App for DungeonApp {
                         presentation,
                         &mut self.presentation_view_state,
                         &mut self.player_view_state,
+                        &self.monster_db,
                     );
                 }
             } else {
@@ -1728,7 +1729,7 @@ impl eframe::App for DungeonApp {
                         decor_view::decor_view(ui, &mut self.dungeon, &mut self.decor_state);
                     }
                     Tab::Encounters => {
-                        encounters_view::encounters_view(ui, &self.dungeon, &mut self.encounters_state);
+                        encounters_view::encounters_view(ui, &mut self.dungeon, &mut self.encounters_state, &self.monster_db);
                     }
                     Tab::Styled => {
                         styled_view::styled_view(ui, &self.dungeon, &mut self.styled_state);
@@ -1897,6 +1898,7 @@ impl eframe::App for DungeonApp {
                             dungeon,
                             presentation,
                             &mut self.player_view_state,
+                            &self.monster_db,
                         );
                     },
                 );

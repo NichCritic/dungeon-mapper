@@ -16,6 +16,7 @@ use crate::render::recording::replay_commands;
 use crate::render::themed::RenderOptions;
 use crate::ui::canvas_common::{handle_pan_zoom, ViewState, COLOR_PLACEHOLDER_TEXT};
 use crate::ui::window_dock::{dock_window, DockWindow, WindowDock};
+use crate::presentation::tokens::{self, TokenDrag, TokenStyle};
 use crate::util::{ViewTransform, GRID_PX};
 
 use std::collections::HashMap;
@@ -72,6 +73,10 @@ pub struct EncountersViewState {
     pub file_request: Option<EncounterFileRequest>,
     /// Target room for encounter import (set when import is dispatched, consumed on completion).
     pub import_target_room: Option<String>,
+    /// Currently selected map token.
+    pub selected_token: Option<TokenKind>,
+    /// In-progress token drag.
+    token_drag: Option<TokenDrag>,
 }
 
 impl Default for EncountersViewState {
@@ -83,6 +88,8 @@ impl Default for EncountersViewState {
             selected_room: None,
             file_request: None,
             import_target_room: None,
+            selected_token: None,
+            token_drag: None,
         }
     }
 }
@@ -148,7 +155,7 @@ fn truncate_name(name: &str, max_len: usize) -> String {
     }
 }
 
-pub fn encounters_view(ui: &mut egui::Ui, dungeon: &Dungeon, state: &mut EncountersViewState) {
+pub fn encounters_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut EncountersViewState, monster_db: &MonsterDatabase) {
     let (response, painter) = ui.allocate_painter(
         ui.available_size(),
         egui::Sense::click_and_drag(),
@@ -273,8 +280,26 @@ pub fn encounters_view(ui: &mut egui::Ui, dungeon: &Dungeon, state: &mut Encount
         );
     }
 
+    // Map tokens: draw, then drag/select (takes precedence over room selection)
+    {
+        let mut toks = std::mem::take(&mut dungeon.tokens);
+        tokens::prune_stale(&mut toks, dungeon);
+        dungeon.tokens = toks;
+    }
+    let token_infos = tokens::resolve_tokens(dungeon, monster_db, None);
+    tokens::render_tokens(&painter, ui.ctx(), &transform, &dungeon.tokens, &token_infos, &TokenStyle {
+        show_names: true,
+        selected: state.selected_token.as_ref(),
+        player_view: false,
+    });
+    let token_busy = tokens::handle_token_drag(
+        &response, &transform, &mut dungeon.tokens, &token_infos,
+        &mut state.token_drag, &mut state.selected_token,
+    );
+    tokens::delete_selected(ui, &mut dungeon.tokens, &mut state.selected_token);
+
     // Click to select/deselect a room
-    if response.clicked() {
+    if response.clicked() && !token_busy {
         if let Some(pos) = response.interact_pointer_pos() {
             let world = transform.screen_to_world(pos);
             let gx = (world.x / GRID_PX).floor() as i32;
@@ -353,6 +378,15 @@ pub fn encounters_sidebar(
                 .map(|r| r.id.clone())
                 .unwrap_or_default()
         };
+        if !dungeon.party.is_empty() && state.selected_room.is_some() {
+            if ui.button("Party Tokens").on_hover_text("Place one token per party member in the selected room").clicked() {
+                if let Some(rl) = state.selected_room.as_ref()
+                    .and_then(|rid| dungeon.layout.as_ref().and_then(|l| l.room_by_id(rid)))
+                {
+                    tokens::place_party_tokens(&mut dungeon.tokens, &dungeon.party, rl);
+                }
+            }
+        }
         if ui.button("Add Encounter").clicked() && !add_room.is_empty() {
             let enc = Encounter::new("New Encounter".to_string(), add_room);
             let new_id = enc.id.clone();
@@ -375,7 +409,17 @@ pub fn encounters_sidebar(
     // Compact encounter list with selected room section
     let mut remove_enc_id: Option<String> = None;
     let mut move_enc_to_room: Option<String> = None;
-    encounters_compact_list(ui, dungeon, monster_db, &state.selected_room, &mut remove_enc_id, &mut move_enc_to_room);
+    let mut place_tokens_enc: Option<String> = None;
+    encounters_compact_list(ui, dungeon, monster_db, &state.selected_room, &mut remove_enc_id, &mut move_enc_to_room, &mut place_tokens_enc);
+
+    if let Some(enc_id) = place_tokens_enc {
+        if let Some(enc) = dungeon.encounters.iter().find(|e| e.id == enc_id) {
+            if let Some(rl) = dungeon.layout.as_ref().and_then(|l| l.room_by_id(&enc.home_room_id)) {
+                let sizes = tokens::encounter_sizes(enc, &dungeon.custom_monsters, monster_db);
+                tokens::place_encounter_tokens(&mut dungeon.tokens, enc, rl, &sizes);
+            }
+        }
+    }
 
     if let Some(id) = remove_enc_id {
         dungeon.encounters.retain(|e| e.id != id);
@@ -425,6 +469,7 @@ fn encounters_compact_list(
     selected_room: &Option<String>,
     remove_enc_id: &mut Option<String>,
     move_enc_to_room: &mut Option<String>,
+    place_tokens_enc: &mut Option<String>,
 ) {
     if dungeon.encounters.is_empty() {
         ui.label("No encounters yet.");
@@ -452,7 +497,7 @@ fn encounters_compact_list(
                 .find(|(rid, _, _)| rid == sel_id);
             if let Some((_, _, encs)) = sel_room {
                 for enc in encs {
-                    encounter_compact_row(ui, enc, dungeon, monster_db, remove_enc_id, move_enc_to_room, false);
+                    encounter_compact_row(ui, enc, dungeon, monster_db, remove_enc_id, move_enc_to_room, place_tokens_enc, false);
                 }
             } else {
                 ui.label(egui::RichText::new("No encounters here.").weak());
@@ -467,7 +512,7 @@ fn encounters_compact_list(
                 if rid == sel_id { continue; }
                 ui.label(egui::RichText::new(room_label).strong().size(12.0));
                 for enc in room_encs {
-                    encounter_compact_row(ui, enc, dungeon, monster_db, remove_enc_id, move_enc_to_room, true);
+                    encounter_compact_row(ui, enc, dungeon, monster_db, remove_enc_id, move_enc_to_room, place_tokens_enc, true);
                 }
                 ui.add_space(4.0);
             }
@@ -476,7 +521,7 @@ fn encounters_compact_list(
             for (_, room_label, room_encs) in &rooms_with_encounters {
                 ui.label(egui::RichText::new(room_label).strong().size(12.0));
                 for enc in room_encs {
-                    encounter_compact_row(ui, enc, dungeon, monster_db, remove_enc_id, move_enc_to_room, false);
+                    encounter_compact_row(ui, enc, dungeon, monster_db, remove_enc_id, move_enc_to_room, place_tokens_enc, false);
                 }
                 ui.add_space(4.0);
             }
@@ -492,6 +537,7 @@ fn encounter_compact_row(
     monster_db: &MonsterDatabase,
     remove_enc_id: &mut Option<String>,
     move_enc_to_room: &mut Option<String>,
+    place_tokens_enc: &mut Option<String>,
     show_move_button: bool,
 ) {
     let type_marker = if enc.is_hazard() {
@@ -536,6 +582,13 @@ fn encounter_compact_row(
         if show_move_button {
             if ui.small_button("\u{2191}").on_hover_text("Move to selected room").clicked() {
                 *move_enc_to_room = Some(enc.id.clone());
+            }
+        }
+        if !enc.monsters.is_empty() {
+            let has_tokens = tokens::encounter_has_tokens(&dungeon.tokens, &enc.id);
+            let tip = if has_tokens { "Re-place tokens in the home room" } else { "Place one token per monster in the home room" };
+            if ui.small_button("Tokens").on_hover_text(tip).clicked() {
+                *place_tokens_enc = Some(enc.id.clone());
             }
         }
         if ui.small_button("X").clicked() {

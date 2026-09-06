@@ -6,6 +6,7 @@ pub mod combat_tracker;
 pub mod dice;
 pub mod fog;
 pub mod lighting;
+pub mod tokens;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -321,6 +322,7 @@ mod tests {
             light_sources: Vec::new(),
             ambient_light: 0.0,
             aoe_markers: Vec::new(),
+            tokens: Vec::new(),
             session: SessionState::default(),
         }
     }

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
 
-use crate::model::monster::Monster;
+use crate::model::monster::{CustomMonster, Monster, MonsterRef};
 
 /// In-memory database of monsters loaded from 5e-Tools bestiary JSON files.
 pub struct MonsterDatabase {
@@ -207,11 +207,23 @@ impl MonsterDatabase {
             .join("bestiary")
             .join("tokens")
             .join(source)
-            .join(format!("{}.webp", name));
+            .join(format!("{}.webp", name_to_token_name(name)));
         if path.is_file() {
             Some(path)
         } else {
             None
+        }
+    }
+
+    /// Token image for any monster reference; custom/merged monsters fall back to
+    /// the bestiary monster they were based on.
+    pub fn token_path_for_ref(&self, mref: &MonsterRef, custom: &[CustomMonster]) -> Option<PathBuf> {
+        match mref {
+            MonsterRef::Base { source, name } => self.token_path(source, name),
+            MonsterRef::Custom { id } | MonsterRef::Merged { id } => custom.iter()
+                .find(|c| c.id == *id)
+                .and_then(|c| c.based_on.as_ref())
+                .and_then(|(source, name)| self.token_path(source, name)),
         }
     }
 
@@ -788,5 +800,54 @@ mod tests {
             "replaceTxt should have replaced 'the devil': {}",
             &all_text[..200.min(all_text.len())]
         );
+    }
+}
+
+/// 5etools token file names are the monster name with quotes removed and
+/// Latin diacritics folded to ASCII (mirrors `Parser.nameToTokenName`).
+pub fn name_to_token_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for c in name.chars() {
+        match c {
+            '"' => {}
+            'À'..='Å' => out.push('A'),
+            'Æ' => out.push_str("AE"),
+            'Ç' => out.push('C'),
+            'È'..='Ë' => out.push('E'),
+            'Ì'..='Ï' => out.push('I'),
+            'Ð' => out.push('D'),
+            'Ñ' => out.push('N'),
+            'Ò'..='Ö' | 'Ø' => out.push('O'),
+            'Ù'..='Ü' => out.push('U'),
+            'Ý' => out.push('Y'),
+            'ß' => out.push_str("ss"),
+            'à'..='å' => out.push('a'),
+            'æ' => out.push_str("ae"),
+            'ç' => out.push('c'),
+            'è'..='ë' => out.push('e'),
+            'ì'..='ï' => out.push('i'),
+            'ð' => out.push('d'),
+            'ñ' => out.push('n'),
+            'ò'..='ö' | 'ø' => out.push('o'),
+            'ù'..='ü' => out.push('u'),
+            'ý' | 'ÿ' => out.push('y'),
+            'Œ' => out.push_str("OE"),
+            'œ' => out.push_str("oe"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod token_name_tests {
+    use super::name_to_token_name;
+
+    #[test]
+    fn folds_diacritics_and_strips_quotes() {
+        assert_eq!(name_to_token_name("Môrgæn"), "Morgaen");
+        assert_eq!(name_to_token_name("Rothé"), "Rothe");
+        assert_eq!(name_to_token_name("Rosavalda \"Rose\" Durst"), "Rosavalda Rose Durst");
+        assert_eq!(name_to_token_name("Goblin"), "Goblin");
     }
 }

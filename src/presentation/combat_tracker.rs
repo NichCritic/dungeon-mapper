@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
 
-use serde::{Deserialize, Serialize};
 
 use crate::data::MonsterDatabase;
 use crate::model::combat_stats::{CombatStatsCache, ParsedAttack, parse_combat_stats};
@@ -17,13 +16,7 @@ pub const STANDARD_CONDITIONS: &[&str] = &[
     "Concentrating",
 ];
 
-/// Identifies a specific monster instance within an encounter.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct MonsterInstanceId {
-    pub encounter_id: String,
-    pub monster_index: usize,
-    pub instance: usize,
-}
+pub use crate::model::{MonsterInstanceId, instance_label};
 
 /// Identifies any combatant (monster or player character).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -152,11 +145,7 @@ impl CombatTracker {
                         monster_index: m_idx,
                         instance: i,
                     };
-                    let label = if em.count > 1 {
-                        format!("{} #{}", monster.name, i + 1)
-                    } else {
-                        monster.name.clone()
-                    };
+                    let label = instance_label(&monster.name, em.count, i);
                     instances.insert(id, MonsterInstance {
                         label,
                         ac: stats.ac.unwrap_or(10),
@@ -261,11 +250,7 @@ impl CombatTracker {
                     monster_index: m_idx,
                     instance: i,
                 };
-                let label = if em.count > 1 {
-                    format!("{} #{}", monster.name, i + 1)
-                } else {
-                    monster.name.clone()
-                };
+                let label = instance_label(&monster.name, em.count, i);
                 self.instances.insert(id.clone(), MonsterInstance {
                     label,
                     ac: stats.ac.unwrap_or(10),

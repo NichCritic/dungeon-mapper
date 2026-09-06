@@ -104,10 +104,15 @@ impl SpatialLayout {
     /// given grid cell, so a click lands on whatever is drawn on top, e.g. a
     /// child room rather than its container.
     pub fn room_at_grid(&self, graph: &DungeonGraph, gx: i32, gy: i32) -> Option<&RoomLayout> {
-        self.render_order(graph)
-            .into_iter()
+        self.room_at_grid_ordered(&self.render_order(graph), gx, gy)
+    }
+
+    /// Same as [`Self::room_at_grid`] with a precomputed [`Self::render_order`],
+    /// for callers that test many cells per frame.
+    pub fn room_at_grid_ordered(&self, order: &[usize], gx: i32, gy: i32) -> Option<&RoomLayout> {
+        order.iter()
             .rev()
-            .map(|i| &self.rooms[i])
+            .map(|&i| &self.rooms[i])
             .find(|rl| {
                 gx >= rl.x && gx < rl.x + rl.width as i32
                     && gy >= rl.y && gy < rl.y + rl.height as i32

@@ -1,6 +1,8 @@
 use crate::model::*;
-use crate::presentation::PresentationState;
+use crate::data::MonsterDatabase;
+use crate::presentation::{PresentationState, Visibility};
 use crate::presentation::combat_tracker::CombatantId;
+use crate::presentation::tokens::{self, TokenStyle};
 use crate::render::bg_cache::BackgroundRenderCache;
 use crate::render::recording::replay_commands;
 use crate::render::themed::RenderOptions;
@@ -84,6 +86,7 @@ pub fn player_viewport(
     dungeon: &Dungeon,
     presentation: &PresentationState,
     state: &mut PlayerViewState,
+    monster_db: &MonsterDatabase,
 ) {
     // F11 toggles fullscreen
     let f11 = ctx.input(|i| i.key_pressed(egui::Key::F11));
@@ -170,6 +173,40 @@ pub fn player_viewport(
 
         // AoE markers (live overlay on player view, no center crosshairs)
         crate::presentation::aoe::render_aoe_markers(&painter, &transform, &dungeon.aoe_markers, false);
+
+        // Tokens: party always; monsters only where players can currently see
+        // (Visible room/corridor) and not stealth-hidden. Badges only, no names.
+        {
+            let infos = tokens::resolve_tokens(dungeon, monster_db, presentation.combat_tracker.as_ref());
+            let order = layout.render_order(&dungeon.graph);
+            let mut vis_tokens = Vec::new();
+            let mut vis_infos = Vec::new();
+            for (tok, info) in dungeon.tokens.iter().zip(&infos) {
+                let visible = match &tok.kind {
+                    TokenKind::Player(_) => true,
+                    TokenKind::Monster(_) => {
+                        let gx = tok.x.floor() as i32;
+                        let gy = tok.y.floor() as i32;
+                        if let Some(rl) = layout.room_at_grid_ordered(&order, gx, gy) {
+                            *presentation.room_visibility(&rl.room_id) == Visibility::Visible
+                        } else if let Some(cid) = crate::ui::presentation_view::corridor_at_grid(layout, gx, gy) {
+                            crate::presentation::fog::corridor_visibility(&cid, presentation, &dungeon.graph) == Visibility::Visible
+                        } else {
+                            false
+                        }
+                    }
+                };
+                if visible {
+                    vis_tokens.push(tok.clone());
+                    vis_infos.push(info.clone());
+                }
+            }
+            tokens::render_tokens(&painter, ctx, &transform, &vis_tokens, &vis_infos, &TokenStyle {
+                show_names: false,
+                selected: None,
+                player_view: true,
+            });
+        }
 
         // Initiative tracker overlay (top-right + bottom-left upside-down)
         if let Some(tracker) = &presentation.combat_tracker {

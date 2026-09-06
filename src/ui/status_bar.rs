@@ -24,7 +24,7 @@ pub fn status_bar(ui: &mut egui::Ui, dungeon: &Dungeon, zoom: f32, saved: bool, 
     let mut update_clicked = false;
     ui.horizontal(|ui| {
         if saved {
-            ui.colored_label(egui::Color32::from_rgb(100, 200, 100), "\u{2713} Saved");
+            ui.colored_label(egui::Color32::from_rgb(100, 200, 100), "\u{2714} Saved");
         } else {
             ui.colored_label(egui::Color32::from_rgb(180, 180, 180), "\u{25cb} Unsaved");
         }

@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 
+use super::token::MapToken;
+
 use super::{Annotation, CustomMonster, DungeonGraph, Encounter, PlayerCharacter, SpatialLayout, Theme};
 
 /// A light source placed in a room.
@@ -66,6 +68,9 @@ pub struct Dungeon {
     /// Area-of-effect markers placed on the map.
     #[serde(default)]
     pub aoe_markers: Vec<crate::presentation::aoe::AoEMarker>,
+    /// Creature tokens placed on the map (one per monster instance / player character).
+    #[serde(default)]
+    pub tokens: Vec<MapToken>,
     /// Persisted session state (fog of war, encounter positions, HP, etc.).
     #[serde(default)]
     pub session: SessionState,
@@ -85,6 +90,7 @@ impl Dungeon {
             light_sources: Vec::new(),
             ambient_light: 0.0,
             aoe_markers: Vec::new(),
+            tokens: Vec::new(),
             session: SessionState::default(),
         }
     }

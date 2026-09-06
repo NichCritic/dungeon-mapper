@@ -2,6 +2,26 @@ use serde::{Deserialize, Serialize};
 
 use super::monster::EncounterMonster;
 
+/// Identifies a specific monster instance within an encounter.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct MonsterInstanceId {
+    pub encounter_id: String,
+    /// Index into `Encounter::monsters`.
+    pub monster_index: usize,
+    /// 0-based instance within that entry's `count`.
+    pub instance: usize,
+}
+
+/// Display label for one instance: "Goblin #2" when the entry has several, else the plain name.
+/// Shared by the combat tracker and map tokens so numbering always matches.
+pub fn instance_label(name: &str, count: u32, instance: usize) -> String {
+    if count > 1 {
+        format!("{} #{}", name, instance + 1)
+    } else {
+        name.to_string()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum EncounterType {
     Static,

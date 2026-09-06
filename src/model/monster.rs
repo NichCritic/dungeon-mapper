@@ -380,6 +380,27 @@ impl Feature {
     }
 }
 
+/// Footprint of a creature on the map in grid cells per side (first size code wins):
+/// Tiny → 0.5 (a quarter square), Small/Medium → 1, Large → 2, Huge → 3, Gargantuan → 4.
+pub fn size_footprint(size: &[String]) -> f32 {
+    match size.first().map(|s| s.as_str()) {
+        Some("T") => 0.5,
+        Some("L") => 2.0,
+        Some("H") => 3.0,
+        Some("G") => 4.0,
+        _ => 1.0,
+    }
+}
+
+/// How large the drawn token is relative to its footprint. Small creatures share
+/// Medium's one-cell footprint but draw slightly smaller so the two read differently.
+pub fn size_visual_scale(size: &[String]) -> f32 {
+    match size.first().map(|s| s.as_str()) {
+        Some("S") => 0.8,
+        _ => 1.0,
+    }
+}
+
 /// A reference to a monster — either from the base database or a custom one.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub enum MonsterRef {
@@ -1041,6 +1062,28 @@ pub fn merge_monsters(a: &Monster, b: &Monster, config: &MergeConfig) -> Monster
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sz(code: &str) -> Vec<String> { vec![code.to_string()] }
+
+    #[test]
+    fn size_footprint_by_creature_size() {
+        assert_eq!(size_footprint(&sz("T")), 0.5);
+        assert_eq!(size_footprint(&sz("S")), 1.0);
+        assert_eq!(size_footprint(&sz("M")), 1.0);
+        assert_eq!(size_footprint(&sz("L")), 2.0);
+        assert_eq!(size_footprint(&sz("H")), 3.0);
+        assert_eq!(size_footprint(&sz("G")), 4.0);
+        assert_eq!(size_footprint(&[]), 1.0);
+        assert_eq!(size_footprint(&sz("??")), 1.0);
+    }
+
+    #[test]
+    fn small_draws_smaller_than_medium_on_the_same_footprint() {
+        assert_eq!(size_footprint(&sz("S")), size_footprint(&sz("M")));
+        assert!(size_visual_scale(&sz("S")) < size_visual_scale(&sz("M")));
+        assert_eq!(size_visual_scale(&sz("M")), 1.0);
+        assert_eq!(size_visual_scale(&sz("T")), 1.0);
+    }
     use std::collections::HashMap;
 
     /// Helper to create a Monster with sensible defaults for testing.

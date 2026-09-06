@@ -9,6 +9,7 @@ pub mod monster;
 pub mod party;
 pub mod spatial;
 pub mod theme;
+pub mod token;
 pub mod dungeon;
 
 pub use annotation::*;
@@ -21,4 +22,5 @@ pub use monster::*;
 pub use party::*;
 pub use spatial::*;
 pub use theme::*;
+pub use token::*;
 pub use dungeon::{Dungeon, LightSource, SessionState};

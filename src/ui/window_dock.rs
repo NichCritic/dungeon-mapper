@@ -175,7 +175,7 @@ pub fn window_bar(ctx: &egui::Context) {
                 if tab.clicked() {
                     WindowDock::open(ctx, w);
                 }
-                if ui.small_button("\u{2715}").on_hover_text("Close window").clicked() {
+                if ui.small_button("\u{00d7}").on_hover_text("Close window").clicked() {
                     WindowDock::close(ctx, w);
                 }
                 ui.add_space(6.0);
