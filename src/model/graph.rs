@@ -202,6 +202,52 @@ impl DungeonGraph {
         self.groups.iter().find(|g| g.parent_room_id.as_deref() == Some(parent_room_id))
     }
 
+    /// Returns all rooms containing `room_id`, outermost last, stopping at a cycle.
+    /// Used to keep a room from being made a container of one of its own ancestors.
+    pub fn ancestors_of(&self, room_id: &str) -> Vec<&str> {
+        let mut chain = Vec::new();
+        let mut seen: HashSet<&str> = HashSet::new();
+        let mut current = room_id;
+        while let Some(parent) = self.parent_of(current) {
+            if !seen.insert(parent) {
+                break;
+            }
+            chain.push(parent);
+            current = parent;
+        }
+        chain
+    }
+
+    /// Describes a cycle in the containment hierarchy, if one exists.
+    ///
+    /// Unlike the advisory problems from [`Self::validate_containment`], a cycle is
+    /// fatal: the layout solver's container-size estimate recurses through children,
+    /// so a cycle would run until the stack overflows.
+    pub fn containment_cycle(&self) -> Option<String> {
+        let label = |id: &str| self.room_by_id(id).map(|r| r.label.as_str()).unwrap_or("?");
+        for room in &self.rooms {
+            // Walk outwards. Each step either finds a room already on the chain
+            // (a cycle) or adds a new one, so the walk always terminates.
+            let mut chain: Vec<&str> = vec![room.id.as_str()];
+            let mut current = room.id.as_str();
+            while let Some(parent) = self.parent_of(current) {
+                if let Some(start) = chain.iter().position(|&id| id == parent) {
+                    let mut loop_path = chain[start..].to_vec();
+                    loop_path.push(parent);
+                    let rendered: Vec<String> =
+                        loop_path.iter().map(|id| format!("'{}'", label(id))).collect();
+                    return Some(format!(
+                        "Cycle in containment hierarchy: {}",
+                        rendered.join(" is inside "),
+                    ));
+                }
+                chain.push(parent);
+                current = parent;
+            }
+        }
+        None
+    }
+
     /// Validate containment hierarchy: no cycles, room in at most one containment group,
     /// container and children on same floor.
     pub fn validate_containment(&self) -> Vec<String> {
@@ -227,17 +273,8 @@ impl DungeonGraph {
         }
 
         // Check for cycles in containment hierarchy
-        for room in &self.rooms {
-            let mut visited = HashSet::new();
-            let mut current = room.id.as_str();
-            while let Some(parent) = self.parent_of(current) {
-                if !visited.insert(parent) {
-                    errors.push(format!("Cycle in containment hierarchy involving room '{}'", room.label));
-                    break;
-                }
-                current = parent;
-                if visited.len() > 20 { break; }
-            }
+        if let Some(err) = self.containment_cycle() {
+            errors.push(err);
         }
 
         // Check floor consistency: children should be on same floor as parent
@@ -496,5 +533,101 @@ mod tests {
         assert_eq!(graph.nesting_depth(&outer_id), 0);
         assert_eq!(graph.nesting_depth(&middle_id), 1);
         assert_eq!(graph.nesting_depth(&inner_id), 2);
+    }
+
+    #[test]
+    fn test_ancestors_of() {
+        let mut graph = DungeonGraph::new();
+        let outer = Room::new("Outer".to_string());
+        let middle = Room::new("Middle".to_string());
+        let inner = Room::new("Inner".to_string());
+        let (outer_id, middle_id, inner_id) =
+            (outer.id.clone(), middle.id.clone(), inner.id.clone());
+        graph.add_room(outer);
+        graph.add_room(middle);
+        graph.add_room(inner);
+
+        let mut g1 = RoomGroup::new("Outer->Middle".to_string());
+        g1.parent_room_id = Some(outer_id.clone());
+        g1.room_ids = vec![middle_id.clone()];
+        graph.groups.push(g1);
+
+        let mut g2 = RoomGroup::new("Middle->Inner".to_string());
+        g2.parent_room_id = Some(middle_id.clone());
+        g2.room_ids = vec![inner_id.clone()];
+        graph.groups.push(g2);
+
+        assert_eq!(graph.ancestors_of(&inner_id), vec![middle_id.as_str(), outer_id.as_str()]);
+        assert_eq!(graph.ancestors_of(&middle_id), vec![outer_id.as_str()]);
+        assert!(graph.ancestors_of(&outer_id).is_empty());
+        assert!(graph.containment_cycle().is_none());
+    }
+
+    /// Reproduces the shape that crashed the layout solver: two rooms that each
+    /// contain the other through *different* groups, so neither group on its own
+    /// looks wrong.
+    #[test]
+    fn test_mutual_containment_is_a_cycle() {
+        let mut graph = DungeonGraph::new();
+        let court = Room::new("Throne Court".to_string());
+        let robe = Room::new("The Robe".to_string());
+        let (court_id, robe_id) = (court.id.clone(), robe.id.clone());
+        graph.add_room(court);
+        graph.add_room(robe);
+
+        let mut arm = RoomGroup::new("Arm A".to_string());
+        arm.parent_room_id = Some(court_id.clone());
+        arm.room_ids = vec![robe_id.clone()];
+        graph.groups.push(arm);
+        assert!(graph.containment_cycle().is_none());
+
+        let mut back = RoomGroup::new("The Throne Court".to_string());
+        back.parent_room_id = Some(robe_id.clone());
+        back.room_ids = vec![court_id.clone()];
+        graph.groups.push(back);
+
+        let err = graph.containment_cycle().expect("cycle should be detected");
+        assert!(err.contains("Throne Court"), "{err}");
+        assert!(err.contains("The Robe"), "{err}");
+        // And it surfaces through the general validation too.
+        assert!(graph.validate_containment().iter().any(|e| e.contains("Cycle")));
+        // ancestors_of must terminate rather than spin on the cycle.
+        assert!(graph.ancestors_of(&robe_id).len() <= 2);
+    }
+
+    /// A room may not be made the container of one of its own descendants, even
+    /// when the descendant is nested through a different group.
+    #[test]
+    fn test_deep_descendant_is_rejected_as_container() {
+        let mut graph = DungeonGraph::new();
+        let outer = Room::new("Outer".to_string());
+        let middle = Room::new("Middle".to_string());
+        let inner = Room::new("Inner".to_string());
+        let (outer_id, middle_id, inner_id) =
+            (outer.id.clone(), middle.id.clone(), inner.id.clone());
+        graph.add_room(outer);
+        graph.add_room(middle);
+        graph.add_room(inner);
+
+        let mut g1 = RoomGroup::new("Outer->Middle".to_string());
+        g1.parent_room_id = Some(outer_id.clone());
+        g1.room_ids = vec![middle_id.clone()];
+        graph.groups.push(g1);
+
+        let mut g2 = RoomGroup::new("Middle->Inner".to_string());
+        g2.parent_room_id = Some(middle_id.clone());
+        g2.room_ids = vec![inner_id.clone()];
+        graph.groups.push(g2);
+
+        // Group g1 holds Middle; Inner sits below Middle, so Inner is not a legal
+        // container for g1 -- this is the check the sidebar dropdown applies.
+        let members = [middle_id.clone()];
+        let illegal = graph.ancestors_of(&inner_id).iter()
+            .any(|anc| members.iter().any(|m| m == anc));
+        assert!(illegal);
+        // Outer is above Middle, so it remains legal.
+        let legal = graph.ancestors_of(&outer_id).iter()
+            .any(|anc| members.iter().any(|m| m == anc));
+        assert!(!legal);
     }
 }

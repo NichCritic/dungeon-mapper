@@ -162,6 +162,7 @@ pub fn decor_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut DecorVie
         show_notes: false,
         show_secrets: false,
         show_decor: false, // decor drawn as live overlay for smooth dragging
+        show_lighting: true,
     };
     let cache_ready = state.render_cache.ensure(
         hash, &dungeon.graph, render_layout, &dungeon.theme, options, "Decor",
@@ -248,6 +249,19 @@ pub fn decor_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut DecorVie
                         egui::Color32::from_rgb(100, 180, 255)
                     };
                     painter.circle_stroke(screen, handle_r + 2.0, egui::Stroke::new(1.5, ring_color));
+                    // Hitbox used for cover / light blocking (selected item only)
+                    if is_sel && decor.cover_kind() != crate::model::CoverKind::None {
+                        let (ex, ey) = decor.decor_type.local_extent();
+                        let hx = ex * decor.scale_x * crate::util::DECOR_HALF_SIZE;
+                        let hy = ey * decor.scale_y * crate::util::DECOR_HALF_SIZE;
+                        let (s, c) = decor.rotation.to_radians().sin_cos();
+                        let corner = |lx: f32, ly: f32| transform.world_to_screen(egui::pos2(wx + lx * c - ly * s, wy + lx * s + ly * c));
+                        let pts = [corner(-hx, -hy), corner(hx, -hy), corner(hx, hy), corner(-hx, hy)];
+                        let hb_color = egui::Color32::from_rgba_unmultiplied(255, 120, 60, 160);
+                        for i in 0..4 {
+                            painter.line_segment([pts[i], pts[(i + 1) % 4]], egui::Stroke::new(1.0, hb_color));
+                        }
+                    }
                     // Type label only for selected item
                     if is_sel {
                         painter.text(
@@ -760,6 +774,26 @@ pub fn decor_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Decor
                         ui.label("H");
                         ui.add(egui::DragValue::new(&mut decor.scale_y).speed(0.05).range(0.01..=f32::MAX));
                     });
+                    ui.horizontal(|ui| {
+                        ui.label("Cover:");
+                        let default_kind = decor.decor_type.default_cover();
+                        let text = match decor.cover {
+                            None => format!("Default ({})", default_kind.label()),
+                            Some(k) => k.label().to_string(),
+                        };
+                        egui::ComboBox::from_id_salt("decor_cover")
+                            .selected_text(text)
+                            .show_ui(ui, |ui| {
+                                if ui.selectable_label(decor.cover.is_none(), format!("Default ({})", default_kind.label())).clicked() {
+                                    decor.cover = None;
+                                }
+                                for k in crate::model::CoverKind::ALL {
+                                    if ui.selectable_label(decor.cover == Some(k), k.label()).clicked() {
+                                        decor.cover = Some(k);
+                                    }
+                                }
+                            });
+                    }).response.on_hover_text("Most cover this object can grant; Full also blocks light");
                 }
             }
         }
@@ -811,6 +845,9 @@ pub fn decor_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Decor
                 radius: 5.0,
                 intensity: 1.0,
                 color: [255, 200, 100],
+                pos: None,
+                dim_radius: None,
+                carrier: None,
             });
         }
         let room_light_indices: Vec<usize> = dungeon.light_sources.iter().enumerate()
@@ -821,12 +858,12 @@ pub fn decor_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Decor
         for &li in &room_light_indices {
             let light = &mut dungeon.light_sources[li];
             ui.horizontal(|ui| {
-                ui.add(egui::Slider::new(&mut light.radius, 1.0..=20.0).text("R"));
-                ui.add(egui::Slider::new(&mut light.intensity, 0.0..=1.0).text("I"));
+                ui.add(egui::Slider::new(&mut light.radius, 1.0..=20.0).text("Bright"));
                 if ui.small_button("X").clicked() {
                     remove_light = Some(li);
                 }
             });
+            light_extra_controls(ui, light, &dungeon.party);
         }
         if let Some(idx) = remove_light {
             dungeon.light_sources.remove(idx);
@@ -843,6 +880,9 @@ pub fn decor_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Decor
                     radius: 5.0,
                     intensity: 1.0,
                     color: [255, 200, 100],
+                    pos: None,
+                    dim_radius: None,
+                    carrier: None,
                 });
             }
         }
@@ -857,8 +897,8 @@ pub fn decor_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Decor
                     remove_idx = Some(i);
                 }
             });
-            ui.add(egui::Slider::new(&mut light.radius, 1.0..=20.0).text("Radius"));
-            ui.add(egui::Slider::new(&mut light.intensity, 0.0..=1.0).text("Intensity"));
+            ui.add(egui::Slider::new(&mut light.radius, 1.0..=20.0).text("Bright"));
+            light_extra_controls(ui, light, &dungeon.party);
             let rooms: Vec<_> = dungeon.graph.rooms.iter().map(|r| (r.id.clone(), r.label.clone())).collect();
             egui::ComboBox::from_id_salt(format!("light_room_{}", light.id))
                 .selected_text(
@@ -937,4 +977,58 @@ fn draw_decor_symbol(
     let palette = DecorPalette::from_ink(color.to_srgba_unmultiplied());
     let mut sink = PainterSink { painter };
     draw_decor(&mut sink, decor_type, center.x, center.y, s, sclx, scly, deg, &palette);
+}
+
+/// Dim radius, explicit position, and carrier controls shared by both light lists.
+fn light_extra_controls(ui: &mut egui::Ui, light: &mut crate::model::LightSource, party: &[crate::model::PlayerCharacter]) {
+    ui.horizontal(|ui| {
+        let mut dim = light.dim_radius();
+        if ui.add(egui::Slider::new(&mut dim, 0.0..=40.0).text("Dim")).changed() {
+            light.dim_radius = Some(dim.max(light.radius));
+        }
+        ui.add(egui::Slider::new(&mut light.intensity, 0.0..=1.0).text("I"));
+    });
+    ui.horizontal(|ui| {
+        ui.label("Pos:");
+        match light.pos {
+            Some((mut x, mut y)) => {
+                let cx = crate::ui::canvas_common::num_input_f32(ui, &mut x, 40.0);
+                let cy = crate::ui::canvas_common::num_input_f32(ui, &mut y, 40.0);
+                if cx || cy {
+                    light.pos = Some((x, y));
+                }
+                if ui.small_button("Room center").clicked() {
+                    light.pos = None;
+                }
+            }
+            None => {
+                ui.weak("room center");
+                if ui.small_button("Set").on_hover_text("Give this light an exact grid position").clicked() {
+                    light.pos = Some((0.0, 0.0));
+                }
+            }
+        }
+        if !party.is_empty() {
+            ui.label("Carrier:");
+            let current = match &light.carrier {
+                Some(crate::model::TokenKind::Player(pid)) => party.iter().find(|p| p.id == *pid).map(|p| p.name.as_str()).unwrap_or("?"),
+                Some(_) => "monster",
+                None => "None",
+            };
+            egui::ComboBox::from_id_salt(format!("light_carrier_{}", light.id))
+                .selected_text(current)
+                .width(100.0)
+                .show_ui(ui, |ui| {
+                    if ui.selectable_label(light.carrier.is_none(), "None").clicked() {
+                        light.carrier = None;
+                    }
+                    for pc in party {
+                        let kind = crate::model::TokenKind::Player(pc.id.clone());
+                        if ui.selectable_label(light.carrier.as_ref() == Some(&kind), &pc.name).clicked() {
+                            light.carrier = Some(kind);
+                        }
+                    }
+                });
+        }
+    });
 }

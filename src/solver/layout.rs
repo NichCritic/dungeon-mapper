@@ -476,6 +476,7 @@ fn effective_grid_size(
     room: &Room,
     graph: &DungeonGraph,
     size_overrides: &HashMap<String, (u32, u32)>,
+    visiting: &mut HashSet<String>,
 ) -> (u32, u32) {
     let base = room.grid_size();
     let children: Vec<&str> = graph.children_of(&room.id);
@@ -483,6 +484,28 @@ fn effective_grid_size(
         return base;
     }
 
+    // A containment cycle (A contains B, B contains A) would recurse here until the
+    // stack overflows. Treat an already-visited room as a leaf so the estimate falls
+    // back to its base size; the cycle itself is reported to the user by
+    // DungeonGraph::containment_cycle before the solve runs.
+    if !visiting.insert(room.id.clone()) {
+        return base;
+    }
+    let size = container_grid_size(room, base, &children, graph, size_overrides, visiting);
+    visiting.remove(&room.id);
+    size
+}
+
+/// Size of a container that has at least one child. Split out of
+/// [`effective_grid_size`] so the recursion guard has a single exit point.
+fn container_grid_size(
+    room: &Room,
+    base: (u32, u32),
+    children: &[&str],
+    graph: &DungeonGraph,
+    size_overrides: &HashMap<String, (u32, u32)>,
+    visiting: &mut HashSet<String>,
+) -> (u32, u32) {
     let padding = graph.containment_group(&room.id)
         .map(|g| g.containment_padding)
         .unwrap_or(1);
@@ -493,7 +516,7 @@ fn effective_grid_size(
     let mut child_sizes: Vec<(u32, u32)> = children.iter()
         .filter_map(|cid| {
             size_overrides.get(*cid).copied()
-                .or_else(|| graph.room_by_id(cid).map(|r| effective_grid_size(r, graph, size_overrides)))
+                .or_else(|| graph.room_by_id(cid).map(|r| effective_grid_size(r, graph, size_overrides, visiting)))
         })
         .collect();
     child_sizes.sort_by(|a, b| child_pack_order(*a, *b));
@@ -551,8 +574,10 @@ fn compute_effective_sizes(graph: &DungeonGraph) -> HashMap<String, (u32, u32)> 
         .collect();
     rooms_by_depth.sort_by(|a, b| b.1.cmp(&a.1));
 
+    let mut visiting: HashSet<String> = HashSet::new();
     for (room, _depth) in &rooms_by_depth {
-        let size = effective_grid_size(room, graph, &sizes);
+        let size = effective_grid_size(room, graph, &sizes, &mut visiting);
+        debug_assert!(visiting.is_empty());
         sizes.insert(room.id.clone(), size);
     }
 
@@ -1695,6 +1720,33 @@ mod tests {
             assert!(child_rl.y + child_h as i32 <= cy + ch,
                 "Child {} bottom={} > container bottom={}", i, child_rl.y + child_h as i32, cy + ch);
         }
+    }
+
+    /// Two rooms that each contain the other used to recurse until the stack
+    /// overflowed (SIGABRT, not a catchable panic). The size estimate must treat a
+    /// repeat visit as a leaf and return.
+    #[test]
+    fn effective_sizes_terminate_on_containment_cycle() {
+        let mut graph = DungeonGraph::new();
+        let a = Room::new("Throne Court".to_string());
+        let b = Room::new("The Robe".to_string());
+        let (a_id, b_id) = (a.id.clone(), b.id.clone());
+        graph.add_room(a);
+        graph.add_room(b);
+
+        let mut g1 = RoomGroup::new("Arm A".to_string());
+        g1.parent_room_id = Some(a_id.clone());
+        g1.room_ids = vec![b_id.clone()];
+        graph.groups.push(g1);
+
+        let mut g2 = RoomGroup::new("Court".to_string());
+        g2.parent_room_id = Some(b_id.clone());
+        g2.room_ids = vec![a_id.clone()];
+        graph.groups.push(g2);
+
+        let sizes = compute_effective_sizes(&graph);
+        assert_eq!(sizes.len(), 2);
+        assert!(sizes.values().all(|&(w, h)| w > 0 && h > 0));
     }
 }
 

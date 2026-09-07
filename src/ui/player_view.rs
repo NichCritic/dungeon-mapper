@@ -3,6 +3,7 @@ use crate::data::MonsterDatabase;
 use crate::presentation::{PresentationState, Visibility};
 use crate::presentation::combat_tracker::CombatantId;
 use crate::presentation::tokens::{self, TokenStyle};
+use crate::presentation::{cover_ui, lighting};
 use crate::render::bg_cache::BackgroundRenderCache;
 use crate::render::recording::replay_commands;
 use crate::render::themed::RenderOptions;
@@ -77,6 +78,7 @@ fn player_input_hash(
     }
     dungeon.ambient_light.to_bits().hash(&mut h);
     presentation.show_labels_player.hash(&mut h);
+    presentation.los_lighting.hash(&mut h);
     h.finish()
 }
 
@@ -132,6 +134,7 @@ pub fn player_viewport(
             show_notes: false,
             show_secrets: false,
             show_decor: true,
+            show_lighting: !presentation.los_lighting,
         };
         // Clone data for background thread (PresentationState isn't Clone due to CombatTracker,
         // so clone just the fields render_player_view needs)
@@ -171,6 +174,25 @@ pub fn player_viewport(
             ui.ctx().request_repaint();
         }
 
+        // Light / vision shading (computed by the DM canvas each frame)
+        let light_map = if presentation.los_lighting { presentation.light_cache.as_ref() } else { None };
+        if presentation.show_light_player {
+            if let Some(map) = light_map {
+                lighting::render_light_overlay(&painter, &transform, map, 1.0);
+            }
+        }
+        if presentation.show_vision_player {
+            if let Some(map) = light_map {
+                lighting::render_vision_rings(&painter, &transform, map);
+            }
+        }
+        // Cover heatmap, limited to what the party can see
+        if presentation.show_cover_player {
+            if let Some(c) = presentation.cover_cache.as_ref() {
+                cover_ui::render_heatmap(&painter, &transform, &c.cells, light_map.map(|m| &m.party_visible));
+            }
+        }
+
         // AoE markers (live overlay on player view, no center crosshairs)
         crate::presentation::aoe::render_aoe_markers(&painter, &transform, &dungeon.aoe_markers, false);
 
@@ -187,13 +209,19 @@ pub fn player_viewport(
                     TokenKind::Monster(_) => {
                         let gx = tok.x.floor() as i32;
                         let gy = tok.y.floor() as i32;
-                        if let Some(rl) = layout.room_at_grid_ordered(&order, gx, gy) {
+                        let fog_ok = if let Some(rl) = layout.room_at_grid_ordered(&order, gx, gy) {
                             *presentation.room_visibility(&rl.room_id) == Visibility::Visible
                         } else if let Some(cid) = crate::ui::presentation_view::corridor_at_grid(layout, gx, gy) {
                             crate::presentation::fog::corridor_visibility(&cid, presentation, &dungeon.graph) == Visibility::Visible
                         } else {
                             false
-                        }
+                        };
+                        // With light shading on, the party must also be able to see the cell
+                        let seen = match (presentation.show_light_player, light_map) {
+                            (true, Some(map)) => map.party_visible.contains(&(gx, gy)),
+                            _ => true,
+                        };
+                        fog_ok && seen
                     }
                 };
                 if visible {
@@ -206,6 +234,14 @@ pub fn player_viewport(
                 selected: None,
                 player_view: true,
             });
+            if presentation.show_cover_player && !presentation.cover_badges.is_empty() {
+                let results: Vec<Option<crate::presentation::los::CoverResult>> = vis_tokens.iter().map(|t| {
+                    presentation.cover_badges.iter().find(|(k, _)| *k == t.kind).map(|(_, level)| {
+                        crate::presentation::los::CoverResult { level: *level, blocked: 0, corner: 0, lines: [((0.0, 0.0), (0.0, 0.0), crate::presentation::los::Block::Clear); 4] }
+                    })
+                }).collect();
+                cover_ui::render_badges(&painter, &transform, &vis_tokens, &vis_infos, &results);
+            }
         }
 
         // Initiative tracker overlay (top-right + bottom-left upside-down)

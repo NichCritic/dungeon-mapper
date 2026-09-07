@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 
-use super::token::MapToken;
+use super::token::{MapToken, TokenKind};
 
 use super::{Annotation, CustomMonster, DungeonGraph, Encounter, PlayerCharacter, SpatialLayout, Theme};
 
@@ -10,13 +10,29 @@ use super::{Annotation, CustomMonster, DungeonGraph, Encounter, PlayerCharacter,
 pub struct LightSource {
     pub id: String,
     pub room_id: String,
+    /// Bright light radius in grid cells.
     pub radius: f32,
     pub intensity: f32,
     pub color: [u8; 3],
+    /// Absolute position (grid units). `None` = center of `room_id`.
+    #[serde(default)]
+    pub pos: Option<(f32, f32)>,
+    /// Dim light radius in cells; `None` = twice `radius`.
+    #[serde(default)]
+    pub dim_radius: Option<f32>,
+    /// Token carrying this light; overrides `pos`/`room_id` while the token exists.
+    #[serde(default)]
+    pub carrier: Option<TokenKind>,
+}
+
+impl LightSource {
+    pub fn dim_radius(&self) -> f32 {
+        self.dim_radius.unwrap_or(self.radius * 2.0)
+    }
 }
 
 /// Persisted session state — runtime presentation data that survives between sessions.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionState {
     /// Per-room visibility: "hidden", "explored", or "visible".
     #[serde(default)]
@@ -39,6 +55,39 @@ pub struct SessionState {
     /// Whether autobattle is enabled.
     #[serde(default)]
     pub autobattle: bool,
+    /// Player-window sharing toggles and the DM light shading preference.
+    #[serde(default = "default_true")]
+    pub show_light_player: bool,
+    #[serde(default)]
+    pub show_vision_player: bool,
+    #[serde(default)]
+    pub show_cover_player: bool,
+    #[serde(default)]
+    pub dm_show_light: bool,
+    /// Line-of-sight lighting (per-cell light map with walls). Off = legacy room-based wash.
+    #[serde(default)]
+    pub los_lighting: bool,
+}
+
+fn default_true() -> bool { true }
+
+impl Default for SessionState {
+    fn default() -> Self {
+        Self {
+            room_visibility: HashMap::new(),
+            doors_open: HashSet::new(),
+            encounter_positions: HashMap::new(),
+            defeated_encounters: HashSet::new(),
+            encounter_hp: HashMap::new(),
+            party_room: None,
+            autobattle: false,
+            show_light_player: true,
+            show_vision_player: false,
+            show_cover_player: false,
+            dm_show_light: false,
+            los_lighting: false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -4,7 +4,7 @@ use std::sync::mpsc;
 use crate::model::{Campaign, Dungeon};
 
 /// Current save file format version. Increment when the data model changes.
-const CURRENT_VERSION: u32 = 4;
+const CURRENT_VERSION: u32 = 5;
 
 /// Versioned save file envelope (version 2+: campaign-based).
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -77,7 +77,8 @@ fn load_campaign(version: u32, value: &serde_json::Value) -> Result<Campaign, St
     match version {
         // v2 → v3: added parent_room_id + containment_padding to RoomGroup (both #[serde(default)])
         // v3 → v4: added Dungeon.tokens (#[serde(default)])
-        2 | 3 | 4 => serde_json::from_value(value.clone()).map_err(|e| e.to_string()),
+        // v4 → v5: decor cover, light pos/dim/carrier, PC sense ranges, session share flags (all defaults)
+        2 | 3 | 4 | 5 => serde_json::from_value(value.clone()).map_err(|e| e.to_string()),
         v => Err(format!(
             "Save file version {} is newer than this application supports (max: {})",
             v, CURRENT_VERSION
@@ -440,7 +441,7 @@ mod tests {
 
         let json = serialize_versioned(&campaign).unwrap();
         let raw: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(raw["version"], 4);
+        assert_eq!(raw["version"], 5);
         let loaded = deserialize_versioned(&json).unwrap();
         assert_eq!(loaded.maps[0].tokens.len(), 2);
         assert_eq!(loaded.maps[0].tokens[0].x, 3.5);
@@ -450,6 +451,61 @@ mod tests {
         let v3 = r#"{"version":3,"campaign":{"name":"Old","maps":[{"name":"M","graph":{"rooms":[],"connections":[],"graph_positions":{}}}]}}"#;
         let old = deserialize_versioned(v3).unwrap();
         assert!(old.maps[0].tokens.is_empty());
+    }
+
+    #[test]
+    fn test_version_5_cover_lights_senses_roundtrip_and_v4_loads() {
+        use crate::model::{CoverKind, DecorType, LightSource, Room, RoomDecor, TokenKind};
+        let mut campaign = Campaign::new("Five".to_string());
+        let mut room = Room::new("Hall".to_string());
+        let mut decor = RoomDecor::new(DecorType::Table, 1.0, 1.0);
+        decor.cover = Some(CoverKind::Full);
+        room.decor.push(decor);
+        let room_id = room.id.clone();
+        campaign.maps[0].graph.add_room(room);
+        campaign.maps[0].light_sources.push(LightSource {
+            id: "l".into(), room_id, radius: 4.0, intensity: 1.0, color: [255, 200, 100],
+            pos: Some((3.5, 4.5)), dim_radius: Some(8.0), carrier: Some(TokenKind::Player("pc1".into())),
+        });
+        let mut pc = crate::model::PlayerCharacter::new("Ann".to_string());
+        pc.senses.darkvision = true;
+        pc.senses.darkvision_ft = 120;
+        campaign.party.push(pc);
+        campaign.maps[0].session.show_cover_player = true;
+
+        let json = serialize_versioned(&campaign).unwrap();
+        let raw: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(raw["version"], 5);
+        let loaded = deserialize_versioned(&json).unwrap();
+        assert_eq!(loaded.maps[0].graph.rooms[0].decor[0].cover, Some(CoverKind::Full));
+        assert_eq!(loaded.maps[0].light_sources[0].pos, Some((3.5, 4.5)));
+        assert_eq!(loaded.maps[0].light_sources[0].dim_radius, Some(8.0));
+        assert!(matches!(loaded.maps[0].light_sources[0].carrier, Some(TokenKind::Player(ref p)) if p == "pc1"));
+        assert_eq!(loaded.party[0].senses.darkvision_ft, 120);
+        assert!(loaded.maps[0].session.show_cover_player);
+        assert!(loaded.maps[0].session.show_light_player, "defaults to sharing light");
+
+        // A v4 file (no cover / pos / ranges) still loads with defaults: take the v5
+        // JSON and strip every field this version added.
+        let mut v4: serde_json::Value = serde_json::from_str(&json).unwrap();
+        v4["version"] = serde_json::json!(4);
+        let map = &mut v4["campaign"]["maps"][0];
+        map["graph"]["rooms"][0]["decor"][0]["decor_type"] = serde_json::json!("Pillar");
+        map["graph"]["rooms"][0]["decor"][0].as_object_mut().unwrap().remove("cover");
+        let light = map["light_sources"][0].as_object_mut().unwrap();
+        light.remove("pos"); light.remove("dim_radius"); light.remove("carrier");
+        light.insert("radius".into(), serde_json::json!(5.0));
+        let session = map["session"].as_object_mut().unwrap();
+        for k in ["show_light_player", "show_vision_player", "show_cover_player", "dm_show_light"] { session.remove(k); }
+        let senses = v4["campaign"]["party"][0]["senses"].as_object_mut().unwrap();
+        senses.remove("darkvision_ft"); senses.remove("blindsight_ft"); senses.remove("tremorsense_ft");
+        let old = deserialize_versioned(&v4.to_string()).unwrap();
+        let d = &old.maps[0].graph.rooms[0].decor[0];
+        assert_eq!(d.cover, None);
+        assert_eq!(d.cover_kind(), CoverKind::Full);
+        assert_eq!(old.maps[0].light_sources[0].pos, None);
+        assert_eq!(old.maps[0].light_sources[0].dim_radius(), 10.0);
+        assert_eq!(old.party[0].senses.darkvision_ft, 60);
     }
 
     #[test]

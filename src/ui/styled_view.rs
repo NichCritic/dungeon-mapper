@@ -158,6 +158,7 @@ pub fn styled_view(ui: &mut egui::Ui, dungeon: &Dungeon, state: &mut StyledViewS
             show_notes: true,
             show_secrets: true,
             show_decor: true,
+            show_lighting: true,
         };
         let cache_ready = state.render_cache.ensure(
             hash, &dungeon.graph, render_layout, &dungeon.theme, options, "Styled",

@@ -14,6 +14,9 @@ pub struct RenderOptions {
     pub show_secrets: bool,
     /// Whether to render decor items. Set to false when decor is drawn as a live overlay.
     pub show_decor: bool,
+    /// Whether to bake the radial lighting wash into the map. Set to false where the
+    /// line-of-sight light map is drawn as a live overlay instead.
+    pub show_lighting: bool,
 }
 
 pub fn render_themed(

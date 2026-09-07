@@ -124,6 +124,10 @@ pub struct DungeonApp {
     show_update_dialog: bool,
     last_update_check: std::time::Instant,
 
+    /// Set when the layout solver refuses to run (e.g. a containment cycle),
+    /// shown as a dismissible dialog. Cleared on the next successful solve.
+    layout_error: Option<String>,
+
     /// Hash of dungeon state used for render pre-warming debounce.
     last_prewarm_hash: u64,
     /// When the prewarm hash last changed (for debounce).
@@ -195,6 +199,7 @@ impl Default for DungeonApp {
             update_ready_to_restart: false,
             update_error: None,
             show_update_dialog: false,
+            layout_error: None,
             last_update_check: std::time::Instant::now(),
             history,
             current_file: None,
@@ -340,8 +345,27 @@ impl DungeonApp {
         h.finish()
     }
 
+    /// Refuse to solve while the containment hierarchy has a cycle, which the
+    /// solver cannot lay out. Returns true if the solve should be abandoned.
+    fn blocked_by_containment_cycle(&mut self) -> bool {
+        match self.dungeon.graph.containment_cycle() {
+            Some(err) => {
+                self.layout_error = Some(format!(
+                    "{err}.\n\nFix the container assignment in the Groups section of the \
+                     sidebar, then re-run the layout."
+                ));
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Full re-solve: recomputes all room positions and corridors from scratch.
     pub fn solve_layout_full(&mut self) {
+        if self.blocked_by_containment_cycle() {
+            return;
+        }
+        self.layout_error = None;
         let old_bounds = self.dungeon.layout.as_ref()
             .map(|l| l.bounds.clone())
             .unwrap_or_default();
@@ -371,6 +395,13 @@ impl DungeonApp {
     /// Incremental solve: keeps existing room positions, only places new rooms
     /// and re-routes corridors.
     fn solve_layout_incremental(&mut self) {
+        if self.blocked_by_containment_cycle() {
+            // Sync the snapshot so the auto-solve doesn't retry (and re-open the
+            // dialog) on every frame while the cycle is still there.
+            self.last_graph_snapshot = self.graph_hash();
+            return;
+        }
+        self.layout_error = None;
         if let Some(existing) = &self.dungeon.layout {
             let old_bounds = existing.bounds.clone();
             match crate::solver::layout::solve_incremental(
@@ -512,12 +543,20 @@ impl DungeonApp {
         renderer.offset_x = (min_x - margin) as f32 * grid_px;
         renderer.offset_y = (min_y - margin) as f32 * grid_px;
 
+        // The radial renderer has no notion of carriers, so pin each light to where it
+        // actually is (carried token, explicit position, or room center).
+        let resolved_lights: Vec<crate::model::LightSource> = dungeon.light_sources.iter().map(|l| {
+            let mut l = l.clone();
+            l.pos = crate::presentation::lighting::light_origin(&l, dungeon, layout);
+            l
+        }).collect();
         let options = crate::render::themed::RenderOptions {
             show_grid: true,
             show_labels: true,
             show_notes: false,
             show_secrets: false,
             show_decor: true,
+            show_lighting: true,
         };
         crate::render::presentation::render_player_view(
             &mut renderer,
@@ -525,7 +564,7 @@ impl DungeonApp {
             layout,
             &dungeon.theme,
             presentation,
-            &dungeon.light_sources,
+            &resolved_lights,
             dungeon.ambient_light,
             &options,
         );
@@ -1520,6 +1559,28 @@ impl eframe::App for DungeonApp {
             }
         }
 
+        // Layout solver refused to run (e.g. a containment cycle)
+        if let Some(err) = self.layout_error.clone() {
+            let mut open = true;
+            egui::Window::new("Cannot arrange rooms")
+                .id(egui::Id::new("layout_error_dialog"))
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.set_max_width(420.0);
+                    ui.label(&err);
+                    ui.add_space(8.0);
+                    if ui.button("OK").clicked() {
+                        self.layout_error = None;
+                    }
+                });
+            if !open {
+                self.layout_error = None;
+            }
+        }
+
         // Update restart dialog (shown when update applied but unsaved changes exist)
         if self.update_ready_to_restart {
             egui::Window::new("Update Ready")
@@ -1966,7 +2027,7 @@ impl DungeonApp {
         {
             self.encounters_state.render_cache.ensure(
                 enc_hash, graph, &layout, theme,
-                RenderOptions { show_grid: true, show_labels: true, show_notes: false, show_secrets: false, show_decor: true },
+                RenderOptions { show_grid: true, show_labels: true, show_notes: false, show_secrets: false, show_decor: true, show_lighting: true },
                 "Encounters",
             );
             ctx.request_repaint();
@@ -1980,7 +2041,7 @@ impl DungeonApp {
         {
             self.presentation_view_state.render_cache.ensure(
                 pres_hash, graph, &layout, theme,
-                RenderOptions { show_grid: true, show_labels: true, show_notes: true, show_secrets: true, show_decor: true },
+                RenderOptions { show_grid: true, show_labels: true, show_notes: true, show_secrets: true, show_decor: true, show_lighting: true },
                 "Presentation",
             );
             ctx.request_repaint();
@@ -1994,7 +2055,7 @@ impl DungeonApp {
         {
             self.styled_state.render_cache.ensure(
                 styled_hash, graph, &layout, theme,
-                RenderOptions { show_grid: self.styled_state.show_grid, show_labels: true, show_notes: true, show_secrets: true, show_decor: true },
+                RenderOptions { show_grid: self.styled_state.show_grid, show_labels: true, show_notes: true, show_secrets: true, show_decor: true, show_lighting: true },
                 "Styled",
             );
             ctx.request_repaint();
@@ -2008,7 +2069,7 @@ impl DungeonApp {
         {
             self.decor_state.render_cache.ensure(
                 decor_hash, graph, &layout, theme,
-                RenderOptions { show_grid: true, show_labels: true, show_notes: false, show_secrets: false, show_decor: false },
+                RenderOptions { show_grid: true, show_labels: true, show_notes: false, show_secrets: false, show_decor: false, show_lighting: true },
                 "Decor",
             );
             ctx.request_repaint();

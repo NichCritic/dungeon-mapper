@@ -6,6 +6,8 @@ pub mod combat_tracker;
 pub mod dice;
 pub mod fog;
 pub mod lighting;
+pub mod los;
+pub mod cover_ui;
 pub mod tokens;
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -65,6 +67,37 @@ pub struct PresentationState {
     pub autobattle: bool,
     /// Results of the last awareness check (stealth vs perception).
     pub last_awareness_results: Vec<awareness::AwarenessResult>,
+    /// Cover tool state (DM side).
+    pub cover_mode: CoverMode,
+    pub cover_attacker: Option<crate::model::TokenKind>,
+    /// Whether the DM canvas shows light/vision shading.
+    pub dm_show_light: bool,
+    /// Line-of-sight lighting on/off (off = the older room-based light wash).
+    pub los_lighting: bool,
+    /// What the player window is allowed to show.
+    pub show_light_player: bool,
+    pub show_vision_player: bool,
+    pub show_cover_player: bool,
+    /// Static line-of-sight geometry, rebuilt only when rooms/doors/decor change.
+    pub occ_cache: Option<(u64, los::Occluders)>,
+    /// Lazily rebuilt lighting/vision map (see `lighting::LightMap`).
+    pub light_cache: Option<lighting::LightMap>,
+    /// Lazily rebuilt cover heatmap for `cover_attacker`: (input hash, cells).
+    pub cover_cache: Option<cover_ui::CoverCache>,
+    /// Cover of each opposing token from `cover_attacker`, refreshed by the DM canvas
+    /// every frame so the player window can draw the badges.
+    pub cover_badges: Vec<(crate::model::TokenKind, crate::model::CoverLevel)>,
+}
+
+/// How the cover tool presents its result.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CoverMode {
+    #[default]
+    Off,
+    /// Color every reachable floor cell by the cover it would have from the attacker.
+    Heatmap,
+    /// Badge each opposing token with its cover from the attacker.
+    Icons,
 }
 
 impl PresentationState {
@@ -103,6 +136,17 @@ impl PresentationState {
             defeated_encounters: session.defeated_encounters.clone(),
             autobattle: session.autobattle,
             last_awareness_results: Vec::new(),
+            cover_mode: CoverMode::Off,
+            cover_attacker: None,
+            dm_show_light: session.dm_show_light,
+            los_lighting: session.los_lighting,
+            show_light_player: session.show_light_player,
+            show_vision_player: session.show_vision_player,
+            show_cover_player: session.show_cover_player,
+            occ_cache: None,
+            light_cache: None,
+            cover_cache: None,
+            cover_badges: Vec::new(),
         }
     }
 
@@ -129,6 +173,11 @@ impl PresentationState {
             encounter_hp,
             party_room: self.party_room.clone(),
             autobattle: self.autobattle,
+            show_light_player: self.show_light_player,
+            show_vision_player: self.show_vision_player,
+            show_cover_player: self.show_cover_player,
+            dm_show_light: self.dm_show_light,
+            los_lighting: self.los_lighting,
         }
     }
 

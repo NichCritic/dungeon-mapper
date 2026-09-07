@@ -12,6 +12,13 @@ pub struct PcSenses {
     pub blindsight: bool,
     #[serde(default)]
     pub tremorsense: bool,
+    /// Ranges in feet (0 when the sense is absent).
+    #[serde(default)]
+    pub darkvision_ft: u32,
+    #[serde(default)]
+    pub blindsight_ft: u32,
+    #[serde(default)]
+    pub tremorsense_ft: u32,
 }
 
 /// Custom deserializer that handles both the old enum format ("Normal",
@@ -43,10 +50,13 @@ impl<'de> Deserialize<'de> for PcSenses {
                         "darkvision" => senses.darkvision = map.next_value()?,
                         "blindsight" => senses.blindsight = map.next_value()?,
                         "tremorsense" => senses.tremorsense = map.next_value()?,
+                        "darkvision_ft" => senses.darkvision_ft = map.next_value()?,
+                        "blindsight_ft" => senses.blindsight_ft = map.next_value()?,
+                        "tremorsense_ft" => senses.tremorsense_ft = map.next_value()?,
                         _ => { let _ = map.next_value::<serde::de::IgnoredAny>()?; }
                     }
                 }
-                Ok(senses)
+                Ok(senses.with_default_ranges())
             }
 
             // Old format: "Normal", "Darkvision", "Blindsight", "Tremorsense"
@@ -59,7 +69,7 @@ impl<'de> Deserialize<'de> for PcSenses {
                     "Blindsight" => PcSenses { blindsight: true, ..Default::default() },
                     "Tremorsense" => PcSenses { tremorsense: true, ..Default::default() },
                     _ => PcSenses::default(), // "Normal" or unknown
-                })
+                }.with_default_ranges())
             }
         }
 
@@ -72,6 +82,23 @@ impl PcSenses {
     pub fn has_non_sight_sense(self) -> bool {
         self.blindsight || self.tremorsense
     }
+
+    /// Fill in the usual ranges (darkvision 60 ft, blindsight/tremorsense 30 ft)
+    /// for senses that are flagged on but have no range recorded.
+    pub fn with_default_ranges(mut self) -> Self {
+        if self.darkvision && self.darkvision_ft == 0 { self.darkvision_ft = 60; }
+        if self.blindsight && self.blindsight_ft == 0 { self.blindsight_ft = 30; }
+        if self.tremorsense && self.tremorsense_ft == 0 { self.tremorsense_ft = 30; }
+        if !self.darkvision { self.darkvision_ft = 0; }
+        if !self.blindsight { self.blindsight_ft = 0; }
+        if !self.tremorsense { self.tremorsense_ft = 0; }
+        self
+    }
+
+    /// Darkvision range in grid cells (5 ft per cell).
+    pub fn darkvision_cells(self) -> f32 { self.darkvision_ft as f32 / 5.0 }
+    /// Longest non-sight sense range in grid cells.
+    pub fn blind_sense_cells(self) -> f32 { self.blindsight_ft.max(self.tremorsense_ft) as f32 / 5.0 }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

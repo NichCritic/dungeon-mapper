@@ -284,6 +284,30 @@ pub fn place_party_tokens(tokens: &mut Vec<MapToken>, party: &[PlayerCharacter],
     tokens.extend(pack_into_room(items, room));
 }
 
+/// Make sure `pc_id` has a token, placing it on the first free cell of `room`
+/// (row-major from the top-left, one-cell margin) without moving anyone else.
+/// Returns true if a token was added.
+pub fn ensure_player_token(tokens: &mut Vec<MapToken>, pc_id: &str, room: &RoomLayout) -> bool {
+    let kind = TokenKind::Player(pc_id.to_string());
+    if tokens.iter().any(|t| t.kind == kind) {
+        return false;
+    }
+    let margin = if room.width > 2 && room.height > 2 { 1 } else { 0 };
+    let occupied = |gx: i32, gy: i32| tokens.iter().any(|t| t.x.floor() as i32 == gx && t.y.floor() as i32 == gy);
+    let mut spot = None;
+    'scan: for gy in (room.y + margin)..(room.y + room.height as i32 - margin).max(room.y + margin + 1) {
+        for gx in (room.x + margin)..(room.x + room.width as i32 - margin).max(room.x + margin + 1) {
+            if !occupied(gx, gy) {
+                spot = Some((gx, gy));
+                break 'scan;
+            }
+        }
+    }
+    let (gx, gy) = spot.unwrap_or((room.x + margin, room.y + margin));
+    tokens.push(MapToken { kind, x: gx as f32 + 0.5, y: gy as f32 + 0.5 });
+    true
+}
+
 pub fn remove_encounter_tokens(tokens: &mut Vec<MapToken>, enc_id: &str) {
     tokens.retain(|t| !matches!(&t.kind, TokenKind::Monster(mid) if mid.encounter_id == enc_id));
 }

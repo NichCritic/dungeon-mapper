@@ -280,8 +280,8 @@ fn render_player_view_generic(
         }
     }
 
-    // Lighting brightness overlay
-    if !light_sources.is_empty() {
+    // Lighting brightness overlay (ambient darkness applies even with no lights)
+    if options.show_lighting && (!light_sources.is_empty() || ambient_light < 1.0) {
         render_lighting_overlay_generic(renderer, layout, light_sources, ambient_light, &visible_floor);
     }
 }

@@ -66,6 +66,132 @@ pub fn draw_exterior_shading(
     }
 }
 
+/// Uniform spatial hash over the hatch seeds.
+///
+/// [`Self::nearest`] returns exactly what a linear scan over `seeds` returns: the
+/// seed with the smallest squared distance, ties broken by lowest index. That
+/// equivalence is load-bearing — the hatching is a Voronoi partition keyed on the
+/// winning seed's index, so a different tie-break would move lines on the page.
+///
+/// Cells are visited in expanding square rings around the query. After every cell
+/// within Chebyshev ring `r` has been visited, any unvisited seed is further than
+/// `r * cell` away, so the search can stop as soon as the best match is within that
+/// bound. The comparisons below are shaded by `BOUND_MARGIN` in the conservative
+/// direction so f32 rounding at a ring boundary can only cost an extra ring, never
+/// a different answer.
+struct SeedGrid {
+    cell: f32,
+    buckets: std::collections::HashMap<(i32, i32), Vec<u32>>,
+    min_cx: i32,
+    max_cx: i32,
+    min_cy: i32,
+    max_cy: i32,
+}
+
+/// Shrinks/expands the ring bound so a rounding error can't end the search early.
+const BOUND_MARGIN: f32 = 0.999;
+
+impl SeedGrid {
+    fn build(seeds: &[(f32, f32, f32)], cell: f32) -> Self {
+        let cell = cell.max(1.0);
+        let mut buckets: std::collections::HashMap<(i32, i32), Vec<u32>> =
+            std::collections::HashMap::new();
+        let (mut min_cx, mut max_cx) = (i32::MAX, i32::MIN);
+        let (mut min_cy, mut max_cy) = (i32::MAX, i32::MIN);
+        for (i, &(x, y, _)) in seeds.iter().enumerate() {
+            let cx = (x / cell).floor() as i32;
+            let cy = (y / cell).floor() as i32;
+            min_cx = min_cx.min(cx);
+            max_cx = max_cx.max(cx);
+            min_cy = min_cy.min(cy);
+            max_cy = max_cy.max(cy);
+            buckets.entry((cx, cy)).or_default().push(i as u32);
+        }
+        Self { cell, buckets, min_cx, max_cx, min_cy, max_cy }
+    }
+
+    /// Nearest seed to `(px, py)`, as `(index, squared distance)`.
+    ///
+    /// `skip` excludes one index (used for "nearest *other* seed"). `limit` is a
+    /// distance past which the caller doesn't care about the answer; the search may
+    /// stop once nothing nearer than `limit` can remain, in which case the returned
+    /// seed is only guaranteed correct when its distance is below `limit`.
+    fn nearest(
+        &self,
+        seeds: &[(f32, f32, f32)],
+        px: f32,
+        py: f32,
+        skip: Option<usize>,
+        limit: f32,
+    ) -> Option<(usize, f32)> {
+        if self.buckets.is_empty() {
+            return None;
+        }
+        let qcx = (px / self.cell).floor() as i32;
+        let qcy = (py / self.cell).floor() as i32;
+
+        // Skip straight to the first ring that can reach an occupied cell.
+        let r_start = [
+            self.min_cx - qcx,
+            qcx - self.max_cx,
+            self.min_cy - qcy,
+            qcy - self.max_cy,
+        ]
+        .into_iter()
+        .max()
+        .unwrap_or(0)
+        .max(0);
+
+        let mut best: Option<(usize, f32)> = None;
+        let mut r = r_start;
+        loop {
+            let exhausted = qcx - r <= self.min_cx
+                && qcx + r >= self.max_cx
+                && qcy - r <= self.min_cy
+                && qcy + r >= self.max_cy;
+
+            for cy in (qcy - r)..=(qcy + r) {
+                for cx in (qcx - r)..=(qcx + r) {
+                    // Ring only — the interior was covered by earlier iterations.
+                    if r > 0 && (cx - qcx).abs() != r && (cy - qcy).abs() != r {
+                        continue;
+                    }
+                    let Some(bucket) = self.buckets.get(&(cx, cy)) else { continue };
+                    for &si in bucket {
+                        let i = si as usize;
+                        if Some(i) == skip {
+                            continue;
+                        }
+                        let (sx, sy, _) = seeds[i];
+                        let d = (px - sx).powi(2) + (py - sy).powi(2);
+                        // Lowest index wins a tie, matching the linear scan.
+                        let better = match best {
+                            None => true,
+                            Some((bi, bd)) => d < bd || (d == bd && i < bi),
+                        };
+                        if better {
+                            best = Some((i, d));
+                        }
+                    }
+                }
+            }
+
+            let reach = r as f32 * self.cell;
+            if best.is_some_and(|(_, bd)| bd.sqrt() <= reach * BOUND_MARGIN) {
+                break;
+            }
+            if reach * BOUND_MARGIN >= limit {
+                break;
+            }
+            if exhausted {
+                break;
+            }
+            r += 1;
+        }
+        best
+    }
+}
+
 /// Simple deterministic hash for pseudo-random values from coordinates.
 fn hash_pos(x: f32, y: f32, salt: u32) -> u32 {
     let ix = (x * 100.0) as i32;
@@ -153,17 +279,16 @@ fn draw_dyson_hatching(
         return;
     }
 
+    // Both the Voronoi lookup below and the neighbour-spacing pass are nearest-seed
+    // queries; without an index they scan all seeds and the whole routine goes
+    // quadratic in the map's boundary length (billions of distance tests on a large
+    // map). The grid answers them identically, in a couple of cells each.
+    let grid = SeedGrid::build(&seeds, base_spacing);
+
     let nearest_seed = |px: f32, py: f32| -> usize {
-        let mut best = 0;
-        let mut best_d = f32::MAX;
-        for (i, &(sx, sy, _)) in seeds.iter().enumerate() {
-            let d = (px - sx).powi(2) + (py - sy).powi(2);
-            if d < best_d {
-                best_d = d;
-                best = i;
-            }
-        }
-        best
+        grid.nearest(&seeds, px, py, None, f32::INFINITY)
+            .map(|(i, _)| i)
+            .unwrap_or(0)
     };
 
     let line_spacing = (2.5 / density).max(1.0);
@@ -176,10 +301,12 @@ fn draw_dyson_hatching(
         let perp_dx = -line_dy;
         let perp_dy = line_dx;
 
+        // Nearest other seed, capped at radius_px * 2.0. Taking the square root of
+        // the smallest squared distance gives the same f32 as the smallest of the
+        // individual square roots, so the cap comparison is unchanged.
         let mut min_neighbor_dist = radius_px * 2.0;
-        for (j, &(ox, oy, _)) in seeds.iter().enumerate() {
-            if j == seed_idx { continue; }
-            let d = ((ox - sx).powi(2) + (oy - sy).powi(2)).sqrt();
+        if let Some((_, d_sq)) = grid.nearest(&seeds, sx, sy, Some(seed_idx), min_neighbor_dist) {
+            let d = d_sq.sqrt();
             if d < min_neighbor_dist {
                 min_neighbor_dist = d;
             }
@@ -355,5 +482,115 @@ fn draw_stippled_shading(
                 dy += dot_interval;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Deterministic pseudo-random seed cloud, roughly matching the clustering of
+    /// real hatch seeds (a band rather than a uniform fill).
+    fn make_seeds(n: usize, salt: u32) -> Vec<(f32, f32, f32)> {
+        (0..n)
+            .map(|i| {
+                let a = hash_f32(i as f32, 1.0, salt);
+                let b = hash_f32(2.0, i as f32, salt);
+                let c = hash_f32(i as f32, i as f32, salt);
+                // Deliberately coarse so exact ties and near-ties actually occur.
+                let x = (a * 400.0 * 4.0).round() / 4.0;
+                let y = (b * 400.0 * 4.0).round() / 4.0;
+                (x, y, c * std::f32::consts::PI)
+            })
+            .collect()
+    }
+
+    fn scan_nearest(seeds: &[(f32, f32, f32)], px: f32, py: f32) -> usize {
+        // Byte-for-byte the loop SeedGrid replaced.
+        let mut best = 0;
+        let mut best_d = f32::MAX;
+        for (i, &(sx, sy, _)) in seeds.iter().enumerate() {
+            let d = (px - sx).powi(2) + (py - sy).powi(2);
+            if d < best_d {
+                best_d = d;
+                best = i;
+            }
+        }
+        best
+    }
+
+    fn scan_min_neighbor(seeds: &[(f32, f32, f32)], idx: usize, cap: f32) -> f32 {
+        let (sx, sy, _) = seeds[idx];
+        let mut min_neighbor_dist = cap;
+        for (j, &(ox, oy, _)) in seeds.iter().enumerate() {
+            if j == idx {
+                continue;
+            }
+            let d = ((ox - sx).powi(2) + (oy - sy).powi(2)).sqrt();
+            if d < min_neighbor_dist {
+                min_neighbor_dist = d;
+            }
+        }
+        min_neighbor_dist
+    }
+
+    #[test]
+    fn seed_grid_nearest_matches_linear_scan() {
+        for &cell in &[2.0f32, 6.0, 12.0] {
+            for &n in &[1usize, 2, 37, 500] {
+                let seeds = make_seeds(n, 11);
+                let grid = SeedGrid::build(&seeds, cell);
+                for q in 0..600 {
+                    // Query inside, on, and well outside the seed cloud.
+                    let px = hash_f32(q as f32, 7.0, 3) * 520.0 - 60.0;
+                    let py = hash_f32(9.0, q as f32, 3) * 520.0 - 60.0;
+                    let got = grid
+                        .nearest(&seeds, px, py, None, f32::INFINITY)
+                        .map(|(i, _)| i)
+                        .unwrap_or(0);
+                    assert_eq!(
+                        got,
+                        scan_nearest(&seeds, px, py),
+                        "cell={cell} n={n} q=({px},{py})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn seed_grid_nearest_ties_pick_lowest_index() {
+        // Two seeds exactly equidistant from the query: the scan keeps the first.
+        let seeds = vec![(10.0, 0.0, 0.0), (-10.0, 0.0, 0.0)];
+        let grid = SeedGrid::build(&seeds, 6.0);
+        let got = grid.nearest(&seeds, 0.0, 0.0, None, f32::INFINITY).unwrap().0;
+        assert_eq!(got, 0);
+        assert_eq!(got, scan_nearest(&seeds, 0.0, 0.0));
+    }
+
+    #[test]
+    fn seed_grid_min_neighbor_matches_linear_scan() {
+        for &cap in &[20.0f32, 60.0, 4000.0] {
+            let seeds = make_seeds(300, 23);
+            let grid = SeedGrid::build(&seeds, 6.0);
+            for idx in 0..seeds.len() {
+                let (sx, sy, _) = seeds[idx];
+                let mut got = cap;
+                if let Some((_, d_sq)) = grid.nearest(&seeds, sx, sy, Some(idx), cap) {
+                    let d = d_sq.sqrt();
+                    if d < got {
+                        got = d;
+                    }
+                }
+                assert_eq!(got, scan_min_neighbor(&seeds, idx, cap), "cap={cap} idx={idx}");
+            }
+        }
+    }
+
+    #[test]
+    fn seed_grid_single_seed_has_no_neighbor() {
+        let seeds = vec![(1.0, 2.0, 0.0)];
+        let grid = SeedGrid::build(&seeds, 6.0);
+        assert!(grid.nearest(&seeds, 1.0, 2.0, Some(0), 50.0).is_none());
     }
 }

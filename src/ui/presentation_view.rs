@@ -13,6 +13,7 @@ use crate::render::themed::RenderOptions;
 use crate::ui::canvas_common::{handle_pan_zoom, ViewState, COLOR_PLACEHOLDER_TEXT};
 use crate::ui::window_dock::{dock_window, DockWindow, WindowDock};
 use crate::presentation::tokens::{self, TokenDrag, TokenStyle};
+use crate::presentation::{cover_ui, lighting, los, CoverMode};
 use crate::util::{ViewTransform, GRID_PX};
 
 use crate::render::bg_cache::BackgroundRenderCache;
@@ -1147,6 +1148,7 @@ pub fn presentation_view(
         show_notes: true,
         show_secrets: true,
         show_decor: true,
+        show_lighting: true,
     };
     let cache_ready = view_state.render_cache.ensure(
         hash, &dungeon.graph, layout, &dungeon.theme, options, "Presentation",
@@ -1215,11 +1217,79 @@ pub fn presentation_view(
             view_state.selected_token = Some(kind);
         }
     }
+    // Line-of-sight geometry for lighting and cover. Static geometry is cached; while a
+    // token is being dragged the light map and heatmap are frozen and refresh on release.
+    let dragging = view_state.token_drag.is_some();
+    let occ = los::ensure_occluders(presentation, dungeon, layout, &token_infos);
+    if presentation.los_lighting {
+        lighting::ensure_light_map(presentation, dungeon, layout, &occ, !dragging);
+        if presentation.dm_show_light {
+            if let Some(map) = presentation.light_cache.as_ref() {
+                lighting::render_light_overlay(&painter, &transform, map, 0.35);
+                lighting::render_vision_rings(&painter, &transform, map);
+            }
+        }
+    } else {
+        presentation.light_cache = None;
+    }
+
+    // Cover tool: heatmap under the tokens, badges over them
+    let attacker_sq = presentation.cover_attacker.as_ref().and_then(|kind| {
+        dungeon.tokens.iter().zip(&token_infos)
+            .find(|(t, _)| t.kind == *kind)
+            .map(|(t, info)| los::Square::centered(t.x, t.y, info.size.max(0.5)))
+    });
+    let mut badge_results: Vec<Option<los::CoverResult>> = Vec::new();
+    if presentation.cover_mode == CoverMode::Off || attacker_sq.is_none() {
+        presentation.cover_cache = None;
+        presentation.cover_badges.clear();
+    } else if let (Some(sq), Some(kind)) = (attacker_sq, presentation.cover_attacker.clone()) {
+        let occ_hash = los::occluder_hash(&occ);
+        match presentation.cover_mode {
+            CoverMode::Heatmap => {
+                let key = cover_ui::heatmap_key(&sq, occ_hash);
+                let stale = presentation.cover_cache.as_ref().map(|c| c.key != key).unwrap_or(true);
+                if stale && (!dragging || presentation.cover_cache.is_none()) {
+                    let cells = cover_ui::compute_heatmap(&sq, &kind, &occ, &occ.floor);
+                    presentation.cover_cache = Some(cover_ui::CoverCache { key, cells });
+                }
+                if let Some(c) = presentation.cover_cache.as_ref() {
+                    cover_ui::render_heatmap(&painter, &transform, &c.cells, None);
+                }
+                presentation.cover_badges.clear();
+            }
+            CoverMode::Icons => {
+                badge_results = cover_ui::compute_badges(&kind, &sq, &dungeon.tokens, &token_infos, &occ);
+                presentation.cover_badges = dungeon.tokens.iter().zip(&badge_results)
+                    .filter_map(|(t, r)| r.as_ref().map(|r| (t.kind.clone(), r.level)))
+                    .collect();
+                presentation.cover_cache = None;
+            }
+            CoverMode::Off => {}
+        }
+    }
+
     tokens::render_tokens(&painter, ui.ctx(), &transform, &dungeon.tokens, &token_infos, &TokenStyle {
         show_names: true,
         selected: view_state.selected_token.as_ref(),
         player_view: false,
     });
+    if !badge_results.is_empty() {
+        cover_ui::render_badges(&painter, &transform, &dungeon.tokens, &token_infos, &badge_results);
+        // Hovering a badged token shows its four corner lines
+        if let Some(pos) = response.hover_pos() {
+            if let Some(idx) = tokens::token_at_screen_pos(pos, &transform, &dungeon.tokens, &token_infos) {
+                if let Some(Some(res)) = badge_results.get(idx) {
+                    cover_ui::render_lines(&painter, &transform, res);
+                    let rect = tokens::token_screen_rect(&dungeon.tokens[idx], &token_infos[idx], &transform);
+                    let corner = ["TL", "TR", "BL", "BR"].get(res.corner).copied().unwrap_or("?");
+                    painter.text(rect.center_top() - egui::vec2(0.0, 4.0), egui::Align2::CENTER_BOTTOM,
+                        format!("{} — {}/4 blocked from {}", res.level.label(), res.blocked, corner),
+                        egui::FontId::proportional(11.0), egui::Color32::WHITE);
+                }
+            }
+        }
+    }
     let drag_before = view_state.token_drag.clone();
     let token_busy = tokens::handle_token_drag(
         &response, &transform, &mut dungeon.tokens, &token_infos,
@@ -1421,6 +1491,19 @@ pub fn presentation_view(
     // Right-click context menu
     response.context_menu(|ui| {
         if let Some(pos) = ui.ctx().memory(|m| m.data.get_temp::<egui::Pos2>(ctx_pos_id)) {
+            // Token under the pointer: cover tool shortcut
+            if let Some(idx) = tokens::token_at_screen_pos(pos, &transform, &dungeon.tokens, &token_infos) {
+                let kind = dungeon.tokens[idx].kind.clone();
+                let label = token_infos[idx].label.clone();
+                if ui.button(format!("Cover from {}", label)).clicked() {
+                    presentation.cover_attacker = Some(kind);
+                    if presentation.cover_mode == CoverMode::Off {
+                        presentation.cover_mode = CoverMode::Icons;
+                    }
+                    ui.close_menu();
+                }
+                ui.separator();
+            }
             let world = transform.screen_to_world(pos);
             let gx = (world.x / GRID_PX).floor() as i32;
             let gy = (world.y / GRID_PX).floor() as i32;
@@ -1728,12 +1811,25 @@ fn party_section(
     }
 
     let mut remove_pc_idx = None;
+    // Torch handling is deferred so the row closure only touches the party entry
+    let mut torch_toggle: Option<String> = None;
+    let carrying: std::collections::HashSet<String> = dungeon.light_sources.iter()
+        .filter_map(|l| match &l.carrier { Some(TokenKind::Player(pid)) => Some(pid.clone()), _ => None })
+        .collect();
     for (i, pc) in dungeon.party.iter_mut().enumerate() {
         ui.push_id(format!("party_pc_{}", pc.id), |ui| {
             egui::CollapsingHeader::new(&pc.name)
                 .id_salt(format!("pc_header_{}", pc.id))
                 .default_open(false)
                 .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        let has_torch = carrying.contains(&pc.id);
+                        let label = if has_torch { "Drop torch" } else { "Give torch" };
+                        let tip = if has_torch { "Remove this character's light" } else { "A light (20 ft bright / 40 ft dim) that follows this character's token; places a token if needed" };
+                        if ui.small_button(label).on_hover_text(tip).clicked() {
+                            torch_toggle = Some(pc.id.clone());
+                        }
+                    });
                     if in_combat {
                         ui.label(format!("{} ({})", pc.name, pc.class));
                         ui.label(format!("AC {} | HP {}/{}", pc.ac, pc.current_hp, pc.max_hp));
@@ -1801,9 +1897,21 @@ fn party_section(
                             }
                         });
                         ui.horizontal(|ui| {
-                            ui.checkbox(&mut pc.senses.darkvision, "DV");
-                            ui.checkbox(&mut pc.senses.blindsight, "BS");
-                            ui.checkbox(&mut pc.senses.tremorsense, "TS");
+                            let sense_range = |ui: &mut egui::Ui, on: &mut bool, ft: &mut u32, label: &str, default: u32| {
+                                if ui.checkbox(on, label).changed() {
+                                    *ft = if *on { default } else { 0 };
+                                }
+                                if *on {
+                                    let mut v = *ft as i32;
+                                    if crate::ui::canvas_common::num_input_i32(ui, &mut v, 32.0) {
+                                        *ft = v.clamp(0, 600) as u32;
+                                    }
+                                    ui.label("ft");
+                                }
+                            };
+                            sense_range(ui, &mut pc.senses.darkvision, &mut pc.senses.darkvision_ft, "DV", 60);
+                            sense_range(ui, &mut pc.senses.blindsight, &mut pc.senses.blindsight_ft, "BS", 30);
+                            sense_range(ui, &mut pc.senses.tremorsense, &mut pc.senses.tremorsense_ft, "TS", 30);
                         });
                         if ui.small_button("Remove").clicked() {
                             remove_pc_idx = Some(i);
@@ -1811,6 +1919,30 @@ fn party_section(
                     }
                 });
         });
+    }
+    if let Some(pid) = torch_toggle {
+        let kind = TokenKind::Player(pid.clone());
+        if let Some(i) = dungeon.light_sources.iter().position(|l| l.carrier.as_ref() == Some(&kind)) {
+            dungeon.light_sources.remove(i);
+        } else {
+            // The light follows the token, so make sure the character has one
+            let room_id = presentation.party_room.clone()
+                .or_else(|| dungeon.graph.rooms.first().map(|r| r.id.clone()))
+                .unwrap_or_default();
+            if let Some(rl) = dungeon.layout.as_ref().and_then(|l| l.room_by_id(&room_id)) {
+                tokens::ensure_player_token(&mut dungeon.tokens, &pid, rl);
+            }
+            dungeon.light_sources.push(LightSource {
+                id: uuid::Uuid::new_v4().to_string(),
+                room_id,
+                radius: 4.0,
+                intensity: 1.0,
+                color: [255, 200, 100],
+                pos: None,
+                dim_radius: Some(8.0),
+                carrier: Some(kind),
+            });
+        }
     }
     if let Some(idx) = remove_pc_idx {
         dungeon.party.remove(idx);
@@ -2799,6 +2931,84 @@ pub fn presentation_sidebar(
     ui.add_space(8.0);
 
     // AoE markers
+    // --- Lighting ---
+    egui::CollapsingHeader::new("Lighting")
+        .id_salt("pres_lighting")
+        .default_open(false)
+        .show(ui, |ui| {
+            ui.add(egui::Slider::new(&mut dungeon.ambient_light, 0.0..=1.0).text("Ambient"));
+            ui.checkbox(&mut presentation.los_lighting, "Line-of-sight lighting")
+                .on_hover_text("Per-cell light and party vision blocked by walls, doors and solid objects. Off: the older per-room light wash.");
+            ui.add_enabled(presentation.los_lighting, egui::Checkbox::new(&mut presentation.dm_show_light, "Show light shading on DM map"));
+            let mut remove: Option<usize> = None;
+            for (i, light) in dungeon.light_sources.iter().enumerate() {
+                let Some(TokenKind::Player(pid)) = &light.carrier else { continue };
+                let name = dungeon.party.iter().find(|p| p.id == *pid).map(|p| p.name.as_str()).unwrap_or("?");
+                ui.horizontal(|ui| {
+                    ui.label(format!("{} carries a light ({} / {} ft)", name, light.radius * 5.0, light.dim_radius() * 5.0));
+                    if ui.small_button("\u{00d7}").on_hover_text("Remove this light").clicked() {
+                        remove = Some(i);
+                    }
+                });
+            }
+            if let Some(i) = remove {
+                dungeon.light_sources.remove(i);
+            }
+            ui.weak("Torches are given out per character in the Party section; room lights are edited in the Decor tab.");
+        });
+
+    // --- Cover ---
+    egui::CollapsingHeader::new("Cover")
+        .id_salt("pres_cover")
+        .default_open(false)
+        .show(ui, |ui| {
+            let token_infos = tokens::resolve_tokens(dungeon, monster_db, presentation.combat_tracker.as_ref());
+            // Default attacker: current combatant's token, else the selected token
+            if presentation.cover_attacker.is_none() {
+                let current = presentation.combat_tracker.as_ref()
+                    .and_then(|t| t.current_combatant_id().cloned())
+                    .map(|cid| match cid {
+                        crate::presentation::combat_tracker::CombatantId::Monster(mid) => TokenKind::Monster(mid),
+                        crate::presentation::combat_tracker::CombatantId::Player(pid) => TokenKind::Player(pid),
+                    });
+                presentation.cover_attacker = current
+                    .filter(|k| dungeon.tokens.iter().any(|t| t.kind == *k))
+                    .or_else(|| view_state.selected_token.clone());
+            }
+            ui.horizontal(|ui| {
+                ui.label("From:");
+                let sel_label = presentation.cover_attacker.as_ref()
+                    .and_then(|k| dungeon.tokens.iter().position(|t| t.kind == *k))
+                    .and_then(|i| token_infos.get(i).map(|info| info.label.clone()))
+                    .unwrap_or_else(|| "(pick a token)".to_string());
+                egui::ComboBox::from_id_salt("cover_attacker")
+                    .selected_text(sel_label)
+                    .width(160.0)
+                    .show_ui(ui, |ui| {
+                        for (t, info) in dungeon.tokens.iter().zip(&token_infos) {
+                            let sel = presentation.cover_attacker.as_ref() == Some(&t.kind);
+                            if ui.selectable_label(sel, &info.label).clicked() {
+                                presentation.cover_attacker = Some(t.kind.clone());
+                            }
+                        }
+                    });
+            });
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut presentation.cover_mode, CoverMode::Off, "Off");
+                ui.selectable_value(&mut presentation.cover_mode, CoverMode::Heatmap, "Heatmap");
+                ui.selectable_value(&mut presentation.cover_mode, CoverMode::Icons, "Token icons");
+            });
+            ui.checkbox(&mut presentation.show_cover_player, "Show cover to players");
+            ui.horizontal(|ui| {
+                for (level, text) in [(CoverLevel::Half, "\u{00bd} half"), (CoverLevel::ThreeQuarters, "\u{00be} three-quarters"), (CoverLevel::Total, "\u{00d7} total")] {
+                    let (rect, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+                    ui.painter().rect_filled(rect, 2.0, cover_ui::swatch_color(level));
+                    ui.label(text);
+                }
+            });
+            ui.weak("Unshaded cells have no cover. Hover a badged token for its lines.");
+        });
+
     egui::CollapsingHeader::new("Area of Effect")
         .id_salt("aoe_section")
         .default_open(true)
@@ -2818,6 +3028,11 @@ pub fn presentation_sidebar(
         *player_viewport_open = !*player_viewport_open;
     }
     ui.checkbox(&mut presentation.show_labels_player, "Show labels to players");
+    ui.add_enabled(presentation.los_lighting, egui::Checkbox::new(&mut presentation.show_light_player, "Show light shading to players"))
+        .on_hover_text("Needs line-of-sight lighting (Lighting section)");
+    ui.add_enabled(presentation.los_lighting, egui::Checkbox::new(&mut presentation.show_vision_player, "Show vision radii to players"))
+        .on_hover_text("Needs line-of-sight lighting (Lighting section)");
+    ui.checkbox(&mut presentation.show_cover_player, "Show cover to players");
     ui.checkbox(&mut player_view_state.locked, "Lock player view (no scroll/pan)");
     ui.horizontal(|ui| {
         let label = match player_view_state.map_rotation {

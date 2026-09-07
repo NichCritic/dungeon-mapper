@@ -187,6 +187,7 @@ pub fn encounters_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Enc
         show_notes: false,
         show_secrets: false,
         show_decor: true,
+        show_lighting: true,
     };
     let cache_ready = state.render_cache.ensure(
         hash, &dungeon.graph, layout, &dungeon.theme, options, "Encounters",

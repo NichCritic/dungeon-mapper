@@ -12,6 +12,8 @@ pub struct MonsterDatabase {
     /// Base image directory (e.g. `5etools-src/img/`).
     /// Token images live at `{img_dir}/bestiary/tokens/{source}/{name}.webp`.
     pub img_dir: Option<PathBuf>,
+    /// Memoized `token_path` results, so per-frame token rendering never touches the disk.
+    token_cache: std::sync::Mutex<HashMap<(String, String), Option<PathBuf>>>,
 }
 
 impl MonsterDatabase {
@@ -20,6 +22,7 @@ impl MonsterDatabase {
         Self {
             monsters: Vec::new(),
             img_dir: None,
+            token_cache: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -177,6 +180,7 @@ impl MonsterDatabase {
         Self {
             monsters,
             img_dir,
+            token_cache: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -203,16 +207,22 @@ impl MonsterDatabase {
     /// Token images are at `{img_dir}/bestiary/tokens/{source}/{name}.webp`.
     pub fn token_path(&self, source: &str, name: &str) -> Option<PathBuf> {
         let img_dir = self.img_dir.as_ref()?;
+        let key = (source.to_string(), name.to_string());
+        if let Ok(cache) = self.token_cache.lock() {
+            if let Some(hit) = cache.get(&key) {
+                return hit.clone();
+            }
+        }
         let path = img_dir
             .join("bestiary")
             .join("tokens")
             .join(source)
             .join(format!("{}.webp", name_to_token_name(name)));
-        if path.is_file() {
-            Some(path)
-        } else {
-            None
+        let result = if path.is_file() { Some(path) } else { None };
+        if let Ok(mut cache) = self.token_cache.lock() {
+            cache.insert(key, result.clone());
         }
+        result
     }
 
     /// Token image for any monster reference; custom/merged monsters fall back to

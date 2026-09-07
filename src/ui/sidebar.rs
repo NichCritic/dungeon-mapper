@@ -446,8 +446,16 @@ fn group_properties(ui: &mut egui::Ui, dungeon: &mut Dungeon, group_id: &str) {
                 new_parent_id = None;
             }
             for room in &dungeon.graph.rooms {
-                // Don't allow a room to contain itself or its own children
+                // Don't allow a room to contain itself or its own children.
+                // Direct members are the obvious case; a room nested deeper inside a
+                // member (possibly through a different group) would close a cycle just
+                // as surely, so reject anything with a member among its ancestors.
                 if member_ids.contains(&room.id) {
+                    continue;
+                }
+                if dungeon.graph.ancestors_of(&room.id).iter()
+                    .any(|anc| member_ids.iter().any(|m| m == anc))
+                {
                     continue;
                 }
                 let selected = new_parent_id.as_deref() == Some(&room.id);

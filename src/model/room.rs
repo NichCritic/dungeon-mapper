@@ -169,6 +169,47 @@ impl DecorType {
         DecorType::Crack, DecorType::Stream, DecorType::Pool,
     ];
 
+    /// Cover an object of this type grants by default (DM can override per item).
+    pub fn default_cover(self) -> super::cover::CoverKind {
+        use super::cover::CoverKind as C;
+        match self {
+            DecorType::Pillar | DecorType::Statue | DecorType::Bookshelf | DecorType::Fireplace => C::Full,
+            DecorType::Gate | DecorType::Altar | DecorType::Fountain | DecorType::Well
+            | DecorType::Brazier | DecorType::Scales => C::ThreeQuarters,
+            DecorType::Table | DecorType::Chair | DecorType::Bench | DecorType::Chest
+            | DecorType::Barrel | DecorType::Crate | DecorType::Throne | DecorType::Bed
+            | DecorType::Rubble => C::Half,
+            _ => C::None,
+        }
+    }
+
+    /// Half extents of the glyph in local units (1.0 = `DECOR_HALF_SIZE`), i.e. the
+    /// footprint used for cover and light blocking before scale and rotation.
+    pub fn local_extent(self) -> (f32, f32) {
+        match self {
+            DecorType::Table => (1.0, 0.6),
+            DecorType::Chair => (0.4, 0.4),
+            DecorType::Bench => (0.9, 0.25),
+            DecorType::Chest => (0.65, 0.45),
+            DecorType::Barrel => (0.55, 0.55),
+            DecorType::Crate => (0.55, 0.55),
+            DecorType::Pillar => (0.5, 0.5),
+            DecorType::Altar => (0.98, 0.58),
+            DecorType::Fountain => (0.92, 0.92),
+            DecorType::Well => (0.72, 0.72),
+            DecorType::Brazier => (0.78, 0.78),
+            DecorType::Fireplace => (0.95, 0.65),
+            DecorType::Statue => (0.72, 0.72),
+            DecorType::Throne => (0.45, 0.6),
+            DecorType::Bed => (0.66, 1.0),
+            DecorType::Bookshelf => (0.85, 0.4),
+            DecorType::Rubble => (0.9, 0.9),
+            DecorType::Gate => (0.85, 0.75),
+            DecorType::Scales => (0.85, 0.95),
+            _ => (0.6, 0.6),
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             DecorType::Table => "Table",
@@ -220,6 +261,9 @@ pub struct RoomDecor {
     pub scale_x: f32,
     /// Vertical scale multiplier (1.0 = default size)
     pub scale_y: f32,
+    /// Cover override; `None` means the type's default.
+    #[serde(default)]
+    pub cover: Option<super::cover::CoverKind>,
 }
 
 /// Raw shape for backward-compatible deserialization (handles legacy `scale` field).
@@ -235,6 +279,8 @@ struct RoomDecorRaw {
     scale: f32,
     scale_x: Option<f32>,
     scale_y: Option<f32>,
+    #[serde(default)]
+    cover: Option<super::cover::CoverKind>,
 }
 
 fn default_one() -> f32 { 1.0 }
@@ -250,11 +296,17 @@ impl<'de> Deserialize<'de> for RoomDecor {
             rotation: raw.rotation,
             scale_x: raw.scale_x.unwrap_or(raw.scale),
             scale_y: raw.scale_y.unwrap_or(raw.scale),
+            cover: raw.cover,
         })
     }
 }
 
 impl RoomDecor {
+    /// Effective cover this object grants.
+    pub fn cover_kind(&self) -> super::cover::CoverKind {
+        self.cover.unwrap_or_else(|| self.decor_type.default_cover())
+    }
+
     pub fn new(decor_type: DecorType, x: f32, y: f32) -> Self {
         Self {
             id: uuid::Uuid::new_v4().to_string(),
@@ -264,6 +316,7 @@ impl RoomDecor {
             rotation: 0.0,
             scale_x: 1.0,
             scale_y: 1.0,
+            cover: None,
         }
     }
 }

@@ -32,6 +32,7 @@ pub fn export_png(
         show_notes: dm_mode,
         show_secrets: dm_mode,
         show_decor: true,
+        show_lighting: true,
     };
     crate::render::themed::render_themed(
         &mut renderer,
