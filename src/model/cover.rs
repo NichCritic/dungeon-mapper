@@ -60,13 +60,4 @@ impl CoverLevel {
             CoverLevel::Total => "Total Cover (can't target)",
         }
     }
-
-    /// AC / Dex save bonus granted.
-    pub fn ac_bonus(self) -> i32 {
-        match self {
-            CoverLevel::None => 0,
-            CoverLevel::Half => 2,
-            CoverLevel::ThreeQuarters | CoverLevel::Total => 5,
-        }
-    }
 }

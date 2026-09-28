@@ -1340,7 +1340,7 @@ pub fn presentation_view(
         };
         painter.rect_stroke(
             vp_rect, 0.0,
-            egui::Stroke::new(2.0, vp_color),
+            egui::Stroke::new(2.0_f32, vp_color),
             egui::StrokeKind::Outside,
         );
 
@@ -1458,7 +1458,7 @@ pub fn presentation_view(
             let sel_rect = egui::Rect::from_min_max(min, max);
             painter.rect_stroke(
                 sel_rect, 0.0,
-                egui::Stroke::new(2.0, egui::Color32::from_rgb(100, 200, 255)),
+                egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(100, 200, 255)),
                 egui::StrokeKind::Outside,
             );
         }
@@ -1475,7 +1475,7 @@ pub fn presentation_view(
             } * GRID_PX * transform.zoom;
             painter.circle_stroke(
                 center, radius + 3.0,
-                egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 255, 100)),
+                egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(255, 255, 100)),
             );
         }
     }
@@ -2237,7 +2237,7 @@ fn combat_tracker_ui(
 
                             egui::Frame::NONE
                                 .fill(frame_color)
-                                .stroke(egui::Stroke::new(1.0, stroke_color))
+                                .stroke(egui::Stroke::new(1.0_f32, stroke_color))
                                 .inner_margin(4.0)
                                 .corner_radius(2.0)
                                 .show(ui, |ui| {
@@ -2361,7 +2361,7 @@ fn combat_tracker_ui(
 
                             egui::Frame::NONE
                                 .fill(frame_color)
-                                .stroke(egui::Stroke::new(1.0, stroke_color))
+                                .stroke(egui::Stroke::new(1.0_f32, stroke_color))
                                 .inner_margin(4.0)
                                 .corner_radius(2.0)
                                 .show(ui, |ui| {

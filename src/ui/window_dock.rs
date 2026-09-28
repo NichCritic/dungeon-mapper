@@ -19,6 +19,7 @@ pub enum DockWindow {
     MonsterWorkshop,
     CustomMonsterEditor,
     MonteCarlo,
+    NoteBrowser,
 }
 
 impl DockWindow {
@@ -35,6 +36,7 @@ impl DockWindow {
             DockWindow::MonsterWorkshop => "Monster Workshop",
             DockWindow::CustomMonsterEditor => "Creature Editor",
             DockWindow::MonteCarlo => "Monte Carlo",
+            DockWindow::NoteBrowser => "All Notes",
         }
     }
 

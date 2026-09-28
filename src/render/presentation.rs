@@ -563,7 +563,7 @@ pub fn render_dm_overlay(
         painter.circle_stroke(
             screen,
             radius_px,
-            egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(
+            egui::Stroke::new(1.0_f32, egui::Color32::from_rgba_unmultiplied(
                 light.color[0], light.color[1], light.color[2], 128,
             )),
         );

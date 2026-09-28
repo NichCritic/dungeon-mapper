@@ -699,6 +699,40 @@ pub fn draw_decor(
                 g.circle_fill(0.93 * a.cos(), 0.74 * a.sin(), 0.07, dark);
             }
         }
+        DecorType::Clouds => {
+            // Hazy body with a scalloped top, wisps drifting below
+            g.ellipse_fill(0.0, -0.02, 0.72, 0.3, shade);
+            g.arc(-0.42, 0.06, 0.36, -PI, -0.1, W_THIN, ink);
+            g.arc(0.03, -0.18, 0.46, -PI + 0.55, -0.2, W_THIN, ink);
+            g.arc(0.5, 0.08, 0.34, -PI + 0.75, 0.1, W_THIN, ink);
+            g.bezier((-0.78, 0.06), (0.0, 0.44), (0.83, 0.11), W_THIN, ink);
+            g.bezier((-0.86, 0.54), (-0.15, 0.34), (0.56, 0.56), W_HAIR, ink);
+            g.bezier((-0.52, 0.84), (0.1, 0.64), (0.82, 0.86), W_HAIR, ink);
+        }
+        DecorType::Darkness => {
+            // Ragged sphere of darkness, densest at the core, swallowing light at the rim
+            let bumps = [1.0, 0.93, 1.0, 0.88, 0.98, 0.91, 1.0, 0.95, 0.89, 0.97];
+            let ragged = |r: f32| -> Vec<(f32, f32)> {
+                bumps
+                    .iter()
+                    .enumerate()
+                    .map(|(i, b)| {
+                        let a = i as f32 / bumps.len() as f32 * TAU;
+                        (r * b * a.cos(), r * b * a.sin())
+                    })
+                    .collect()
+            };
+            let rim = ragged(0.78);
+            for r in [0.78, 0.52, 0.28] {
+                g.poly_fill(&ragged(r), dark);
+            }
+            g.poly_stroke(&rim, W_THIN, ink);
+            // Dashed ring marking the edge of the effect
+            for i in 0..8 {
+                let a = i as f32 / 8.0 * TAU + 0.2;
+                g.arc(0.0, 0.0, 0.98, a, a + TAU / 16.0, W_HAIR, ink);
+            }
+        }
     }
 }
 

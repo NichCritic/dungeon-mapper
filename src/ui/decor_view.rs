@@ -26,6 +26,8 @@ pub struct DecorViewState {
     pub selected_decor: Option<usize>,
     /// Multiple selected decor items (for drag-select).
     pub selected_decor_set: std::collections::HashSet<usize>,
+    /// Offsets of the other selected items relative to the dragged one, captured at drag start.
+    drag_group: Vec<(usize, f32, f32)>,
     /// Drag-select start position in world coords.
     drag_select_start: Option<egui::Pos2>,
     /// Search filter for decor type dropdowns.
@@ -46,10 +48,47 @@ impl Default for DecorViewState {
             place_mode: false,
             selected_decor: None,
             selected_decor_set: std::collections::HashSet::new(),
+            drag_group: Vec::new(),
             drag_select_start: None,
             decor_search: String::new(),
             object_browser_open: false,
         }
+    }
+}
+
+impl DecorViewState {
+    /// Every selected decor index: the box-selected set plus the primary selection.
+    pub fn decor_selection(&self) -> Vec<usize> {
+        let mut sel: Vec<usize> = self.selected_decor_set.iter().copied().collect();
+        if let Some(di) = self.selected_decor {
+            if !sel.contains(&di) {
+                sel.push(di);
+            }
+        }
+        sel.sort_unstable();
+        sel
+    }
+
+    /// Make `di` the only selected item.
+    pub fn select_decor_only(&mut self, di: usize) {
+        self.selected_decor_set.clear();
+        self.selected_decor = Some(di);
+    }
+
+    /// Add `di` to the selection, or drop it if already selected.
+    pub fn toggle_decor(&mut self, di: usize) {
+        let mut sel: std::collections::HashSet<usize> =
+            self.decor_selection().into_iter().collect();
+        if !sel.remove(&di) {
+            sel.insert(di);
+        }
+        self.selected_decor = sel.iter().copied().min();
+        self.selected_decor_set = sel;
+    }
+
+    pub fn clear_decor_selection(&mut self) {
+        self.selected_decor = None;
+        self.selected_decor_set.clear();
     }
 }
 
@@ -220,7 +259,7 @@ pub fn decor_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut DecorVie
             painter.rect_stroke(
                 egui::Rect::from_min_max(min, max),
                 0.0,
-                egui::Stroke::new(2.0, egui::Color32::from_rgb(100, 180, 255)),
+                egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(100, 180, 255)),
                 egui::StrokeKind::Middle,
             );
         }
@@ -248,7 +287,7 @@ pub fn decor_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut DecorVie
                     } else {
                         egui::Color32::from_rgb(100, 180, 255)
                     };
-                    painter.circle_stroke(screen, handle_r + 2.0, egui::Stroke::new(1.5, ring_color));
+                    painter.circle_stroke(screen, handle_r + 2.0, egui::Stroke::new(1.5_f32, ring_color));
                     // Hitbox used for cover / light blocking (selected item only)
                     if is_sel && decor.cover_kind() != crate::model::CoverKind::None {
                         let (ex, ey) = decor.decor_type.local_extent();
@@ -259,7 +298,7 @@ pub fn decor_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut DecorVie
                         let pts = [corner(-hx, -hy), corner(hx, -hy), corner(hx, hy), corner(-hx, hy)];
                         let hb_color = egui::Color32::from_rgba_unmultiplied(255, 120, 60, 160);
                         for i in 0..4 {
-                            painter.line_segment([pts[i], pts[(i + 1) % 4]], egui::Stroke::new(1.0, hb_color));
+                            painter.line_segment([pts[i], pts[(i + 1) % 4]], egui::Stroke::new(1.0_f32, hb_color));
                         }
                     }
                     // Type label only for selected item
@@ -298,6 +337,12 @@ pub fn decor_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut DecorVie
                         if drag_idx < room.decor.len() {
                             room.decor[drag_idx].x = new_x;
                             room.decor[drag_idx].y = new_y;
+                            for &(i, ox, oy) in &state.drag_group {
+                                if i < room.decor.len() {
+                                    room.decor[i].x = (new_x + ox).clamp(0.0, rl.width as f32);
+                                    room.decor[i].y = (new_y + oy).clamp(0.0, rl.height as f32);
+                                }
+                            }
                         }
                     }
                 }
@@ -305,11 +350,13 @@ pub fn decor_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut DecorVie
         }
         if response.drag_stopped() {
             state.dragging_decor = None;
+            state.drag_group.clear();
         }
     }
 
     // Click handling
     let ctrl_held = ui.ctx().input(|i| i.modifiers.command);
+    let shift_held = ui.ctx().input(|i| i.modifiers.shift);
     if response.clicked() {
         if let Some(pos) = response.interact_pointer_pos() {
             let world = transform.screen_to_world(pos);
@@ -354,12 +401,17 @@ pub fn decor_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut DecorVie
                             cloned.x = new_x;
                             cloned.y = new_y;
                             room.decor.push(cloned);
-                            state.selected_decor = Some(room.decor.len() - 1);
+                            let new_idx = room.decor.len() - 1;
+                            state.select_decor_only(new_idx);
                         }
                     }
                 }
             } else if let Some(di) = clicked_decor {
-                state.selected_decor = Some(di);
+                if shift_held {
+                    state.toggle_decor(di);
+                } else {
+                    state.select_decor_only(di);
+                }
             } else if state.place_mode {
                 // Place new decor — auto-select room under cursor if needed
                 let target_room = state.selected_room.clone().or_else(|| {
@@ -379,7 +431,8 @@ pub fn decor_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut DecorVie
                             let new_decor = RoomDecor::new(state.place_type, dx, dy);
                             if let Some(room) = dungeon.graph.room_by_id_mut(&sel_id) {
                                 room.decor.push(new_decor);
-                                state.selected_decor = Some(room.decor.len() - 1);
+                                let new_idx = room.decor.len() - 1;
+                                state.select_decor_only(new_idx);
                             }
                             state.selected_room = Some(sel_id);
                         }
@@ -387,7 +440,7 @@ pub fn decor_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut DecorVie
                 }
             } else {
                 // Click to select room
-                state.selected_decor = None;
+                state.clear_decor_selection();
                 let mut hit = None;
                 for rl in &render_layout.rooms {
                     if gx >= rl.x && gx < rl.x + rl.width as i32
@@ -411,18 +464,14 @@ pub fn decor_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut DecorVie
             let sel_id = state.selected_room.clone().unwrap();
             if let Some(room) = dungeon.graph.room_by_id_mut(&sel_id) {
                 // Collect all indices to remove
-                let mut to_remove: Vec<usize> = state.selected_decor_set.iter().copied().collect();
-                if let Some(di) = state.selected_decor {
-                    if !to_remove.contains(&di) { to_remove.push(di); }
-                }
+                let mut to_remove = state.decor_selection();
                 to_remove.sort_unstable_by(|a, b| b.cmp(a)); // reverse order
                 for idx in to_remove {
                     if idx < room.decor.len() {
                         room.decor.remove(idx);
                     }
                 }
-                state.selected_decor = None;
-                state.selected_decor_set.clear();
+                state.clear_decor_selection();
             }
         }
     }
@@ -442,7 +491,16 @@ pub fn decor_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut DecorVie
                             let dy = world.y - (room_px_y + decor.y * GRID_PX);
                             if (dx * dx + dy * dy).sqrt() < hit_radius {
                                 state.dragging_decor = Some((sel_id.clone(), di));
-                                state.selected_decor = Some(di);
+                                if !state.decor_selection().contains(&di) {
+                                    state.select_decor_only(di);
+                                }
+                                // Move the whole selection together, keeping relative offsets
+                                state.drag_group = state
+                                    .decor_selection()
+                                    .into_iter()
+                                    .filter(|&i| i != di && i < room.decor.len())
+                                    .map(|i| (i, room.decor[i].x - decor.x, room.decor[i].y - decor.y))
+                                    .collect();
                                 break;
                             }
                         }
@@ -452,15 +510,16 @@ pub fn decor_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut DecorVie
         }
     }
 
-    // Drag-select: secondary button (right-drag) to rubber-band select
+    // Drag-select: left-drag on empty space rubber-bands a selection
+    // (a left-drag that starts on an item moves it instead, handled above)
     if !state.place_mode && state.dragging_decor.is_none() {
-        if response.drag_started_by(egui::PointerButton::Secondary) {
+        if response.drag_started_by(egui::PointerButton::Primary) {
             if let Some(pos) = response.interact_pointer_pos() {
                 state.drag_select_start = Some(transform.screen_to_world(pos));
             }
         }
         if let Some(start) = state.drag_select_start {
-            if response.dragged_by(egui::PointerButton::Secondary) {
+            if response.dragged_by(egui::PointerButton::Primary) {
                 if let Some(pos) = pointer_pos {
                     let current = transform.screen_to_world(pos);
                     let min = egui::pos2(start.x.min(current.x), start.y.min(current.y));
@@ -470,20 +529,24 @@ pub fn decor_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut DecorVie
                     painter.rect_stroke(
                         egui::Rect::from_min_max(screen_min, screen_max),
                         0.0,
-                        egui::Stroke::new(1.0, egui::Color32::from_rgb(100, 200, 255)),
+                        egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(100, 200, 255)),
                         egui::StrokeKind::Outside,
                     );
                 }
             }
-            if response.drag_stopped_by(egui::PointerButton::Secondary) {
+            if response.drag_stopped_by(egui::PointerButton::Primary) {
                 if let Some(pos) = pointer_pos {
                     let end = transform.screen_to_world(pos);
                     let min_x = start.x.min(end.x);
                     let min_y = start.y.min(end.y);
                     let max_x = start.x.max(end.x);
                     let max_y = start.y.max(end.y);
-                    // Select all decor items within the rectangle
-                    state.selected_decor_set.clear();
+                    // Select all decor items within the rectangle (shift adds to the selection)
+                    if !shift_held {
+                        state.selected_decor_set.clear();
+                    } else if let Some(di) = state.selected_decor {
+                        state.selected_decor_set.insert(di);
+                    }
                     if let Some(ref sel_id) = state.selected_room {
                         if let Some(rl) = render_layout.room_by_id(sel_id) {
                             if let Some(room) = dungeon.graph.room_by_id(sel_id) {
@@ -499,9 +562,7 @@ pub fn decor_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut DecorVie
                             }
                         }
                     }
-                    if let Some(&first) = state.selected_decor_set.iter().next() {
-                        state.selected_decor = Some(first);
-                    }
+                    state.selected_decor = state.selected_decor_set.iter().copied().min();
                 }
                 state.drag_select_start = None;
             }
@@ -514,7 +575,7 @@ pub fn decor_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut DecorVie
             painter.circle_stroke(
                 pos,
                 8.0,
-                egui::Stroke::new(1.5, egui::Color32::from_rgb(100, 255, 100)),
+                egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(100, 255, 100)),
             );
             painter.text(
                 pos + egui::vec2(12.0, -12.0),
@@ -604,7 +665,7 @@ pub fn decor_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Decor
                 let frame = if is_active {
                     egui::Frame::NONE
                         .inner_margin(6.0)
-                        .stroke(egui::Stroke::new(1.5, egui::Color32::from_rgb(100, 255, 100)))
+                        .stroke(egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(100, 255, 100)))
                         .corner_radius(4.0)
                         .fill(egui::Color32::from_rgba_unmultiplied(100, 255, 100, 15))
                 } else {
@@ -646,7 +707,7 @@ pub fn decor_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Decor
                     ui.painter().rect_stroke(
                         resp.rect,
                         4.0,
-                        egui::Stroke::new(1.0, egui::Color32::from_rgb(100, 180, 255)),
+                        egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(100, 180, 255)),
                         egui::StrokeKind::Middle,
                     );
                 }
@@ -712,12 +773,13 @@ pub fn decor_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Decor
                     .collect())
                 .unwrap_or_default();
 
+            let selection = state.decor_selection();
             for (di, _id, dt, _dx, _dy) in &decor_info {
-                let is_sel = state.selected_decor == Some(*di);
+                let is_sel = selection.contains(di);
                 let frame = if is_sel {
                     egui::Frame::NONE
                         .inner_margin(4.0)
-                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(255, 200, 50)))
+                        .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(255, 200, 50)))
                         .corner_radius(3.0)
                 } else {
                     egui::Frame::NONE.inner_margin(4.0)
@@ -725,7 +787,11 @@ pub fn decor_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Decor
                 frame.show(ui, |ui| {
                     ui.horizontal(|ui| {
                         if ui.selectable_label(is_sel, dt.label()).clicked() {
-                            state.selected_decor = Some(*di);
+                            if ui.input(|i| i.modifiers.shift) {
+                                state.toggle_decor(*di);
+                            } else {
+                                state.select_decor_only(*di);
+                            }
                         }
                         if ui.small_button("X").clicked() {
                             remove_idx = Some(*di);
@@ -738,18 +804,25 @@ pub fn decor_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Decor
                 if let Some(room) = dungeon.graph.room_by_id_mut(sel_room_id) {
                     room.decor.remove(idx);
                 }
-                if state.selected_decor == Some(idx) {
-                    state.selected_decor = None;
-                } else if let Some(sel) = state.selected_decor {
-                    if sel > idx {
-                        state.selected_decor = Some(sel - 1);
-                    }
-                }
+                let shift_down = |i: usize| if i > idx { Some(i - 1) } else if i == idx { None } else { Some(i) };
+                state.selected_decor = state.selected_decor.and_then(shift_down);
+                state.selected_decor_set = state.selected_decor_set.iter().filter_map(|&i| shift_down(i)).collect();
             }
         }
 
-        // Selected decor properties
-        if let Some(sel_idx) = state.selected_decor {
+        // Properties of the whole selection, or of the single selected item
+        let sel_all = state.decor_selection();
+        if sel_all.len() > 1 {
+            ui.add_space(8.0);
+            ui.separator();
+            ui.label(format!("Properties ({} selected):", sel_all.len()));
+            if let Some(room) = dungeon.graph.room_by_id_mut(sel_room_id) {
+                let items: Vec<usize> = sel_all.into_iter().filter(|&i| i < room.decor.len()).collect();
+                if !items.is_empty() {
+                    multi_decor_properties(ui, room, &items, &mut state.decor_search);
+                }
+            }
+        } else if let Some(sel_idx) = state.selected_decor {
             ui.add_space(8.0);
             ui.separator();
             ui.label("Properties:");
@@ -942,6 +1015,125 @@ pub fn decor_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Decor
     }
 }
 
+/// The value shared by every item, or `None` when they differ.
+fn common_value<T: PartialEq + Copy>(mut vals: impl Iterator<Item = T>) -> Option<T> {
+    let first = vals.next()?;
+    vals.all(|v| v == first).then_some(first)
+}
+
+/// Property editor applying to every selected decor item at once. Controls show the
+/// shared value, or "Mixed" when the selection disagrees; editing one writes it to all.
+fn multi_decor_properties(ui: &mut egui::Ui, room: &mut Room, items: &[usize], search: &mut String) {
+    let common_type = common_value(items.iter().map(|&i| room.decor[i].decor_type));
+    ui.horizontal(|ui| {
+        ui.label("Type:");
+        let mut chosen = None;
+        egui::ComboBox::from_id_salt("decor_multi_type")
+            .selected_text(common_type.map(|t| t.label()).unwrap_or("Mixed"))
+            .width(110.0)
+            .show_ui(ui, |ui| {
+                ui.add(egui::TextEdit::singleline(search).hint_text("Search...").desired_width(100.0));
+                let filter = search.to_lowercase();
+                egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+                    for dt in DecorType::ALL {
+                        if !filter.is_empty() && !dt.label().to_lowercase().contains(&filter) {
+                            continue;
+                        }
+                        if ui.selectable_label(common_type == Some(dt), dt.label()).clicked() {
+                            chosen = Some(dt);
+                            search.clear();
+                        }
+                    }
+                });
+            });
+        if let Some(dt) = chosen {
+            for &i in items {
+                room.decor[i].decor_type = dt;
+            }
+        }
+    });
+
+    ui.horizontal(|ui| {
+        ui.label("Nudge:");
+        let step = 0.25;
+        let mut d = (0.0f32, 0.0f32);
+        if ui.small_button("\u{2190}").clicked() { d.0 -= step; }
+        if ui.small_button("\u{2192}").clicked() { d.0 += step; }
+        if ui.small_button("\u{2191}").clicked() { d.1 -= step; }
+        if ui.small_button("\u{2193}").clicked() { d.1 += step; }
+        if d != (0.0, 0.0) {
+            for &i in items {
+                room.decor[i].x += d.0;
+                room.decor[i].y += d.1;
+            }
+        }
+    }).response.on_hover_text("Move the whole selection by a quarter cell (or drag it on the map)");
+
+    let common_rot = common_value(items.iter().map(|&i| room.decor[i].rotation));
+    let mut rot = common_rot.unwrap_or(0.0);
+    let rot_label = if common_rot.is_some() { "Rotation" } else { "Rotation (mixed)" };
+    if ui.add(egui::Slider::new(&mut rot, 0.0..=360.0).text(rot_label)).changed() {
+        for &i in items {
+            room.decor[i].rotation = rot;
+        }
+    }
+
+    ui.horizontal(|ui| {
+        ui.label("W");
+        let common_w = common_value(items.iter().map(|&i| room.decor[i].scale_x));
+        let mut w = common_w.unwrap_or(1.0);
+        if ui.add(egui::DragValue::new(&mut w).speed(0.05).range(0.01..=f32::MAX)).changed() {
+            for &i in items {
+                room.decor[i].scale_x = w;
+            }
+        }
+        ui.label("H");
+        let common_h = common_value(items.iter().map(|&i| room.decor[i].scale_y));
+        let mut h = common_h.unwrap_or(1.0);
+        if ui.add(egui::DragValue::new(&mut h).speed(0.05).range(0.01..=f32::MAX)).changed() {
+            for &i in items {
+                room.decor[i].scale_y = h;
+            }
+        }
+        if common_w.is_none() || common_h.is_none() {
+            ui.label("(mixed)");
+        }
+    });
+
+    let common_cover = common_value(items.iter().map(|&i| room.decor[i].cover));
+    let common_default = common_value(items.iter().map(|&i| room.decor[i].decor_type.default_cover()));
+    ui.horizontal(|ui| {
+        ui.label("Cover:");
+        let default_text = match common_default {
+            Some(k) => format!("Default ({})", k.label()),
+            None => "Default (per type)".to_string(),
+        };
+        let text = match common_cover {
+            Some(None) => default_text.clone(),
+            Some(Some(k)) => k.label().to_string(),
+            None => "Mixed".to_string(),
+        };
+        let mut chosen: Option<Option<CoverKind>> = None;
+        egui::ComboBox::from_id_salt("decor_multi_cover")
+            .selected_text(text)
+            .show_ui(ui, |ui| {
+                if ui.selectable_label(common_cover == Some(None), default_text).clicked() {
+                    chosen = Some(None);
+                }
+                for k in CoverKind::ALL {
+                    if ui.selectable_label(common_cover == Some(Some(k)), k.label()).clicked() {
+                        chosen = Some(Some(k));
+                    }
+                }
+            });
+        if let Some(c) = chosen {
+            for &i in items {
+                room.decor[i].cover = c;
+            }
+        }
+    }).response.on_hover_text("Most cover these objects can grant; Full also blocks light");
+}
+
 /// Fuzzy-searchable dropdown for DecorType selection.
 fn decor_type_combo(ui: &mut egui::Ui, id: &str, value: &mut DecorType, search: &mut String) {
     egui::ComboBox::from_id_salt(id)
@@ -1031,4 +1223,45 @@ fn light_extra_controls(ui: &mut egui::Ui, light: &mut crate::model::LightSource
                 });
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selection_combines_set_and_primary_without_duplicates() {
+        let mut state = DecorViewState::default();
+        state.selected_decor_set.extend([2, 0]);
+        state.selected_decor = Some(2);
+        assert_eq!(state.decor_selection(), vec![0, 2]);
+
+        state.selected_decor = Some(5);
+        assert_eq!(state.decor_selection(), vec![0, 2, 5]);
+    }
+
+    #[test]
+    fn toggle_adds_and_removes_including_the_primary_item() {
+        let mut state = DecorViewState::default();
+        state.select_decor_only(3);
+        state.toggle_decor(1);
+        assert_eq!(state.decor_selection(), vec![1, 3]);
+
+        // Toggling the primary item off leaves the rest selected
+        state.toggle_decor(3);
+        assert_eq!(state.decor_selection(), vec![1]);
+        assert_eq!(state.selected_decor, Some(1));
+
+        state.toggle_decor(1);
+        assert!(state.decor_selection().is_empty());
+        assert_eq!(state.selected_decor, None);
+    }
+
+    #[test]
+    fn select_only_replaces_a_multi_selection() {
+        let mut state = DecorViewState::default();
+        state.selected_decor_set.extend([0, 1, 2]);
+        state.select_decor_only(4);
+        assert_eq!(state.decor_selection(), vec![4]);
+    }
 }

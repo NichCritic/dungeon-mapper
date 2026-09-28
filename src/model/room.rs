@@ -45,7 +45,13 @@ pub struct Room {
     pub id: String,
     pub label: String,
     pub tags: Vec<RoomTag>,
-    pub notes: String,
+    /// One-line preview of this room's note, derived from the note vault on load
+    /// and save. Not authored here — the note itself is a Markdown file in
+    /// `<save name>.notes/`. Kept on the room so map renderers can print it
+    /// without reaching into the vault. Legacy saves store full note text here;
+    /// the vault migrates that into a file the first time it sees it.
+    #[serde(default, rename = "notes")]
+    pub note_excerpt: String,
     pub size_hint: SizeHint,
     /// Explicit grid width (overrides size_hint if set)
     #[serde(default)]
@@ -153,10 +159,12 @@ pub enum DecorType {
     Crack,
     Stream,
     Pool,
+    Clouds,
+    Darkness,
 }
 
 impl DecorType {
-    pub const ALL: [DecorType; 31] = [
+    pub const ALL: [DecorType; 33] = [
         DecorType::Table, DecorType::Chair, DecorType::Bench,
         DecorType::Chest, DecorType::Barrel, DecorType::Crate,
         DecorType::Pillar, DecorType::StairsUp, DecorType::StairsDown,
@@ -167,6 +175,7 @@ impl DecorType {
         DecorType::Bones, DecorType::Web, DecorType::Door, DecorType::Gate,
         DecorType::OfferingMouth, DecorType::Vines, DecorType::Scales,
         DecorType::Crack, DecorType::Stream, DecorType::Pool,
+        DecorType::Clouds, DecorType::Darkness,
     ];
 
     /// Cover an object of this type grants by default (DM can override per item).
@@ -206,6 +215,8 @@ impl DecorType {
             DecorType::Rubble => (0.9, 0.9),
             DecorType::Gate => (0.85, 0.75),
             DecorType::Scales => (0.85, 0.95),
+            DecorType::Clouds => (0.9, 0.8),
+            DecorType::Darkness => (0.8, 0.8),
             _ => (0.6, 0.6),
         }
     }
@@ -243,6 +254,8 @@ impl DecorType {
             DecorType::Crack => "Crack",
             DecorType::Stream => "Stream",
             DecorType::Pool => "Pool",
+            DecorType::Clouds => "Clouds",
+            DecorType::Darkness => "Darkness",
         }
     }
 }
@@ -533,7 +546,7 @@ impl Room {
             id: uuid::Uuid::new_v4().to_string(),
             label,
             tags: Vec::new(),
-            notes: String::new(),
+            note_excerpt: String::new(),
             size_hint: SizeHint::Medium,
             grid_width: None,
             grid_height: None,
@@ -578,7 +591,7 @@ mod tests {
         assert_eq!(room.size_hint, SizeHint::Medium);
         assert!(room.cave_data.is_none());
         assert!(room.tags.is_empty());
-        assert!(room.notes.is_empty());
+        assert!(room.note_excerpt.is_empty());
         assert_eq!(room.grid_width, None);
         assert_eq!(room.grid_height, None);
         assert_eq!(room.shape, RoomShape::default());

@@ -6,6 +6,7 @@ mod data;
 mod history;
 mod io;
 mod model;
+mod notes;
 mod presentation;
 mod render;
 mod server;

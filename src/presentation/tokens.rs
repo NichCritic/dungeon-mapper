@@ -192,7 +192,7 @@ pub fn render_tokens(
             let br = (radius * 0.42).clamp(5.0, 14.0).min(radius.max(5.0));
             let bpos = rect.right_top() + egui::vec2(-br * 0.7, br * 0.7);
             painter.circle_filled(bpos, br, egui::Color32::from_rgb(20, 20, 20));
-            painter.circle_stroke(bpos, br, egui::Stroke::new(1.0, info.ring));
+            painter.circle_stroke(bpos, br, egui::Stroke::new(1.0_f32, info.ring));
             painter.text(bpos, egui::Align2::CENTER_CENTER, n.to_string(),
                 egui::FontId::proportional(br * 1.3), egui::Color32::WHITE);
         }

@@ -1187,13 +1187,13 @@ fn draw_infinite_grid(painter: &egui::Painter, transform: &ViewTransform, canvas
         let color = if x % 5 == 0 { heavy } else { light };
         let from = transform.world_to_screen(egui::pos2(grid_to_world(x), grid_to_world(min_gy)));
         let to = transform.world_to_screen(egui::pos2(grid_to_world(x), grid_to_world(max_gy)));
-        painter.line_segment([from, to], egui::Stroke::new(1.0, color));
+        painter.line_segment([from, to], egui::Stroke::new(1.0_f32, color));
     }
     for y in min_gy..=max_gy {
         let color = if y % 5 == 0 { heavy } else { light };
         let from = transform.world_to_screen(egui::pos2(grid_to_world(min_gx), grid_to_world(y)));
         let to = transform.world_to_screen(egui::pos2(grid_to_world(max_gx), grid_to_world(y)));
-        painter.line_segment([from, to], egui::Stroke::new(1.0, color));
+        painter.line_segment([from, to], egui::Stroke::new(1.0_f32, color));
     }
 }
 
@@ -1236,11 +1236,11 @@ fn draw_groups_spatial(
 
         if group.is_containment() {
             // Solid border for containment groups
-            let stroke = egui::Stroke::new(2.0, border_color);
+            let stroke = egui::Stroke::new(2.0_f32, border_color);
             painter.rect_stroke(rect, 0.0, stroke, egui::StrokeKind::Middle);
         } else {
             // Dashed border for constraint groups
-            let stroke = egui::Stroke::new(1.5, border_color);
+            let stroke = egui::Stroke::new(1.5_f32, border_color);
             draw_dashed_line(painter, egui::pos2(rect.min.x, rect.min.y), egui::pos2(rect.max.x, rect.min.y), stroke, 6.0, 3.0);
             draw_dashed_line(painter, egui::pos2(rect.max.x, rect.min.y), egui::pos2(rect.max.x, rect.max.y), stroke, 6.0, 3.0);
             draw_dashed_line(painter, egui::pos2(rect.max.x, rect.max.y), egui::pos2(rect.min.x, rect.max.y), stroke, 6.0, 3.0);
@@ -1306,7 +1306,7 @@ fn draw_bounds(painter: &egui::Painter, transform: &ViewTransform, layout: &Spat
             grid_to_world(b.y + b.height as i32),
         ));
 
-        let stroke = egui::Stroke::new(2.0, color);
+        let stroke = egui::Stroke::new(2.0_f32, color);
         let dash = 8.0;
         let gap = 4.0;
 
@@ -1455,11 +1455,11 @@ fn draw_waypoint_handles(
             painter.add(egui::Shape::convex_polygon(
                 points,
                 fill,
-                egui::Stroke::new(1.5, stroke_color),
+                egui::Stroke::new(1.5_f32, stroke_color),
             ));
         } else {
             // Circle for mid-waypoints
-            painter.circle(screen, handle_r, fill, egui::Stroke::new(1.5, stroke_color));
+            painter.circle(screen, handle_r, fill, egui::Stroke::new(1.5_f32, stroke_color));
         }
     }
 }
@@ -1602,7 +1602,7 @@ fn draw_exit_handles(
         painter.add(egui::Shape::convex_polygon(
             points,
             fill,
-            egui::Stroke::new(1.5, stroke_color),
+            egui::Stroke::new(1.5_f32, stroke_color),
         ));
     }
 }
@@ -1667,7 +1667,7 @@ fn draw_rooms(
             wall_fill = dim_color(wall_fill, dim);
             stroke_color = dim_color(border_color, dim);
         }
-        let stroke = egui::Stroke::new(2.0, stroke_color);
+        let stroke = egui::Stroke::new(2.0_f32, stroke_color);
 
         match shape {
             RoomShape::Circle => {
@@ -1698,7 +1698,7 @@ fn draw_rooms(
                             }
                         }
                         // Draw baked marching squares contour
-                        let contour_stroke = egui::Stroke::new(1.5, egui::Color32::from_rgb(40, 40, 40));
+                        let contour_stroke = egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(40, 40, 40));
                         for &(x1, y1, x2, y2) in &cave.contour_segments {
                             let s1 = transform.world_to_screen(egui::pos2(x1, y1));
                             let s2 = transform.world_to_screen(egui::pos2(x2, y2));
@@ -1713,9 +1713,9 @@ fn draw_rooms(
                 }
                 // AABB border — highlighted when in cave edit mode
                 let aabb_stroke = if is_selected && state.cave_edit_mode {
-                    egui::Stroke::new(2.0, egui::Color32::from_rgb(80, 180, 255))
+                    egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(80, 180, 255))
                 } else {
-                    egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(60, 60, 60, 80))
+                    egui::Stroke::new(1.0_f32, egui::Color32::from_rgba_unmultiplied(60, 60, 60, 80))
                 };
                 painter.rect_stroke(rect, 0.0, aabb_stroke, egui::StrokeKind::Middle);
             }
@@ -1727,7 +1727,7 @@ fn draw_rooms(
 
         // Grid lines on all rooms
         {
-            let grid_stroke = egui::Stroke::new(0.5, egui::Color32::from_rgba_unmultiplied(80, 80, 80, 60));
+            let grid_stroke = egui::Stroke::new(0.5_f32, egui::Color32::from_rgba_unmultiplied(80, 80, 80, 60));
             for ly in 1..rl.height as i32 {
                 let y1 = transform.world_to_screen(egui::pos2(grid_to_world(rl.x), grid_to_world(rl.y + ly)));
                 let y2 = transform.world_to_screen(egui::pos2(grid_to_world(rl.x + rl.width as i32), grid_to_world(rl.y + ly)));
@@ -1793,11 +1793,11 @@ fn draw_rooms(
                     .is_some_and(|(rid, idx)| rid == &rl.room_id && *idx == si);
                 if is_sel_section {
                     painter.rect_stroke(sec_rect, 0.0,
-                        egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 200, 50)),
+                        egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(255, 200, 50)),
                         egui::StrokeKind::Middle);
                 } else if !is_water {
                     painter.rect_stroke(sec_rect, 0.0,
-                        egui::Stroke::new(1.5, egui::Color32::from_rgb(80, 80, 80)),
+                        egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(80, 80, 80)),
                         egui::StrokeKind::Middle);
                 }
 
@@ -1806,7 +1806,7 @@ fn draw_rooms(
                     let tick_len = 3.0 * transform.zoom;
                     let spacing = 8.0 * transform.zoom;
                     let tick_color = egui::Color32::from_rgb(80, 80, 80);
-                    let tick_stroke = egui::Stroke::new(1.0, tick_color);
+                    let tick_stroke = egui::Stroke::new(1.0_f32, tick_color);
 
                     // Top/bottom ticks
                     let mut tx = sec_rect.min.x + spacing;
@@ -1841,7 +1841,7 @@ fn draw_rooms(
                 // Steps: draw parallel lines
                 if section.elevation == ElevationType::Steps {
                     let step_count = 4;
-                    let step_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(80, 80, 80));
+                    let step_stroke = egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(80, 80, 80));
                     if sec_rect.width() >= sec_rect.height() {
                         for i in 1..step_count {
                             let lx = sec_rect.min.x + (i as f32 / step_count as f32) * sec_rect.width();
@@ -1865,12 +1865,12 @@ fn draw_rooms(
                 if section.elevation == ElevationType::BottomlessPit {
                     let inset = 3.0 * transform.zoom;
                     let inset_rect = sec_rect.shrink(inset);
-                    painter.rect_stroke(inset_rect, 0.0, egui::Stroke::new(1.0, egui::Color32::from_rgb(80, 80, 80)), egui::StrokeKind::Middle);
+                    painter.rect_stroke(inset_rect, 0.0, egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(80, 80, 80)), egui::StrokeKind::Middle);
                 }
 
                 // Hole: diagonal cross
                 if section.elevation == ElevationType::Hole {
-                    let cross_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(80, 80, 80));
+                    let cross_stroke = egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(80, 80, 80));
                     painter.line_segment([sec_rect.left_top(), sec_rect.right_bottom()], cross_stroke);
                     painter.line_segment([sec_rect.right_top(), sec_rect.left_bottom()], cross_stroke);
                 }
@@ -1906,7 +1906,7 @@ fn draw_rooms(
                 // Water: wavy lines
                 if is_water {
                     let wave_color = egui::Color32::from_rgba_unmultiplied(60, 100, 170, 140);
-                    let wave_stroke = egui::Stroke::new(0.8, wave_color);
+                    let wave_stroke = egui::Stroke::new(0.8_f32, wave_color);
                     let wave_count = ((sec_rect.height() / (20.0 * transform.zoom)).max(2.0)) as i32;
                     for i in 1..wave_count {
                         let base_y = sec_rect.min.y + (i as f32 / wave_count as f32) * sec_rect.height();
@@ -1925,7 +1925,7 @@ fn draw_rooms(
                     }
                     // Blue-tinted border
                     painter.rect_stroke(sec_rect, 0.0,
-                        egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(60, 100, 170, 200)),
+                        egui::Stroke::new(1.0_f32, egui::Color32::from_rgba_unmultiplied(60, 100, 170, 200)),
                         egui::StrokeKind::Middle);
                 }
 
@@ -2025,11 +2025,11 @@ fn draw_doors(
                 ConnectionType::Open | ConnectionType::Flush | ConnectionType::Merge => {} // already skipped above
                 ConnectionType::Door => {
                     painter.rect_filled(door_rect, 0.0, white);
-                    painter.rect_stroke(door_rect, 0.0, egui::Stroke::new(1.5, dark), egui::StrokeKind::Middle);
+                    painter.rect_stroke(door_rect, 0.0, egui::Stroke::new(1.5_f32, dark), egui::StrokeKind::Middle);
                 }
                 ConnectionType::Locked => {
                     painter.rect_filled(door_rect, 0.0, white);
-                    painter.rect_stroke(door_rect, 0.0, egui::Stroke::new(1.5, dark), egui::StrokeKind::Middle);
+                    painter.rect_stroke(door_rect, 0.0, egui::Stroke::new(1.5_f32, dark), egui::StrokeKind::Middle);
                     // Small filled circle in center (lock indicator)
                     let dot_r = door_rect.width().min(door_rect.height()) * 0.2;
                     painter.circle_filled(door_rect.center(), dot_r, dark);
@@ -2046,7 +2046,7 @@ fn draw_doors(
                 }
                 ConnectionType::OneWay => {
                     painter.rect_filled(door_rect, 0.0, white);
-                    painter.rect_stroke(door_rect, 0.0, egui::Stroke::new(1.5, dark), egui::StrokeKind::Middle);
+                    painter.rect_stroke(door_rect, 0.0, egui::Stroke::new(1.5_f32, dark), egui::StrokeKind::Middle);
                     // Small arrow in the center
                     let horizontal = door_rect.width() < door_rect.height();
                     let arrow_sz = door_rect.width().min(door_rect.height()) * 0.3;
@@ -2254,10 +2254,11 @@ pub fn spatial_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Spa
                 let tags_str: Vec<_> = room.tags.iter().map(|t| t.label()).collect();
                 ui.label(format!("Tags: {}", tags_str.join(", ")));
             }
-            if !room.notes.is_empty() {
+            if !room.note_excerpt.is_empty() {
                 ui.add_space(4.0);
                 ui.label("Notes:");
-                ui.label(&room.notes);
+                ui.label(&room.note_excerpt);
+                ui.weak("Full note in the drawer below (F9).");
             }
         }
 
@@ -2555,7 +2556,7 @@ fn duplicate_group(dungeon: &mut Dungeon, room_ids: &[String], group_idx: usize)
         if let Some(old_room) = dungeon.graph.room_by_id(old_id).cloned() {
             let mut new_room = Room::new(old_room.label.clone());
             new_room.tags = old_room.tags;
-            new_room.notes = old_room.notes;
+            // The clone is a new room with no note of its own yet.
             new_room.size_hint = old_room.size_hint;
             new_room.grid_width = old_room.grid_width;
             new_room.grid_height = old_room.grid_height;

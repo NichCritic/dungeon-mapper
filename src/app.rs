@@ -25,6 +25,9 @@ fn restart_app() -> ! {
     std::process::exit(0);
 }
 
+/// How long typing must pause before dirty notes are written to their .md files.
+const NOTES_FLUSH_DELAY: std::time::Duration = std::time::Duration::from_millis(1200);
+
 /// Result wrapper for async cloud sync operations.
 enum CloudSyncOp {
     Login(crate::io::cloud_sync::LoginResult),
@@ -134,6 +137,13 @@ pub struct DungeonApp {
     prewarm_hash_changed_at: std::time::Instant,
     /// Skip debounce on next prewarm check (set on map load).
     prewarm_immediate: bool,
+
+    // Session notes
+    /// Markdown notes stored as .md files beside the save file.
+    pub note_vault: crate::notes::NoteVault,
+    pub notes_state: crate::ui::notes_panel::NotesPanelState,
+    /// Debounce: write dirty notes to disk once typing pauses.
+    notes_dirty_since: Option<std::time::Instant>,
 }
 
 impl Default for DungeonApp {
@@ -209,6 +219,9 @@ impl Default for DungeonApp {
             last_prewarm_hash: 0,
             prewarm_hash_changed_at: std::time::Instant::now(),
             prewarm_immediate: false,
+            note_vault: crate::notes::NoteVault::default(),
+            notes_state: crate::ui::notes_panel::NotesPanelState::default(),
+            notes_dirty_since: None,
             last_autosave_hash: initial_hash,
         }
     }
@@ -699,7 +712,62 @@ impl DungeonApp {
                 );
             }
         }
+        crate::ui::notes_panel::note_browser_window(ctx, &mut self.note_vault, &mut self.notes_state);
         self.dispatch_encounter_file_request();
+    }
+
+    /// Reconcile the note vault with the campaign (legacy migration + renames).
+    /// The working dungeon is folded back in first so its rooms are seen.
+    fn sync_notes(&mut self) {
+        let active = self.campaign.active_map;
+        if active < self.campaign.maps.len() {
+            let party = std::mem::take(&mut self.campaign.maps[active].party);
+            self.campaign.maps[active] = self.dungeon.clone();
+            self.campaign.maps[active].party = party;
+        }
+        let mut campaign = std::mem::replace(&mut self.campaign, Campaign::new(String::new()));
+        self.note_vault.sync(&mut campaign);
+        self.campaign = campaign;
+        // Sync rewrites each room's derived note excerpt; pull that into the working copy.
+        self.load_dungeon_from_campaign();
+        self.note_vault.flush();
+    }
+
+    /// Which entity the notes drawer should show notes for right now.
+    fn note_context(&self) -> crate::ui::notes_panel::NoteContext {
+        use crate::notes::NoteBind;
+        use crate::ui::notes_panel::NoteContext;
+
+        let selected = if self.presenting {
+            self.presentation_view_state.selected_room.clone()
+        } else {
+            match self.active_tab {
+                Tab::Spatial => self.spatial_state.selected_room.clone(),
+                Tab::Decor => self.decor_state.selected_room.clone(),
+                Tab::Encounters => self.encounters_state.selected_room.clone(),
+                Tab::Graph => {
+                    let rooms = &self.graph_state.selection.rooms;
+                    (rooms.len() == 1).then(|| rooms.iter().next().cloned()).flatten()
+                }
+                Tab::Styled => None,
+            }
+        };
+
+        let map_folder = Some(self.dungeon.name.clone());
+        match selected.and_then(|id| self.dungeon.graph.room_by_id(&id).map(|r| (id, r.label.clone()))) {
+            Some((id, label)) => NoteContext {
+                bind: Some(NoteBind::Room(id)),
+                title: label,
+                map_folder,
+            },
+            // With nothing selected the drawer falls back to the map's own note,
+            // which is where campaign-wide prep and the session log live.
+            None => NoteContext {
+                bind: Some(NoteBind::Map(self.dungeon.id.clone())),
+                title: self.dungeon.name.clone(),
+                map_folder,
+            },
+        }
     }
 
     fn dispatch_encounter_file_request(&mut self) {
@@ -770,15 +838,20 @@ impl eframe::App for DungeonApp {
                         // Sync snapshot so auto-solve doesn't re-route saved corridors
                         self.last_graph_snapshot = self.graph_hash();
                         self.history.reset(&self.dungeon);
+                        self.note_vault.attach(&path);
                         self.current_file = Some(path);
                         self.last_saved_hash = self.history.committed_hash();
+                        self.sync_notes();
                         // Trigger immediate render cache pre-warming (skip debounce)
                         self.prewarm_immediate = true;
                     }
                     FileOpResult::Loaded(Err(e)) => eprintln!("Load error: {}", e),
                     FileOpResult::Saved(Ok(path)) => {
+                        self.note_vault.attach(&path);
                         self.current_file = Some(path);
                         self.last_saved_hash = self.history.committed_hash();
+                        self.sync_notes();
+                        self.note_vault.flush();
                         if self.update_ready_to_restart {
                             restart_app();
                         }
@@ -1068,6 +1141,11 @@ impl eframe::App for DungeonApp {
             self.annotation_state.viewing = None;
         }
 
+        // Global key: F9 cycles the notes drawer (expanded -> collapsed -> hidden)
+        if ctx.input(|i| i.key_pressed(egui::Key::F9)) {
+            self.notes_state.toggle();
+        }
+
         // Global key: F8 toggles help overlay
         let f8_pressed = ctx.input(|i| i.key_pressed(egui::Key::F8));
         if f8_pressed {
@@ -1096,6 +1174,8 @@ impl eframe::App for DungeonApp {
                         self.player_presentation = None;
                         self.history.reset(&self.dungeon);
                         self.current_file = None;
+                        self.note_vault.reset();
+                        self.notes_state = crate::ui::notes_panel::NotesPanelState::default();
                         self.last_saved_hash = 0;
                         ui.close_menu();
                     }
@@ -1764,6 +1844,31 @@ impl eframe::App for DungeonApp {
                 });
             });
         self.annotation_state.panel_rects.push(sidebar_response.response.rect);
+
+        // Session notes drawer — under the map, inside the sidebar's remaining width.
+        // Declared after the sidebar so the sidebar keeps full height.
+        {
+            let context = self.note_context();
+            crate::ui::notes_panel::notes_drawer(
+                ctx,
+                &mut self.note_vault,
+                &mut self.notes_state,
+                &context,
+            );
+            if self.note_vault.has_unsaved() {
+                let now = std::time::Instant::now();
+                let since = *self.notes_dirty_since.get_or_insert(now);
+                // Typing pauses for a beat, then the .md files hit disk.
+                if now.duration_since(since) >= NOTES_FLUSH_DELAY {
+                    self.note_vault.flush();
+                    self.notes_dirty_since = None;
+                } else {
+                    ctx.request_repaint_after(NOTES_FLUSH_DELAY);
+                }
+            } else {
+                self.notes_dirty_since = None;
+            }
+        }
 
         // Main canvas
         let central_response = egui::CentralPanel::default().show(ctx, |ui| {

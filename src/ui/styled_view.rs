@@ -186,7 +186,7 @@ pub fn styled_view(ui: &mut egui::Ui, dungeon: &Dungeon, state: &mut StyledViewS
         // Draw lower-floor room/corridor silhouettes as dark semi-transparent shapes
         if let Some(floor) = state.current_floor {
             let ghost_fill = egui::Color32::from_rgba_unmultiplied(50, 50, 60, 70);
-            let ghost_stroke = egui::Stroke::new(1.5, egui::Color32::from_rgba_unmultiplied(70, 70, 80, 90));
+            let ghost_stroke = egui::Stroke::new(1.5_f32, egui::Color32::from_rgba_unmultiplied(70, 70, 80, 90));
             // Lower-floor rooms
             for rl in &layout.rooms {
                 if let Some(room) = dungeon.graph.room_by_id(&rl.room_id) {
@@ -305,7 +305,7 @@ pub fn styled_view(ui: &mut egui::Ui, dungeon: &Dungeon, state: &mut StyledViewS
                 painter.rect_stroke(
                     egui::Rect::from_min_max(min, max),
                     0.0,
-                    egui::Stroke::new(2.0, egui::Color32::from_rgb(100, 180, 255)),
+                    egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(100, 180, 255)),
                     egui::StrokeKind::Middle,
                 );
             }
@@ -398,10 +398,10 @@ fn draw_text_overlay(
                     egui::Color32::from_rgb(60, 60, 60),
                 );
 
-                if state.show_notes && !room.notes.is_empty() {
+                if state.show_notes && !room.note_excerpt.is_empty() {
                     let notes_screen = transform.world_to_screen(egui::pos2(cx, cy + 14.0));
                     let notes_font = egui::FontId::monospace(7.0 * transform.zoom);
-                    let notes = truncate_to_fit(painter, &room.notes, &notes_font, max_width);
+                    let notes = truncate_to_fit(painter, &room.note_excerpt, &notes_font, max_width);
                     painter.text(
                         notes_screen,
                         egui::Align2::CENTER_CENTER,
@@ -439,10 +439,10 @@ pub fn styled_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Styl
                 ui.label(format!("Tags: {}", tags_str.join(", ")));
             }
 
-            if !room.notes.is_empty() {
+            if !room.note_excerpt.is_empty() {
                 ui.add_space(4.0);
                 ui.label("Notes:");
-                ui.label(&room.notes);
+                ui.label(&room.note_excerpt);
             }
         }
 

@@ -719,7 +719,12 @@ fn room_properties(ui: &mut egui::Ui, room: &mut Room, focus_label: &mut bool) {
 
     ui.add_space(8.0);
     ui.label("Notes:");
-    ui.text_edit_multiline(&mut room.notes);
+    if room.note_excerpt.is_empty() {
+        ui.weak("None yet \u{2014} write them in the notes drawer below (F9).");
+    } else {
+        ui.weak(&room.note_excerpt);
+        ui.weak("Full note in the drawer below (F9).");
+    }
 
     // Decor section
     ui.add_space(8.0);

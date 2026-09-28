@@ -362,13 +362,13 @@ fn draw_pin(painter: &egui::Painter, base: egui::Pos2, color: egui::Color32) {
     // Stem
     painter.line_segment(
         [base, egui::pos2(base.x, base.y - stem_len + radius * 0.3)],
-        egui::Stroke::new(2.0, color),
+        egui::Stroke::new(2.0_f32, color),
     );
 
     // Circle head
     let head_center = pin_head_center(base);
     painter.circle_filled(head_center, radius, color);
-    painter.circle_stroke(head_center, radius, egui::Stroke::new(1.0, egui::Color32::BLACK));
+    painter.circle_stroke(head_center, radius, egui::Stroke::new(1.0_f32, egui::Color32::BLACK));
 
     // Exclamation mark
     let font = egui::FontId::monospace(radius * 1.2);

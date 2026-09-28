@@ -139,7 +139,7 @@ pub fn render_badges(
         let fill = swatch_color(res.level);
         let ink = if res.level == CoverLevel::Total { egui::Color32::WHITE } else { egui::Color32::BLACK };
         painter.circle_filled(pos, br, fill);
-        painter.circle_stroke(pos, br, egui::Stroke::new(1.0, egui::Color32::BLACK));
+        painter.circle_stroke(pos, br, egui::Stroke::new(1.0_f32, egui::Color32::BLACK));
         painter.text(pos, egui::Align2::CENTER_CENTER, text,
             egui::FontId::proportional(br * 1.4), ink);
     }
@@ -156,7 +156,7 @@ pub fn render_lines(painter: &egui::Painter, t: &ViewTransform, res: &CoverResul
         };
         let pa = t.world_to_screen(egui::pos2(a.0 * GRID_PX, a.1 * GRID_PX));
         let pb = t.world_to_screen(egui::pos2(b.0 * GRID_PX, b.1 * GRID_PX));
-        painter.line_segment([pa, pb], egui::Stroke::new(1.5, color));
+        painter.line_segment([pa, pb], egui::Stroke::new(1.5_f32, color));
     }
 }
 

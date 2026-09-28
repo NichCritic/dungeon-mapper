@@ -328,21 +328,21 @@ pub fn render_vision_rings(painter: &egui::Painter, t: &ViewTransform, map: &Lig
         let c = px(l.center);
         let col = egui::Color32::from_rgba_unmultiplied(l.color[0], l.color[1], l.color[2], 150);
         if l.bright > 0.0 {
-            painter.circle_stroke(c, l.bright * GRID_PX * t.zoom, egui::Stroke::new(1.5, col));
+            painter.circle_stroke(c, l.bright * GRID_PX * t.zoom, egui::Stroke::new(1.5_f32, col));
         }
         if l.dim > l.bright {
-            dashed_circle(painter, c, l.dim * GRID_PX * t.zoom, egui::Stroke::new(1.0, col), 8.0);
+            dashed_circle(painter, c, l.dim * GRID_PX * t.zoom, egui::Stroke::new(1.0_f32, col), 8.0);
         }
     }
     for v in &map.vision {
         let c = px(v.center);
         let col = egui::Color32::from_rgba_unmultiplied(120, 170, 255, 150);
         if v.darkvision > 0.0 {
-            dashed_circle(painter, c, v.darkvision * GRID_PX * t.zoom, egui::Stroke::new(1.0, col), 3.0);
+            dashed_circle(painter, c, v.darkvision * GRID_PX * t.zoom, egui::Stroke::new(1.0_f32, col), 3.0);
         }
         if v.blind_sense > 0.0 {
             let col2 = egui::Color32::from_rgba_unmultiplied(200, 140, 255, 150);
-            dashed_circle(painter, c, v.blind_sense * GRID_PX * t.zoom, egui::Stroke::new(1.0, col2), 3.0);
+            dashed_circle(painter, c, v.blind_sense * GRID_PX * t.zoom, egui::Stroke::new(1.0_f32, col2), 3.0);
         }
     }
 }

@@ -191,7 +191,7 @@ pub fn graph_editor(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut GraphE
                 let screen_src = transform.world_to_screen(src_edge);
                 painter.line_segment(
                     [screen_src, pointer],
-                    egui::Stroke::new(2.0, COLOR_SELECTION),
+                    egui::Stroke::new(2.0_f32, COLOR_SELECTION),
                 );
             }
         }
@@ -210,7 +210,7 @@ pub fn graph_editor(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut GraphE
             painter.rect_stroke(
                 marquee,
                 0.0,
-                egui::Stroke::new(1.0, egui::Color32::from_rgb(100, 150, 255)),
+                egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(100, 150, 255)),
                 egui::StrokeKind::Middle,
             );
         }
@@ -479,7 +479,7 @@ fn handle_interactions(
             for old_room in &clip.rooms {
                 let mut new_room = Room::new(old_room.label.clone());
                 new_room.tags = old_room.tags.clone();
-                new_room.notes = old_room.notes.clone();
+                // The clone is a new room with no note of its own yet.
                 new_room.size_hint = old_room.size_hint;
                 new_room.grid_width = old_room.grid_width;
                 new_room.grid_height = old_room.grid_height;
@@ -719,7 +719,7 @@ fn draw_groups(
         };
 
         let rounding = if is_containment { 4.0 } else { 8.0 };
-        let stroke_width = if is_containment { 2.5 } else { 1.5 };
+        let stroke_width = if is_containment { 2.5_f32 } else { 1.5_f32 };
         painter.rect_filled(rect, rounding, fill);
         painter.rect_stroke(rect, rounding, egui::Stroke::new(stroke_width, border_color), egui::StrokeKind::Middle);
 
@@ -820,27 +820,27 @@ fn draw_connections(
             let has_constraints = edge.connection.min_length.is_some() || edge.connection.max_length.is_some();
 
             let (color, width) = if is_selected {
-                (COLOR_SELECTION, 3.0)
+                (COLOR_SELECTION, 3.0_f32)
             } else if has_constraints {
                 // Subtle amber tint for constrained connections
                 match edge.connection.connection_type {
-                    ConnectionType::Open => (egui::Color32::from_rgb(210, 180, 100), 2.0),
-                    ConnectionType::Door => (egui::Color32::from_rgb(220, 190, 110), 2.0),
-                    ConnectionType::Locked => (egui::Color32::from_rgb(220, 190, 110), 3.0),
-                    ConnectionType::Secret => (egui::Color32::from_rgb(180, 120, 180), 2.0),
-                    ConnectionType::OneWay => (egui::Color32::from_rgb(220, 190, 110), 2.0),
-                    ConnectionType::Flush => (egui::Color32::from_rgb(100, 200, 100), 2.0),
-                    ConnectionType::Merge => (egui::Color32::from_rgb(100, 180, 220), 2.0),
+                    ConnectionType::Open => (egui::Color32::from_rgb(210, 180, 100), 2.0_f32),
+                    ConnectionType::Door => (egui::Color32::from_rgb(220, 190, 110), 2.0_f32),
+                    ConnectionType::Locked => (egui::Color32::from_rgb(220, 190, 110), 3.0_f32),
+                    ConnectionType::Secret => (egui::Color32::from_rgb(180, 120, 180), 2.0_f32),
+                    ConnectionType::OneWay => (egui::Color32::from_rgb(220, 190, 110), 2.0_f32),
+                    ConnectionType::Flush => (egui::Color32::from_rgb(100, 200, 100), 2.0_f32),
+                    ConnectionType::Merge => (egui::Color32::from_rgb(100, 180, 220), 2.0_f32),
                 }
             } else {
                 match edge.connection.connection_type {
-                    ConnectionType::Open => (egui::Color32::from_rgb(180, 180, 180), 2.0),
-                    ConnectionType::Door => (egui::Color32::from_rgb(200, 200, 200), 2.0),
-                    ConnectionType::Locked => (egui::Color32::from_rgb(200, 200, 200), 3.0),
-                    ConnectionType::Secret => (egui::Color32::from_rgb(160, 80, 200), 2.0),
-                    ConnectionType::OneWay => (egui::Color32::from_rgb(200, 200, 200), 2.0),
-                    ConnectionType::Flush => (egui::Color32::from_rgb(80, 180, 80), 2.0),
-                    ConnectionType::Merge => (egui::Color32::from_rgb(80, 160, 200), 2.0),
+                    ConnectionType::Open => (egui::Color32::from_rgb(180, 180, 180), 2.0_f32),
+                    ConnectionType::Door => (egui::Color32::from_rgb(200, 200, 200), 2.0_f32),
+                    ConnectionType::Locked => (egui::Color32::from_rgb(200, 200, 200), 3.0_f32),
+                    ConnectionType::Secret => (egui::Color32::from_rgb(160, 80, 200), 2.0_f32),
+                    ConnectionType::OneWay => (egui::Color32::from_rgb(200, 200, 200), 2.0_f32),
+                    ConnectionType::Flush => (egui::Color32::from_rgb(80, 180, 80), 2.0_f32),
+                    ConnectionType::Merge => (egui::Color32::from_rgb(80, 160, 200), 2.0_f32),
                 }
             };
 
@@ -894,7 +894,7 @@ fn draw_rooms(
             } else {
                 room.primary_color()
             };
-            let border_width = if is_selected { 2.5 } else if is_container { 3.0 } else { 1.5 };
+            let border_width = if is_selected { 2.5_f32 } else if is_container { 3.0_f32 } else { 1.5_f32 };
             painter.rect_stroke(node_rect, 6.0, egui::Stroke::new(border_width, border_color), egui::StrokeKind::Middle);
 
             // Label

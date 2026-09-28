@@ -37,7 +37,7 @@ pub fn help_overlay(
         if let Some(panel_rect) = panel_rects.iter().find(|r| r.contains(pos)) {
             overlay_painter.rect_stroke(
                 *panel_rect, 4.0,
-                egui::Stroke::new(2.0, TOOLTIP_BORDER),
+                egui::Stroke::new(2.0_f32, TOOLTIP_BORDER),
                 egui::StrokeKind::Outside,
             );
         }
@@ -101,7 +101,7 @@ pub fn help_overlay(
         galley.size() + egui::vec2(16.0, 8.0),
     );
     badge_painter.rect_filled(badge_rect, 6.0, TOOLTIP_BG);
-    badge_painter.rect_stroke(badge_rect, 6.0, egui::Stroke::new(1.0, TOOLTIP_BORDER), egui::StrokeKind::Outside);
+    badge_painter.rect_stroke(badge_rect, 6.0, egui::Stroke::new(1.0_f32, TOOLTIP_BORDER), egui::StrokeKind::Outside);
     badge_painter.text(badge_pos, egui::Align2::CENTER_CENTER, badge_text, egui::FontId::proportional(13.0), HEADING_COLOR);
 }
 
@@ -155,7 +155,7 @@ fn draw_help_tooltip(ctx: &egui::Context, pos: egui::Pos2, help: &HelpContent) {
 
     let tooltip_rect = egui::Rect::from_min_size(tl, tooltip_size);
     painter.rect_filled(tooltip_rect, 8.0, TOOLTIP_BG);
-    painter.rect_stroke(tooltip_rect, 8.0, egui::Stroke::new(1.0, TOOLTIP_BORDER), egui::StrokeKind::Outside);
+    painter.rect_stroke(tooltip_rect, 8.0, egui::Stroke::new(1.0_f32, TOOLTIP_BORDER), egui::StrokeKind::Outside);
 
     let mut y = tl.y + padding;
     let x = tl.x + padding;
@@ -195,6 +195,7 @@ fn help_general() -> HelpContent {
             HelpLine::Key("Ctrl+Y", "Redo"),
             HelpLine::Key("F7", "Annotation mode"),
             HelpLine::Key("F8", "Help overlay (this)"),
+            HelpLine::Key("F9", "Notes drawer: expanded / collapsed / hidden"),
         ],
     }
 }
@@ -260,7 +261,9 @@ fn help_canvas(view: &str) -> HelpContent {
                 HelpLine::Key("Click room", "Select room for editing"),
                 HelpLine::Key("Click decor", "Select decor item"),
                 HelpLine::Key("Drag decor", "Move decor item"),
-                HelpLine::Key("Right-drag", "Box-select multiple decor items"),
+                HelpLine::Key("Drag empty space", "Box-select multiple decor items"),
+                HelpLine::Key("Shift+click", "Add/remove an item from the selection"),
+                HelpLine::Key("Drag selected", "Move the whole selection together"),
                 HelpLine::Key("Delete", "Delete selected decor"),
                 HelpLine::Text("Enable 'place mode' in sidebar to click-place new decor."),
                 HelpLine::Blank,
@@ -322,6 +325,7 @@ fn help_sidebar(view: &str) -> HelpContent {
             lines: vec![
                 HelpLine::Text("Select a decor type and use 'Start Placing' to click-place."),
                 HelpLine::Text("Edit selected decor: type, position, rotation, scale."),
+                HelpLine::Text("With several selected, edits apply to all of them at once."),
                 HelpLine::Text("Lighting section: ambient light and room light sources."),
                 HelpLine::Text("Filter by floor."),
             ],

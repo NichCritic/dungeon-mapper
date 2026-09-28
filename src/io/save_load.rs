@@ -4,7 +4,7 @@ use std::sync::mpsc;
 use crate::model::{Campaign, Dungeon};
 
 /// Current save file format version. Increment when the data model changes.
-const CURRENT_VERSION: u32 = 5;
+const CURRENT_VERSION: u32 = 6;
 
 /// Versioned save file envelope (version 2+: campaign-based).
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -78,7 +78,8 @@ fn load_campaign(version: u32, value: &serde_json::Value) -> Result<Campaign, St
         // v2 → v3: added parent_room_id + containment_padding to RoomGroup (both #[serde(default)])
         // v3 → v4: added Dungeon.tokens (#[serde(default)])
         // v4 → v5: decor cover, light pos/dim/carrier, PC sense ranges, session share flags (all defaults)
-        2 | 3 | 4 | 5 => serde_json::from_value(value.clone()).map_err(|e| e.to_string()),
+        // v5 → v6: added Dungeon.id (generated on load) for binding session notes to maps
+        2 | 3 | 4 | 5 | 6 => serde_json::from_value(value.clone()).map_err(|e| e.to_string()),
         v => Err(format!(
             "Save file version {} is newer than this application supports (max: {})",
             v, CURRENT_VERSION
@@ -441,7 +442,7 @@ mod tests {
 
         let json = serialize_versioned(&campaign).unwrap();
         let raw: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(raw["version"], 5);
+        assert_eq!(raw["version"], CURRENT_VERSION);
         let loaded = deserialize_versioned(&json).unwrap();
         assert_eq!(loaded.maps[0].tokens.len(), 2);
         assert_eq!(loaded.maps[0].tokens[0].x, 3.5);
@@ -475,7 +476,7 @@ mod tests {
 
         let json = serialize_versioned(&campaign).unwrap();
         let raw: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(raw["version"], 5);
+        assert_eq!(raw["version"], CURRENT_VERSION);
         let loaded = deserialize_versioned(&json).unwrap();
         assert_eq!(loaded.maps[0].graph.rooms[0].decor[0].cover, Some(CoverKind::Full));
         assert_eq!(loaded.maps[0].light_sources[0].pos, Some((3.5, 4.5)));
@@ -514,6 +515,45 @@ mod tests {
         let result = deserialize_versioned(json);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("newer than this application supports"));
+    }
+
+    #[test]
+    fn test_version_6_map_ids_roundtrip_and_v5_loads() {
+        let mut campaign = Campaign::new("Six".to_string());
+        campaign.add_map("Second".to_string());
+        let ids: Vec<String> = campaign.maps.iter().map(|m| m.id.clone()).collect();
+        assert!(ids.iter().all(|id| !id.is_empty()), "every map gets an id");
+        assert_ne!(ids[0], ids[1], "map ids are distinct");
+
+        let json = serialize_versioned(&campaign).unwrap();
+        let raw: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(raw["version"], CURRENT_VERSION);
+        let loaded = deserialize_versioned(&json).unwrap();
+        assert_eq!(loaded.maps[0].id, ids[0]);
+        assert_eq!(loaded.maps[1].id, ids[1]);
+
+        // A v5 file has no map ids; loading generates fresh, distinct ones.
+        let mut v5: serde_json::Value = serde_json::from_str(&json).unwrap();
+        v5["version"] = serde_json::json!(5);
+        for map in v5["campaign"]["maps"].as_array_mut().unwrap() {
+            map.as_object_mut().unwrap().remove("id");
+        }
+        let old = deserialize_versioned(&v5.to_string()).unwrap();
+        assert!(!old.maps[0].id.is_empty());
+        assert_ne!(old.maps[0].id, old.maps[1].id);
+    }
+
+    #[test]
+    fn test_legacy_room_notes_field_still_round_trips() {
+        // Room.notes was renamed to note_excerpt in v6 but keeps its wire name so
+        // older saves keep loading; the note vault migrates the text out on load.
+        let v5 = r#"{"version":5,"campaign":{"name":"Old","maps":[{"name":"M","graph":{"rooms":[{"id":"r1","label":"Hall","tags":[],"notes":"The dais is cracked.","size_hint":"Medium"}],"connections":[],"graph_positions":{}}}]}}"#;
+        let loaded = deserialize_versioned(v5).unwrap();
+        assert_eq!(loaded.maps[0].graph.rooms[0].note_excerpt, "The dais is cracked.");
+
+        let json = serialize_versioned(&loaded).unwrap();
+        let raw: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(raw["campaign"]["maps"][0]["graph"]["rooms"][0]["notes"], "The dais is cracked.");
     }
 }
 

@@ -253,7 +253,7 @@ pub fn encounters_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Enc
                     painter.circle_stroke(
                         screen,
                         radius_px,
-                        egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(255, 160, 40, 60)),
+                        egui::Stroke::new(1.0_f32, egui::Color32::from_rgba_unmultiplied(255, 160, 40, 60)),
                     );
                 }
                 egui::Color32::from_rgb(255, 160, 40)
@@ -331,7 +331,7 @@ pub fn encounters_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Enc
             painter.rect_stroke(
                 egui::Rect::from_min_max(min, max),
                 0.0,
-                egui::Stroke::new(2.0, egui::Color32::from_rgb(100, 180, 255)),
+                egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(100, 180, 255)),
                 egui::StrokeKind::Middle,
             );
         }

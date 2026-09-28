@@ -1084,8 +1084,8 @@ pub fn render_labels(
             let cy = (rl.y as f32 + rl.height as f32 / 2.0) * GRID_PX;
             renderer.draw_text(&room.label, cx, cy, 10.0, [60, 60, 60, 255]);
 
-            if options.show_notes && !room.notes.is_empty() {
-                renderer.draw_text(&room.notes, cx, cy + 14.0, 7.0, [120, 120, 120, 255]);
+            if options.show_notes && !room.note_excerpt.is_empty() {
+                renderer.draw_text(&room.note_excerpt, cx, cy + 14.0, 7.0, [120, 120, 120, 255]);
             }
         }
     }

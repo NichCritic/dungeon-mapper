@@ -360,6 +360,7 @@ mod tests {
         let enc = Encounter::new("Goblins".to_string(), id1.clone());
 
         Dungeon {
+            id: "test".to_string(),
             name: "test".to_string(),
             graph,
             layout: None,

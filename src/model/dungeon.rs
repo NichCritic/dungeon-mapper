@@ -92,6 +92,9 @@ impl Default for SessionState {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Dungeon {
+    /// Stable identity for the map, used to bind session notes to it across renames.
+    #[serde(default = "new_map_id")]
+    pub id: String,
     pub name: String,
     pub graph: DungeonGraph,
     pub layout: Option<SpatialLayout>,
@@ -125,9 +128,14 @@ pub struct Dungeon {
     pub session: SessionState,
 }
 
+fn new_map_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
 impl Dungeon {
     pub fn new(name: String) -> Self {
         Self {
+            id: new_map_id(),
             name,
             graph: DungeonGraph::new(),
             layout: None,
