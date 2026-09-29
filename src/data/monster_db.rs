@@ -9,19 +9,33 @@ use crate::model::monster::{CustomMonster, Monster, MonsterRef};
 pub struct MonsterDatabase {
     /// All monsters, sorted by name.
     monsters: Vec<Monster>,
+    /// source -> name -> index into `monsters`, so `find` is a hash lookup rather than a
+    /// scan of the whole bestiary (it runs per token per frame).
+    index: HashMap<String, HashMap<String, usize>>,
     /// Base image directory (e.g. `5etools-src/img/`).
     /// Token images live at `{img_dir}/bestiary/tokens/{source}/{name}.webp`.
     pub img_dir: Option<PathBuf>,
-    /// Memoized `token_path` results, so per-frame token rendering never touches the disk.
-    token_cache: std::sync::Mutex<HashMap<(String, String), Option<PathBuf>>>,
+    /// Memoized `token_path` results (source -> name -> path), so per-frame token
+    /// rendering never touches the disk. Nested so lookups borrow instead of allocating.
+    token_cache: std::sync::Mutex<HashMap<String, HashMap<String, Option<PathBuf>>>>,
 }
 
 impl MonsterDatabase {
     /// Create an empty database.
     pub fn empty() -> Self {
+        Self::from_monsters(Vec::new(), None)
+    }
+
+    fn from_monsters(monsters: Vec<Monster>, img_dir: Option<PathBuf>) -> Self {
+        let mut index: HashMap<String, HashMap<String, usize>> = HashMap::new();
+        for (i, m) in monsters.iter().enumerate() {
+            // Keep the first on duplicates, matching the old linear `find`
+            index.entry(m.source.clone()).or_default().entry(m.name.clone()).or_insert(i);
+        }
         Self {
-            monsters: Vec::new(),
-            img_dir: None,
+            monsters,
+            index,
+            img_dir,
             token_cache: std::sync::Mutex::new(HashMap::new()),
         }
     }
@@ -177,11 +191,7 @@ impl MonsterDatabase {
             .map(|p| p.join("img"))
             .filter(|p| p.is_dir());
 
-        Self {
-            monsters,
-            img_dir,
-            token_cache: std::sync::Mutex::new(HashMap::new()),
-        }
+        Self::from_monsters(monsters, img_dir)
     }
 
     #[cfg(test)]
@@ -200,16 +210,16 @@ impl MonsterDatabase {
 
     /// Find a monster by source and name (exact match).
     pub fn find(&self, source: &str, name: &str) -> Option<&Monster> {
-        self.monsters.iter().find(|m| m.source == source && m.name == name)
+        let i = *self.index.get(source)?.get(name)?;
+        self.monsters.get(i)
     }
 
     /// Return the path to a monster's token image if it exists on disk.
     /// Token images are at `{img_dir}/bestiary/tokens/{source}/{name}.webp`.
     pub fn token_path(&self, source: &str, name: &str) -> Option<PathBuf> {
         let img_dir = self.img_dir.as_ref()?;
-        let key = (source.to_string(), name.to_string());
         if let Ok(cache) = self.token_cache.lock() {
-            if let Some(hit) = cache.get(&key) {
+            if let Some(hit) = cache.get(source).and_then(|by_name| by_name.get(name)) {
                 return hit.clone();
             }
         }
@@ -220,7 +230,7 @@ impl MonsterDatabase {
             .join(format!("{}.webp", name_to_token_name(name)));
         let result = if path.is_file() { Some(path) } else { None };
         if let Ok(mut cache) = self.token_cache.lock() {
-            cache.insert(key, result.clone());
+            cache.entry(source.to_string()).or_default().insert(name.to_string(), result.clone());
         }
         result
     }
@@ -591,6 +601,13 @@ mod tests {
         let dragon = dragon.unwrap();
         assert_eq!(dragon.str_score, 30);
         assert_eq!(dragon.cr.cr_string(), "24");
+
+        // The index agrees with a linear scan (first match wins on duplicates)
+        for m in db.all() {
+            let linear = db.all().iter().find(|x| x.source == m.source && x.name == m.name);
+            assert!(std::ptr::eq(db.find(&m.source, &m.name).unwrap(), linear.unwrap()));
+        }
+        assert!(db.find("MM", "No Such Monster").is_none());
     }
 
     #[test]

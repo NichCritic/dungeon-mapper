@@ -1,10 +1,9 @@
 //! The on-demand cover tool: a heatmap of cover from a chosen attacker, or a badge on
 //! each opposing token. Rendering is shared by the DM canvas and the player window.
 
-use std::collections::HashSet;
 
 use crate::model::{CoverLevel, MapToken, TokenKind};
-use crate::util::{ViewTransform, GRID_PX};
+use crate::util::{CellSet, ViewTransform, GRID_PX};
 use super::los::{self, Block, CoverResult, Occluders, Square};
 use super::tokens::{token_screen_rect, TokenInfo};
 
@@ -30,16 +29,47 @@ pub fn heatmap_key(attacker: &Square, occ_hash: u64) -> u64 {
     h.finish()
 }
 
+/// Cached badge results, aligned with the token list they were computed for.
+#[derive(Clone, Debug)]
+pub struct BadgeCache {
+    pub key: u64,
+    pub results: Vec<Option<CoverResult>>,
+}
+
+/// Fingerprint for the badge inputs: occluders (which include creature squares), the
+/// attacker, and each token's square and whether it can be a target.
+pub fn badges_key(attacker: &TokenKind, attacker_sq: &Square, tokens: &[MapToken], infos: &[TokenInfo], occ_hash: u64) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    heatmap_key(attacker_sq, occ_hash).hash(&mut h);
+    attacker.hash(&mut h);
+    for (tok, info) in tokens.iter().zip(infos) {
+        tok.kind.hash(&mut h);
+        tok.x.to_bits().hash(&mut h);
+        tok.y.to_bits().hash(&mut h);
+        info.size.to_bits().hash(&mut h);
+        info.dead.hash(&mut h);
+    }
+    h.finish()
+}
+
 /// Compute cover for every floor cell within [`HEATMAP_RADIUS`] of the attacker.
 pub fn compute_heatmap(
     attacker: &Square,
     attacker_kind: &TokenKind,
     occ: &Occluders,
-    floor: &HashSet<(i32, i32)>,
+    floor: &CellSet,
 ) -> Vec<((i32, i32), CoverLevel)> {
     let (cx, cy) = attacker.center();
     let (acx, acy) = (cx.floor() as i32, cy.floor() as i32);
     let exclude = [attacker_kind.clone()];
+    // Every query's hull spans the attacker and one cell of this box, so geometry
+    // outside it (with a cell of margin) can never matter.
+    let r = HEATMAP_RADIUS as f32 + 1.0;
+    let occ = &occ.restricted_to(
+        attacker.x0.min(acx as f32 - r), attacker.y0.min(acy as f32 - r),
+        attacker.x1.max(acx as f32 + r + 1.0), attacker.y1.max(acy as f32 + r + 1.0),
+    );
     let mut out = Vec::new();
     for gy in (acy - HEATMAP_RADIUS)..=(acy + HEATMAP_RADIUS) {
         for gx in (acx - HEATMAP_RADIUS)..=(acx + HEATMAP_RADIUS) {
@@ -97,7 +127,7 @@ pub fn render_heatmap(
     painter: &egui::Painter,
     t: &ViewTransform,
     cells: &[((i32, i32), CoverLevel)],
-    visible: Option<&HashSet<(i32, i32)>>,
+    visible: Option<&CellSet>,
 ) {
     for ((gx, gy), level) in cells {
         if let Some(v) = visible {

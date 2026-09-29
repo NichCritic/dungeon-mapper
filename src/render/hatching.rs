@@ -1,5 +1,4 @@
-use std::collections::HashSet;
-
+use crate::util::{CellMap, CellSet};
 use crate::model::{ShadingStyle, SpatialLayout};
 use crate::render::traits::MapRenderer;
 use crate::util::GRID_PX;
@@ -15,7 +14,7 @@ pub struct ShadingParams {
 pub fn draw_exterior_shading(
     renderer: &mut dyn MapRenderer,
     layout: &SpatialLayout,
-    floor: &HashSet<(i32, i32)>,
+    floor: &CellSet,
     params: &ShadingParams,
     contour_segments: &[(f32, f32, f32, f32)],
 ) {
@@ -26,7 +25,7 @@ pub fn draw_exterior_shading(
     let radius_px = params.radius * GRID_PX;
 
     // Find boundary cells (floor cells with at least one non-floor neighbor)
-    let mut boundary_cells: HashSet<(i32, i32)> = HashSet::new();
+    let mut boundary_cells: CellSet = CellSet::default();
     for &(fx, fy) in floor {
         for dy in -1..=1 {
             for dx in -1..=1 {
@@ -81,7 +80,7 @@ pub fn draw_exterior_shading(
 /// a different answer.
 struct SeedGrid {
     cell: f32,
-    buckets: std::collections::HashMap<(i32, i32), Vec<u32>>,
+    buckets: CellMap<Vec<u32>>,
     min_cx: i32,
     max_cx: i32,
     min_cy: i32,
@@ -94,8 +93,8 @@ const BOUND_MARGIN: f32 = 0.999;
 impl SeedGrid {
     fn build(seeds: &[(f32, f32, f32)], cell: f32) -> Self {
         let cell = cell.max(1.0);
-        let mut buckets: std::collections::HashMap<(i32, i32), Vec<u32>> =
-            std::collections::HashMap::new();
+        let mut buckets: CellMap<Vec<u32>> =
+            CellMap::default();
         let (mut min_cx, mut max_cx) = (i32::MAX, i32::MIN);
         let (mut min_cy, mut max_cy) = (i32::MAX, i32::MIN);
         for (i, &(x, y, _)) in seeds.iter().enumerate() {
@@ -214,8 +213,8 @@ fn hash_f32(x: f32, y: f32, salt: u32) -> f32 {
 /// Voronoi cell, extending in both directions from the seed.
 fn draw_dyson_hatching(
     renderer: &mut dyn MapRenderer,
-    floor: &HashSet<(i32, i32)>,
-    boundary_cells: &HashSet<(i32, i32)>,
+    floor: &CellSet,
+    boundary_cells: &CellSet,
     radius_px: f32,
     density: f32,
     color: [u8; 4],
@@ -368,7 +367,7 @@ fn draw_dyson_hatching(
     }
 }
 
-fn dist_to_floor(wx: f32, wy: f32, boundary_cells: &HashSet<(i32, i32)>, contour_segments: &[(f32, f32, f32, f32)]) -> f32 {
+fn dist_to_floor(wx: f32, wy: f32, boundary_cells: &CellSet, contour_segments: &[(f32, f32, f32, f32)]) -> f32 {
     let gx = (wx / GRID_PX).floor() as i32;
     let gy = (wy / GRID_PX).floor() as i32;
     let mut min_dist_sq = f32::MAX;
@@ -412,8 +411,8 @@ fn point_to_segment_dist_sq(px: f32, py: f32, x1: f32, y1: f32, x2: f32, y2: f32
 
 fn draw_solid_shading(
     renderer: &mut dyn MapRenderer,
-    floor: &HashSet<(i32, i32)>,
-    boundary_cells: &HashSet<(i32, i32)>,
+    floor: &CellSet,
+    boundary_cells: &CellSet,
     extents: (i32, i32, i32, i32),
     radius_px: f32,
     color: [u8; 4],
@@ -441,8 +440,8 @@ fn draw_solid_shading(
 
 fn draw_stippled_shading(
     renderer: &mut dyn MapRenderer,
-    floor: &HashSet<(i32, i32)>,
-    boundary_cells: &HashSet<(i32, i32)>,
+    floor: &CellSet,
+    boundary_cells: &CellSet,
     extents: (i32, i32, i32, i32),
     radius_px: f32,
     density: f32,

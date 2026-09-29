@@ -1,5 +1,4 @@
-use std::collections::HashSet;
-
+use crate::util::CellSet;
 use crate::model::*;
 use crate::presentation::{PresentationState, PresentationSnapshot, Visibility, VisibilityProvider};
 use crate::presentation::fog::{corridor_visibility, corridor_visibility_generic};
@@ -33,8 +32,8 @@ fn build_visible_floor_set(
     layout: &SpatialLayout,
     graph: &DungeonGraph,
     presentation: &dyn VisibilityProvider,
-) -> HashSet<(i32, i32)> {
-    let mut floor: HashSet<(i32, i32)> = HashSet::new();
+) -> CellSet {
+    let mut floor: CellSet = CellSet::default();
 
     for rl in &layout.rooms {
         let vis = presentation.room_visibility(&rl.room_id);
@@ -357,7 +356,7 @@ fn render_lighting_overlay_generic(
     layout: &SpatialLayout,
     light_sources: &[crate::model::LightSource],
     ambient_light: f32,
-    visible_floor: &HashSet<(i32, i32)>,
+    visible_floor: &CellSet,
 ) {
     for &(fx, fy) in visible_floor {
         let cell_cx = fx as f32 + 0.5;

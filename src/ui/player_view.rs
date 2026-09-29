@@ -5,7 +5,6 @@ use crate::presentation::combat_tracker::CombatantId;
 use crate::presentation::tokens::{self, TokenStyle};
 use crate::presentation::{cover_ui, lighting};
 use crate::render::bg_cache::BackgroundRenderCache;
-use crate::render::recording::replay_commands;
 use crate::render::themed::RenderOptions;
 use crate::ui::canvas_common::{handle_pan_zoom, truncate_to_fit, ViewState};
 use crate::util::{ViewTransform, GRID_PX};
@@ -40,28 +39,8 @@ fn player_input_hash(
     dungeon: &Dungeon,
 ) -> u64 {
     use std::hash::{Hash, Hasher};
-    use std::collections::hash_map::DefaultHasher;
-    let mut h = DefaultHasher::new();
-    layout.rooms.len().hash(&mut h);
-    for rl in &layout.rooms {
-        rl.room_id.hash(&mut h);
-        rl.x.hash(&mut h);
-        rl.y.hash(&mut h);
-        rl.width.hash(&mut h);
-        rl.height.hash(&mut h);
-    }
-    layout.corridors.len().hash(&mut h);
-    for c in &layout.corridors {
-        c.connection_id.hash(&mut h);
-        c.width.hash(&mut h);
-        for wp in &c.waypoints {
-            wp.x.hash(&mut h);
-            wp.y.hash(&mut h);
-        }
-    }
-    theme.wall_color.hash(&mut h);
-    theme.floor_color.hash(&mut h);
-    theme.bg_color.hash(&mut h);
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    crate::render::bg_cache::map_render_hash(&mut h, layout, &dungeon.graph, theme, true);
     for (room_id, vis) in &presentation.room_visibility {
         room_id.hash(&mut h);
         std::mem::discriminant(vis).hash(&mut h);
@@ -136,29 +115,29 @@ pub fn player_viewport(
             show_decor: true,
             show_lighting: !presentation.los_lighting,
         };
-        // Clone data for background thread (PresentationState isn't Clone due to CombatTracker,
-        // so clone just the fields render_player_view needs)
-        let graph = dungeon.graph.clone();
-        let layout_c = layout.clone();
-        let theme = dungeon.theme.clone();
-        let pres_snapshot = crate::presentation::PresentationSnapshot {
-            room_visibility: presentation.room_visibility.clone(),
-            doors_open: presentation.doors_open.clone(),
-        };
-        let lights = dungeon.light_sources.clone();
-        let ambient = dungeon.ambient_light;
-        let cache_ready = state.render_cache.ensure_with(hash, "Player View", move || {
-            let mut recorder = crate::render::recording::RecordingRenderer::new();
-            crate::render::presentation::render_player_view_snapshot(
-                &mut recorder, &graph, &layout_c, &theme, &pres_snapshot, &lights, ambient, &options,
-            );
-            recorder.commands
+        let cache_ready = state.render_cache.ensure_with(hash, "Player View", || {
+            // Clone data for background thread (PresentationState isn't Clone due to CombatTracker,
+            // so clone just the fields render_player_view needs)
+            let graph = dungeon.graph.clone();
+            let layout_c = layout.clone();
+            let theme = dungeon.theme.clone();
+            let pres_snapshot = crate::presentation::PresentationSnapshot {
+                room_visibility: presentation.room_visibility.clone(),
+                doors_open: presentation.doors_open.clone(),
+            };
+            let lights = dungeon.light_sources.clone();
+            let ambient = dungeon.ambient_light;
+            move || {
+                let mut recorder = crate::render::recording::RecordingRenderer::new();
+                crate::render::presentation::render_player_view_snapshot(
+                    &mut recorder, &graph, &layout_c, &theme, &pres_snapshot, &lights, ambient, &options,
+                );
+                recorder.commands
+            }
         });
 
         if cache_ready {
-            if let Some(commands) = state.render_cache.commands() {
-                replay_commands(&painter, &transform, commands);
-            }
+            state.render_cache.paint(&painter, &transform);
         } else {
             let msg = format!("Rendering {}...",
                 state.render_cache.pending_label().unwrap_or("player view"));

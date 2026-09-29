@@ -1,5 +1,4 @@
-use std::collections::HashSet;
-
+use crate::util::CellSet;
 use crate::model::*;
 use crate::render::hatching::{draw_exterior_shading, ShadingParams};
 use crate::render::decor::{draw_decor, DecorPalette, MapRendererSink};
@@ -129,7 +128,7 @@ pub fn render_background(
 pub fn render_exterior_shading(
     renderer: &mut dyn MapRenderer,
     layout: &SpatialLayout,
-    floor: &HashSet<(i32, i32)>,
+    floor: &CellSet,
     theme: &Theme,
     contour_segments: &[(f32, f32, f32, f32)],
 ) {
@@ -376,7 +375,7 @@ pub fn render_corridor_chamfers(
 /// Edges on the boundary of the floor set are skipped (walls handle those).
 pub fn render_grid(
     renderer: &mut dyn MapRenderer,
-    floor: &HashSet<(i32, i32)>,
+    floor: &CellSet,
 ) {
     let grid_color = [80, 80, 80, 180];
 
@@ -599,8 +598,8 @@ pub fn flush_walls_with_layout(
 
 /// Build the set of all cells inside cave room bounding boxes.
 /// Used to prevent corridor walls from double-drawing at cave boundaries.
-pub fn build_cave_cell_set(layout: &SpatialLayout, graph: &DungeonGraph) -> HashSet<(i32, i32)> {
-    let mut cells = HashSet::new();
+pub fn build_cave_cell_set(layout: &SpatialLayout, graph: &DungeonGraph) -> CellSet {
+    let mut cells = CellSet::default();
     for rl in &layout.rooms {
         let is_cave = graph.room_by_id(&rl.room_id)
             .is_some_and(|r| r.shape == RoomShape::Cave && r.cave_data.as_ref().is_some_and(|c| !c.cells.is_empty()));
@@ -619,9 +618,9 @@ pub fn build_cave_cell_set(layout: &SpatialLayout, graph: &DungeonGraph) -> Hash
 pub fn render_corridor_walls(
     renderer: &mut dyn MapRenderer,
     corridor: &CorridorSegment,
-    floor: &HashSet<(i32, i32)>,
+    floor: &CellSet,
     theme: &Theme,
-    cave_cells: &HashSet<(i32, i32)>,
+    cave_cells: &CellSet,
 ) {
     let wall_w = 2.0;
     let cw = corridor.width as i32;
@@ -1092,8 +1091,8 @@ pub fn render_labels(
 }
 
 /// Build the set of all floor cells from room and corridor geometry.
-pub fn build_floor_set(layout: &SpatialLayout, graph: &DungeonGraph) -> HashSet<(i32, i32)> {
-    let mut floor: HashSet<(i32, i32)> = HashSet::new();
+pub fn build_floor_set(layout: &SpatialLayout, graph: &DungeonGraph) -> CellSet {
+    let mut floor: CellSet = CellSet::default();
     for rl in &layout.rooms {
         let room = graph.room_by_id(&rl.room_id);
         let shape = room.map(|r| r.shape).unwrap_or_default();

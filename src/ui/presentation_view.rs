@@ -8,7 +8,6 @@ use crate::ui::encounters_view::SimSide;
 use crate::presentation::dice;
 use crate::presentation::fog;
 use crate::render::presentation::render_dm_overlay;
-use crate::render::recording::replay_commands;
 use crate::render::themed::RenderOptions;
 use crate::ui::canvas_common::{handle_pan_zoom, ViewState, COLOR_PLACEHOLDER_TEXT};
 use crate::ui::window_dock::{dock_window, DockWindow, WindowDock};
@@ -71,36 +70,18 @@ impl Default for PresentationViewState {
     }
 }
 
-pub fn render_cache_hash(layout: &SpatialLayout, theme: &Theme) -> u64 {
-    presentation_input_hash(layout, theme)
+pub fn render_cache_hash(layout: &SpatialLayout, graph: &DungeonGraph, theme: &Theme) -> u64 {
+    presentation_input_hash(layout, graph, theme)
 }
 
 fn presentation_input_hash(
     layout: &SpatialLayout,
+    graph: &DungeonGraph,
     theme: &Theme,
 ) -> u64 {
-    use std::hash::{Hash, Hasher};
-    use std::collections::hash_map::DefaultHasher;
-    let mut h = DefaultHasher::new();
-    layout.rooms.len().hash(&mut h);
-    for rl in &layout.rooms {
-        rl.room_id.hash(&mut h);
-        rl.x.hash(&mut h);
-        rl.y.hash(&mut h);
-        rl.width.hash(&mut h);
-        rl.height.hash(&mut h);
-    }
-    layout.corridors.len().hash(&mut h);
-    for c in &layout.corridors {
-        c.width.hash(&mut h);
-        for wp in &c.waypoints {
-            wp.x.hash(&mut h);
-            wp.y.hash(&mut h);
-        }
-    }
-    theme.wall_color.hash(&mut h);
-    theme.floor_color.hash(&mut h);
-    theme.bg_color.hash(&mut h);
+    use std::hash::Hasher;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    crate::render::bg_cache::map_render_hash(&mut h, layout, graph, theme, true);
     h.finish()
 }
 
@@ -1141,7 +1122,7 @@ pub fn presentation_view(
     };
 
     // Rebuild cached render commands for the full map (DM sees everything)
-    let hash = presentation_input_hash(layout, &dungeon.theme);
+    let hash = presentation_input_hash(layout, &dungeon.graph, &dungeon.theme);
     let options = RenderOptions {
         show_grid: true,
         show_labels: true,
@@ -1155,9 +1136,7 @@ pub fn presentation_view(
     );
 
     if cache_ready {
-        if let Some(commands) = view_state.render_cache.commands() {
-            replay_commands(&painter, &transform, commands);
-        }
+        view_state.render_cache.paint(&painter, &transform);
     } else {
         let msg = format!("Rendering {}...",
             view_state.render_cache.pending_label().unwrap_or("map"));
@@ -1242,6 +1221,7 @@ pub fn presentation_view(
     let mut badge_results: Vec<Option<los::CoverResult>> = Vec::new();
     if presentation.cover_mode == CoverMode::Off || attacker_sq.is_none() {
         presentation.cover_cache = None;
+        presentation.badge_cache = None;
         presentation.cover_badges.clear();
     } else if let (Some(sq), Some(kind)) = (attacker_sq, presentation.cover_attacker.clone()) {
         let occ_hash = los::occluder_hash(&occ);
@@ -1256,10 +1236,21 @@ pub fn presentation_view(
                 if let Some(c) = presentation.cover_cache.as_ref() {
                     cover_ui::render_heatmap(&painter, &transform, &c.cells, None);
                 }
+                presentation.badge_cache = None;
                 presentation.cover_badges.clear();
             }
             CoverMode::Icons => {
-                badge_results = cover_ui::compute_badges(&kind, &sq, &dungeon.tokens, &token_infos, &occ);
+                // Like the heatmap: recompute only when an input changed, and hold the last
+                // result while a token is dragged (unless the token list itself changed).
+                let key = cover_ui::badges_key(&kind, &sq, &dungeon.tokens, &token_infos, occ_hash);
+                let usable = presentation.badge_cache.as_ref()
+                    .filter(|c| c.results.len() == dungeon.tokens.len());
+                let stale = usable.map(|c| c.key != key).unwrap_or(true);
+                if stale && (!dragging || usable.is_none()) {
+                    let results = cover_ui::compute_badges(&kind, &sq, &dungeon.tokens, &token_infos, &occ);
+                    presentation.badge_cache = Some(cover_ui::BadgeCache { key, results });
+                }
+                badge_results = presentation.badge_cache.as_ref().map(|c| c.results.clone()).unwrap_or_default();
                 presentation.cover_badges = dungeon.tokens.iter().zip(&badge_results)
                     .filter_map(|(t, r)| r.as_ref().map(|r| (t.kind.clone(), r.level)))
                     .collect();

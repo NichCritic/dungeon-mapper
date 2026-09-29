@@ -84,6 +84,8 @@ pub struct PresentationState {
     pub light_cache: Option<lighting::LightMap>,
     /// Lazily rebuilt cover heatmap for `cover_attacker`: (input hash, cells).
     pub cover_cache: Option<cover_ui::CoverCache>,
+    /// Lazily recomputed cover badges for `cover_attacker`, one per token.
+    pub badge_cache: Option<cover_ui::BadgeCache>,
     /// Cover of each opposing token from `cover_attacker`, refreshed by the DM canvas
     /// every frame so the player window can draw the badges.
     pub cover_badges: Vec<(crate::model::TokenKind, crate::model::CoverLevel)>,
@@ -146,6 +148,7 @@ impl PresentationState {
             occ_cache: None,
             light_cache: None,
             cover_cache: None,
+            badge_cache: None,
             cover_badges: Vec::new(),
         }
     }

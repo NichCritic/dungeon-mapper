@@ -261,7 +261,7 @@ fn ensure_connectivity(cells: &mut Vec<bool>, w: usize, h: usize, exits: &[(u32,
 pub fn compute_contour_segments(
     rl: &crate::model::RoomLayout,
     cave: &crate::model::CaveData,
-    floor: &std::collections::HashSet<(i32, i32)>,
+    floor: &crate::util::CellSet,
 ) -> Vec<(f32, f32, f32, f32)> {
     use crate::util::GRID_PX;
 

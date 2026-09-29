@@ -98,15 +98,23 @@ pub fn truncate_to_fit(
     if galley.size().x <= max_width {
         return text.to_string();
     }
+    // Width grows with the prefix, so binary search for the longest prefix that fits
+    // (one layout per step instead of one per character).
     let char_indices: Vec<usize> = text.char_indices().map(|(i, _)| i).collect();
-    for &end in char_indices.iter().rev() {
+    let fits = |end: usize| {
         let candidate = format!("{}...", &text[..end]);
-        let g = painter.layout_no_wrap(candidate.clone(), font.clone(), egui::Color32::WHITE);
-        if g.size().x <= max_width {
-            return candidate;
-        }
+        painter.layout_no_wrap(candidate, font.clone(), egui::Color32::WHITE).size().x <= max_width
+    };
+    // Invariant: prefixes ending before char_indices[lo] fit; from char_indices[hi] on they don't.
+    let (mut lo, mut hi) = (0, char_indices.len());
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        if fits(char_indices[mid - 1]) { lo = mid; } else { hi = mid - 1; }
     }
-    "...".to_string()
+    if lo == 0 {
+        return "...".to_string();
+    }
+    format!("{}...", &text[..char_indices[lo - 1]])
 }
 
 /// Draw a filled arrow head pointing from `from` toward `to`.
@@ -201,4 +209,30 @@ pub fn num_input_u16(ui: &mut egui::Ui, value: &mut u16, width: f32) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_to_fit_keeps_longest_prefix_that_fits() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            let painter = ctx.layer_painter(egui::LayerId::background());
+            let font = egui::FontId::proportional(12.0);
+            let width = |s: &str| painter.layout_no_wrap(s.to_string(), font.clone(), egui::Color32::WHITE).size().x;
+            let text = "Hall of the Mountain Kïng";
+            // Naive reference: drop characters from the end until it fits
+            let naive = |max: f32| {
+                if width(text) <= max { return text.to_string(); }
+                let ends: Vec<usize> = text.char_indices().map(|(i, _)| i).collect();
+                ends.iter().rev().map(|&e| format!("{}...", &text[..e])).find(|c| width(c) <= max)
+                    .unwrap_or_else(|| "...".to_string())
+            };
+            for max in [0.0, 5.0, 20.0, 40.0, 60.0, 90.0, 120.0, 1000.0] {
+                assert_eq!(truncate_to_fit(&painter, text, &font, max), naive(max), "max_width {max}");
+            }
+        });
+    }
 }

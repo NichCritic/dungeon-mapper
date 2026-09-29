@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
+use crate::util::{CellMap, CellSet};
+
 use crate::model::*;
 
 /// Compute the floor assignment for a corridor by inheriting from its rooms.
@@ -30,9 +32,9 @@ fn corridor_floor(graph: &DungeonGraph, edge: &StoredEdge) -> FloorAssignment {
 /// Merge per-floor forbidden sets for the given floors into a single set for routing.
 fn merged_forbidden(
     floors: &[i32],
-    per_floor: &HashMap<i32, HashSet<(i32, i32)>>,
-) -> HashSet<(i32, i32)> {
-    let mut merged = HashSet::new();
+    per_floor: &HashMap<i32, CellSet>,
+) -> CellSet {
+    let mut merged = CellSet::default();
     for f in floors {
         if let Some(cells) = per_floor.get(f) {
             merged.extend(cells);
@@ -46,7 +48,7 @@ fn stamp_corridor_floors(
     waypoints: &[GridPos],
     w: i32,
     floors: &[i32],
-    per_floor: &mut HashMap<i32, HashSet<(i32, i32)>>,
+    per_floor: &mut HashMap<i32, CellSet>,
 ) {
     // Collect the cells once, then insert into each floor
     let mut cells = Vec::new();
@@ -76,8 +78,8 @@ fn init_per_floor_forbidden_with_exclusions(
     graph: &DungeonGraph,
     layout: &SpatialLayout,
     exclude_room_ids: &HashSet<String>,
-) -> HashMap<i32, HashSet<(i32, i32)>> {
-    let mut per_floor: HashMap<i32, HashSet<(i32, i32)>> = HashMap::new();
+) -> HashMap<i32, CellSet> {
+    let mut per_floor: HashMap<i32, CellSet> = HashMap::new();
     for rl in &layout.rooms {
         if exclude_room_ids.contains(&rl.room_id) {
             continue;
@@ -663,7 +665,7 @@ fn try_child_parent_exit(
 }
 
 /// Check if a w×w block at position (x,y) (top-left corner) is clear.
-fn block_clear(x: i32, y: i32, w: i32, forbidden: &HashSet<(i32, i32)>) -> bool {
+fn block_clear(x: i32, y: i32, w: i32, forbidden: &CellSet) -> bool {
     for dy in 0..w {
         for dx in 0..w {
             if forbidden.contains(&(x + dx, y + dy)) {
@@ -683,7 +685,7 @@ fn astar_path(
     tx: i32,
     ty: i32,
     w: i32,
-    forbidden: &HashSet<(i32, i32)>,
+    forbidden: &CellSet,
 ) -> Option<Vec<GridPos>> {
     use std::cmp::Reverse;
     use std::collections::BinaryHeap;
@@ -704,9 +706,9 @@ fn astar_path(
         (x - tx).abs() + (y - ty).abs()
     };
 
-    let mut g_score: HashMap<(i32, i32), i32> = HashMap::new();
-    let mut came_from: HashMap<(i32, i32), (i32, i32)> = HashMap::new();
-    let mut closed: HashSet<(i32, i32)> = HashSet::new();
+    let mut g_score: CellMap<i32> = CellMap::default();
+    let mut came_from: CellMap<(i32, i32)> = CellMap::default();
+    let mut closed: CellSet = CellSet::default();
     let mut open: BinaryHeap<Reverse<(i32, (i32, i32))>> = BinaryHeap::new();
 
     g_score.insert(start, 0);
@@ -788,7 +790,7 @@ fn find_best_route(
     src_exits: &[(i32, i32)],
     tgt_exits: &[(i32, i32)],
     w: i32,
-    forbidden: &HashSet<(i32, i32)>,
+    forbidden: &CellSet,
 ) -> Option<Vec<GridPos>> {
     let mut best: Option<Vec<GridPos>> = None;
     let mut best_len = i32::MAX;
@@ -848,7 +850,7 @@ fn find_best_route(
 fn route_through_pinned(
     waypoints: &[GridPos],
     w: i32,
-    forbidden: &HashSet<(i32, i32)>,
+    forbidden: &CellSet,
 ) -> Option<Vec<GridPos>> {
     if waypoints.len() < 2 {
         return None;

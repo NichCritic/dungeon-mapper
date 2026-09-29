@@ -71,7 +71,7 @@ fn violates_group_constraints(
     placed_rooms: &[(String, GridRect)],
 ) -> bool {
     for group in groups {
-        if !group.room_ids.contains(&room_id.to_string()) {
+        if !group.room_ids.iter().any(|id| id == room_id) {
             continue;
         }
         if group.max_width.is_none() && group.max_height.is_none() {
@@ -208,7 +208,7 @@ fn collect_violations(room_id: &str, rect: GridRect, state: &PlacementState, ctx
 
     // Group constraints
     for group in ctx.groups {
-        if !group.room_ids.contains(&room_id.to_string()) {
+        if !group.room_ids.iter().any(|id| id == room_id) {
             continue;
         }
         let mut min_x = rect.x;
@@ -602,17 +602,18 @@ fn try_place_bounded(
         return false;
     }
 
-    // Overlap check excluding the parent room
+    // Overlap check excluding the parent room (looked up once, not per placed rect)
     let g = ctx.gap as i32;
-    let floors = floor.floors();
+    let parent_rects: Vec<GridRect> = state.placed_rooms.iter()
+        .filter(|(id, _)| id == parent_id)
+        .map(|(_, r)| *r)
+        .collect();
     for pr in &state.placed_rects {
-        if !pr.floor.floors().iter().any(|f| floors.contains(f)) {
+        if !pr.floor.shares_floor(&floor) {
             continue;
         }
-        // Find the room_id for this placed rect
-        let is_parent = state.placed_rooms.iter().any(|(id, r)|
-            id == parent_id && r.x == pr.rect.x && r.y == pr.rect.y
-                && r.w == pr.rect.w && r.h == pr.rect.h
+        let is_parent = parent_rects.iter().any(|r|
+            r.x == pr.rect.x && r.y == pr.rect.y && r.w == pr.rect.w && r.h == pr.rect.h
         );
         if is_parent { continue; }
 
@@ -1753,10 +1754,9 @@ mod tests {
 /// Check if a rect overlaps any placed rect that shares at least one floor.
 fn overlaps_any(rect: GridRect, floor: FloorAssignment, placed: &[PlacedRect], gap: u32) -> bool {
     let g = gap as i32;
-    let floors = floor.floors();
     for pr in placed {
         // Skip overlap check if rooms are on entirely different floors
-        if !pr.floor.floors().iter().any(|f| floors.contains(f)) {
+        if !pr.floor.shares_floor(&floor) {
             continue;
         }
         let r = &pr.rect;

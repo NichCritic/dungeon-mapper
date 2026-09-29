@@ -25,6 +25,17 @@ impl FloorAssignment {
     }
 
     /// Returns all floors this room belongs to.
+    /// True if the two assignments have a floor in common (like comparing `floors()`,
+    /// without allocating; the layout solver asks this per candidate position).
+    pub fn shares_floor(&self, other: &FloorAssignment) -> bool {
+        let pair = |f: &FloorAssignment| match *f {
+            FloorAssignment::Single(a) => (a, a),
+            FloorAssignment::Half(a, b) => (a, b),
+        };
+        let ((a0, a1), (b0, b1)) = (pair(self), pair(other));
+        a0 == b0 || a0 == b1 || a1 == b0 || a1 == b1
+    }
+
     pub fn floors(&self) -> Vec<i32> {
         match self {
             FloorAssignment::Single(f) => vec![*f],

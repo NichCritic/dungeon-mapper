@@ -90,7 +90,8 @@ impl SpatialLayout {
     /// later entries appear on top.
     pub fn render_order(&self, graph: &DungeonGraph) -> Vec<usize> {
         let mut order: Vec<usize> = (0..self.rooms.len()).collect();
-        order.sort_by_key(|&i| {
+        // Cached: each key is a room lookup plus a nesting walk, too slow to redo per comparison
+        order.sort_by_cached_key(|&i| {
             let room_id = &self.rooms[i].room_id;
             let floor = graph.room_by_id(room_id)
                 .map(|r| *r.floor.floors().iter().max().unwrap_or(&0))

@@ -3,7 +3,6 @@ use std::hash::{Hash, Hasher};
 use std::collections::HashSet;
 
 use crate::model::*;
-use crate::render::recording::replay_commands;
 use crate::render::themed::RenderOptions;
 use crate::ui::canvas_common::{handle_pan_zoom, truncate_to_fit, ViewState, COLOR_PLACEHOLDER_TEXT};
 use crate::ui::spatial_view::collect_floors;
@@ -49,58 +48,8 @@ pub fn render_cache_hash(layout: &SpatialLayout, graph: &DungeonGraph, theme: &T
 }
 
 fn render_input_hash(layout: &SpatialLayout, graph: &DungeonGraph, theme: &Theme, show_grid: bool, current_floor: Option<i32>) -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    let mut h = DefaultHasher::new();
-    layout.rooms.len().hash(&mut h);
-    for rl in &layout.rooms {
-        rl.room_id.hash(&mut h);
-        rl.x.hash(&mut h);
-        rl.y.hash(&mut h);
-        rl.width.hash(&mut h);
-        rl.height.hash(&mut h);
-        // Hash cave generation counter so cell edits invalidate cache
-        if let Some(room) = graph.room_by_id(&rl.room_id) {
-            if let Some(cave) = &room.cave_data {
-                cave.generation.hash(&mut h);
-            }
-            // Hash sections so changes invalidate cache
-            room.sections.len().hash(&mut h);
-            for s in &room.sections {
-                s.x.to_bits().hash(&mut h);
-                s.y.to_bits().hash(&mut h);
-                s.width.to_bits().hash(&mut h);
-                s.length.to_bits().hash(&mut h);
-                s.height.to_bits().hash(&mut h);
-                std::mem::discriminant(&s.elevation).hash(&mut h);
-            }
-            // Hash decor so changes invalidate cache
-            room.decor.len().hash(&mut h);
-            for d in &room.decor {
-                d.x.to_bits().hash(&mut h);
-                d.y.to_bits().hash(&mut h);
-                d.rotation.to_bits().hash(&mut h);
-                d.scale_x.to_bits().hash(&mut h);
-                d.scale_y.to_bits().hash(&mut h);
-                std::mem::discriminant(&d.decor_type).hash(&mut h);
-            }
-        }
-    }
-    layout.corridors.len().hash(&mut h);
-    for c in &layout.corridors {
-        c.width.hash(&mut h);
-        for wp in &c.waypoints {
-            wp.x.hash(&mut h);
-            wp.y.hash(&mut h);
-        }
-    }
-    theme.wall_color.hash(&mut h);
-    theme.floor_color.hash(&mut h);
-    theme.bg_color.hash(&mut h);
-    (theme.exterior_shading as u8).hash(&mut h);
-    theme.shading_radius.to_bits().hash(&mut h);
-    (theme.shading_style as u8).hash(&mut h);
-    theme.hatching_density.to_bits().hash(&mut h);
-    (theme.corridor_chamfer as u8).hash(&mut h);
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    crate::render::bg_cache::map_render_hash(&mut h, layout, graph, theme, true);
     show_grid.hash(&mut h);
     current_floor.hash(&mut h);
     h.finish()
@@ -165,9 +114,7 @@ pub fn styled_view(ui: &mut egui::Ui, dungeon: &Dungeon, state: &mut StyledViewS
         );
 
         if cache_ready {
-            if let Some(commands) = state.render_cache.commands() {
-                replay_commands(&painter, &transform, commands);
-            }
+            state.render_cache.paint(&painter, &transform);
         } else {
             let msg = format!("Rendering {}...",
                 state.render_cache.pending_label().unwrap_or("map"));

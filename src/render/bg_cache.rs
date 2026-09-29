@@ -1,8 +1,65 @@
 use std::sync::mpsc;
 
 use crate::model::{DungeonGraph, SpatialLayout, Theme};
-use crate::render::recording::{RecordingRenderer, RenderCommand};
+use crate::render::recording::{RecordingRenderer, RenderCommand, ReplayCache};
 use crate::render::themed::RenderOptions;
+
+/// Fingerprint of everything the cached map render reads from the layout, graph and
+/// theme. Text is drawn as a live overlay, so labels and notes are left out. Views
+/// with a live decor overlay pass `include_decor = false` so dragging decor doesn't
+/// trigger rebuilds. Views hash their own extras (grid, floor filter, fog) on top.
+pub fn map_render_hash(
+    h: &mut impl std::hash::Hasher,
+    layout: &SpatialLayout,
+    graph: &DungeonGraph,
+    theme: &Theme,
+    include_decor: bool,
+) {
+    use std::hash::Hash;
+    use crate::util::hash_serde;
+    let rooms: std::collections::HashMap<&str, &crate::model::Room> =
+        graph.rooms.iter().map(|r| (r.id.as_str(), r)).collect();
+    layout.rooms.len().hash(h);
+    for rl in &layout.rooms {
+        rl.room_id.hash(h);
+        (rl.x, rl.y, rl.width, rl.height).hash(h);
+        for wp in &rl.wall_openings {
+            (wp.x, wp.y).hash(h);
+        }
+        let Some(room) = rooms.get(rl.room_id.as_str()) else { continue };
+        hash_serde(h, &room.shape);
+        hash_serde(h, &room.floor);
+        hash_serde(h, &room.environment);
+        hash_serde(h, &room.open_walls);
+        hash_serde(h, &room.sections);
+        // Bumped on every cell edit, so the cells themselves needn't be hashed
+        room.cave_data.as_ref().map(|c| c.generation).hash(h);
+        if include_decor {
+            room.decor.len().hash(h);
+            for d in &room.decor {
+                hash_serde(h, &d.decor_type);
+                hash_serde(h, &d.cover);
+                for v in [d.x, d.y, d.rotation, d.scale_x, d.scale_y] {
+                    v.to_bits().hash(h);
+                }
+            }
+        }
+    }
+    layout.corridors.len().hash(h);
+    for c in &layout.corridors {
+        c.connection_id.hash(h);
+        c.width.hash(h);
+        hash_serde(h, &c.floor);
+        for wp in &c.waypoints {
+            (wp.x, wp.y).hash(h);
+        }
+    }
+    graph.connections.len().hash(h);
+    for e in &graph.connections {
+        hash_serde(h, e);
+    }
+    hash_serde(h, theme);
+}
 
 /// A render cache that builds on a background thread, showing a spinner while loading.
 pub struct BackgroundRenderCache {
@@ -12,6 +69,9 @@ pub struct BackgroundRenderCache {
     current_hash: u64,
     /// Pending background render job.
     pending: Option<PendingRender>,
+    /// Bumped whenever `commands` is replaced, so the replay cache knows to rebuild.
+    generation: u64,
+    replay: ReplayCache,
 }
 
 struct PendingRender {
@@ -26,6 +86,8 @@ impl Default for BackgroundRenderCache {
             commands: None,
             current_hash: 0,
             pending: None,
+            generation: 0,
+            replay: ReplayCache::default(),
         }
     }
 }
@@ -44,14 +106,7 @@ impl BackgroundRenderCache {
         label: &str,
     ) -> bool {
         // Poll pending job
-        if let Some(pending) = &self.pending {
-            if let Ok(commands) = pending.rx.try_recv() {
-                let h = pending.hash;
-                self.pending = None;
-                self.commands = Some(commands);
-                self.current_hash = h;
-            }
-        }
+        self.poll();
 
         // Cache is current
         if self.commands.is_some() && self.current_hash == hash {
@@ -83,26 +138,20 @@ impl BackgroundRenderCache {
         false
     }
 
-    /// Generic version: caller provides a closure that produces render commands.
-    /// The closure is sent to a background thread, so captured data must be 'static + Send.
+    /// Generic version: `prepare` is called only when a rebuild is actually needed (so its
+    /// snapshot clones aren't paid every frame) and returns the closure that produces the
+    /// render commands on a background thread.
     pub fn ensure_with<F>(
         &mut self,
         hash: u64,
         label: &str,
-        build: F,
+        prepare: impl FnOnce() -> F,
     ) -> bool
     where
         F: FnOnce() -> Vec<RenderCommand> + Send + 'static,
     {
         // Poll pending job
-        if let Some(pending) = &self.pending {
-            if let Ok(commands) = pending.rx.try_recv() {
-                let h = pending.hash;
-                self.pending = None;
-                self.commands = Some(commands);
-                self.current_hash = h;
-            }
-        }
+        self.poll();
 
         if self.commands.is_some() && self.current_hash == hash {
             return true;
@@ -112,6 +161,7 @@ impl BackgroundRenderCache {
             return false;
         }
 
+        let build = prepare();
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             let commands = build();
@@ -121,9 +171,11 @@ impl BackgroundRenderCache {
         false
     }
 
-    /// Get the cached commands (if ready).
-    pub fn commands(&self) -> Option<&[RenderCommand]> {
-        self.commands.as_deref()
+    /// Paint the cached commands (if ready) through the view transform.
+    pub fn paint(&mut self, painter: &egui::Painter, transform: &crate::util::ViewTransform) {
+        if let Some(commands) = &self.commands {
+            self.replay.paint(painter, transform, commands, self.generation);
+        }
     }
 
     /// Poll for completion without triggering new builds.
@@ -134,6 +186,7 @@ impl BackgroundRenderCache {
                 self.pending = None;
                 self.commands = Some(commands);
                 self.current_hash = h;
+                self.generation += 1;
             }
         }
     }

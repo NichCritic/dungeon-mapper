@@ -11,7 +11,7 @@
 //! highest cover value among the blocking obstacles, so a low table or a creature
 //! (half) never grants more than half cover on its own.
 
-use std::collections::HashSet;
+use crate::util::CellSet;
 use std::sync::Arc;
 
 use crate::model::{
@@ -78,9 +78,9 @@ impl Obstacle {
 #[derive(Clone, Debug, Default)]
 pub struct Occluders {
     /// Floor cells of the map (rooms and corridors).
-    pub floor: Arc<HashSet<(i32, i32)>>,
+    pub floor: Arc<CellSet>,
     /// Solid cells (the simulator's wall cells).
-    pub solid: Arc<HashSet<(i32, i32)>>,
+    pub solid: Arc<CellSet>,
     /// Zero-thickness walls with door gaps already cut.
     pub walls: Arc<Vec<Segment>>,
     pub objects: Arc<Vec<Obstacle>>,
@@ -103,6 +103,36 @@ impl Occluders {
             walls: Arc::clone(&self.walls),
             objects: Arc::clone(&self.objects),
             creatures,
+            static_hash: self.static_hash,
+        }
+    }
+}
+
+impl Occluders {
+    /// A copy holding only the walls, objects and creatures that touch the given box
+    /// (grid units). Exact for any query whose lines and spaces stay inside the box,
+    /// and saves `cover_between` re-filtering the whole map per query.
+    pub fn restricted_to(&self, x0: f32, y0: f32, x1: f32, y1: f32) -> Occluders {
+        let touches = |ax0: f32, ay0: f32, ax1: f32, ay1: f32| ax1 >= x0 && ax0 <= x1 && ay1 >= y0 && ay0 <= y1;
+        let walls = self.walls.iter()
+            .filter(|w| touches(w.a.0.min(w.b.0), w.a.1.min(w.b.1), w.a.0.max(w.b.0), w.a.1.max(w.b.1)))
+            .copied()
+            .collect();
+        let objects = self.objects.iter()
+            .filter(|o| {
+                let (lo, hi) = o.poly.iter().fold(((f32::MAX, f32::MAX), (f32::MIN, f32::MIN)), |(lo, hi), p| {
+                    ((lo.0.min(p.0), lo.1.min(p.1)), (hi.0.max(p.0), hi.1.max(p.1)))
+                });
+                touches(lo.0, lo.1, hi.0, hi.1)
+            })
+            .cloned()
+            .collect();
+        Occluders {
+            floor: Arc::clone(&self.floor),
+            solid: Arc::clone(&self.solid),
+            walls: Arc::new(walls),
+            objects: Arc::new(objects),
+            creatures: self.creatures.iter().filter(|(_, s)| touches(s.x0, s.y0, s.x1, s.y1)).cloned().collect(),
             static_hash: self.static_hash,
         }
     }
@@ -193,7 +223,7 @@ pub fn build_static_occluders(
 
     // Solid cells: everything inside the layout extents (plus a 1-cell rim) that is not floor.
     let (min_x, min_y, max_x, max_y) = layout.extents();
-    let mut solid = HashSet::new();
+    let mut solid = CellSet::default();
     for y in (min_y - 1)..=(max_y + 1) {
         for x in (min_x - 1)..=(max_x + 1) {
             if !floor.contains(&(x, y)) {
@@ -580,8 +610,8 @@ fn same_pt(a: Pt, b: Pt) -> bool {
 }
 
 /// The simulator's wall-corner rule for solid cells.
-fn segment_hits_solid_corner(p1: Pt, p2: Pt, active: &HashSet<(i32, i32)>, all: &HashSet<(i32, i32)>) -> bool {
-    let mut checked: HashSet<(i32, i32)> = HashSet::new();
+fn segment_hits_solid_corner(p1: Pt, p2: Pt, active: &CellSet, all: &CellSet) -> bool {
+    let mut checked: CellSet = CellSet::default();
     for &(wc, wr) in active {
         for (cx, cy) in [(wc, wr), (wc + 1, wr), (wc, wr + 1), (wc + 1, wr + 1)] {
             if !checked.insert((cx, cy)) {
@@ -626,7 +656,7 @@ fn segment_hits_solid_corner(p1: Pt, p2: Pt, active: &HashSet<(i32, i32)>, all: 
 }
 
 /// Axis-aligned ray running along the seam between two solid cells.
-fn segment_on_solid_seam(p1: Pt, p2: Pt, active: &HashSet<(i32, i32)>) -> bool {
+fn segment_on_solid_seam(p1: Pt, p2: Pt, active: &CellSet) -> bool {
     const EPS: f32 = 1e-6;
     if (p1.0 - p2.0).abs() < EPS {
         let gx = p1.0;
@@ -709,9 +739,9 @@ fn segment_hits_wall(p1: Pt, p2: Pt, w: &Segment, sides: Option<(Pt, Pt)>) -> bo
 /// The obstacles relevant to one cover query, already narrowed to the hull.
 pub struct LineGeo<'a> {
     /// Solid cells inside the hull.
-    pub active_solid: &'a HashSet<(i32, i32)>,
+    pub active_solid: &'a CellSet,
     /// Solid cells near them (for the interior-corner rule).
-    pub nearby_solid: &'a HashSet<(i32, i32)>,
+    pub nearby_solid: &'a CellSet,
     pub walls: &'a [Segment],
     pub objects: &'a [Obstacle],
     pub creatures: &'a [(TokenKind, Square)],
@@ -846,7 +876,7 @@ pub fn cover_between(attacker: &Square, target: &Square, occ: &Occluders, exclud
     // instead of scanning every solid cell on the map.
     let (bx0, bx1) = hull.iter().fold((f32::MAX, f32::MIN), |(lo, hi), p| (lo.min(p.0), hi.max(p.0)));
     let (by0, by1) = hull.iter().fold((f32::MAX, f32::MIN), |(lo, hi), p| (lo.min(p.1), hi.max(p.1)));
-    let mut active_solid: HashSet<(i32, i32)> = HashSet::new();
+    let mut active_solid: CellSet = CellSet::default();
     for y in (by0.floor() as i32 - 1)..=(by1.ceil() as i32) {
         for x in (bx0.floor() as i32 - 1)..=(bx1.ceil() as i32) {
             if occ.solid.contains(&(x, y))
@@ -884,7 +914,7 @@ pub fn cover_between(attacker: &Square, target: &Square, occ: &Occluders, exclud
     let sides = Some((attacker.center(), target.center()));
     // `classify` reads corner rules against the full solid set for interior-corner checks.
     // Only the neighbourhood of the active cells matters, so copy just that.
-    let mut nearby_solid = HashSet::new();
+    let mut nearby_solid = CellSet::default();
     for &(x, y) in &active_solid {
         for dy in -1..=1 {
             for dx in -1..=1 {
@@ -928,8 +958,8 @@ pub fn cover_between(attacker: &Square, target: &Square, occ: &Occluders, exclud
 
 /// Cells within `radius` of `from` whose centers are in line of sight
 /// (walls, solid cells, and light-blocking objects only).
-pub fn visible_cells(from: Pt, radius: f32, occ: &Occluders, floor: &HashSet<(i32, i32)>) -> HashSet<(i32, i32)> {
-    let mut out = HashSet::new();
+pub fn visible_cells(from: Pt, radius: f32, occ: &Occluders, floor: &CellSet) -> CellSet {
+    let mut out = CellSet::default();
     let r = radius.max(0.0);
     let (fx, fy) = from;
     let min_x = (fx - r).floor() as i32;
@@ -939,10 +969,33 @@ pub fn visible_cells(from: Pt, radius: f32, occ: &Occluders, floor: &HashSet<(i3
     let r2 = r * r;
     // Only geometry inside the sweep box can block anything
     let (bx0, by0, bx1, by1) = (min_x as f32, min_y as f32, max_x as f32 + 1.0, max_y as f32 + 1.0);
-    let light_objs: Vec<&Obstacle> = occ.objects.iter()
+    // Each object with its bounding box, so most lines skip the polygon test
+    let light_objs: Vec<(&Obstacle, (f32, f32, f32, f32))> = occ.objects.iter()
         .filter(|o| o.blocks_light())
         .filter(|o| o.poly.iter().any(|p| p.0 >= bx0 && p.0 <= bx1 && p.1 >= by0 && p.1 <= by1))
+        .map(|o| {
+            let bb = o.poly.iter().fold((f32::MAX, f32::MAX, f32::MIN, f32::MIN), |b, p| {
+                (b.0.min(p.0), b.1.min(p.1), b.2.max(p.0), b.3.max(p.1))
+            });
+            (o, bb)
+        })
         .collect();
+    // Memo of solid cells over the sweep box, filled on first probe: the line walk below
+    // probes cells several times per cell crossed, far too often for hash lookups.
+    // 0 = unknown, 1 = clear, 2 = solid.
+    let grid_w = (max_x - min_x + 1) as usize;
+    let grid_h = (max_y - min_y + 1) as usize;
+    let solid_memo = vec![std::cell::Cell::new(0u8); grid_w * grid_h];
+    let is_solid = |gx: i32, gy: i32| {
+        if gx < min_x || gx > max_x || gy < min_y || gy > max_y {
+            return occ.solid.contains(&(gx, gy));
+        }
+        let slot = &solid_memo[(gy - min_y) as usize * grid_w + (gx - min_x) as usize];
+        if slot.get() == 0 {
+            slot.set(if occ.solid.contains(&(gx, gy)) { 2 } else { 1 });
+        }
+        slot.get() == 2
+    };
     let walls: Vec<&Segment> = occ.walls.iter()
         .filter(|w| {
             let (wx0, wx1) = (w.a.0.min(w.b.0), w.a.0.max(w.b.0));
@@ -969,9 +1022,14 @@ pub fn visible_cells(from: Pt, radius: f32, occ: &Occluders, floor: &HashSet<(i3
             }
             let p1 = (fx, fy);
             let p2 = (cx, cy);
-            let blocked = line_crosses_solid(p1, p2, &occ.solid)
+            const E: f32 = 1e-3;
+            let (lx0, lx1, ly0, ly1) = (p1.0.min(p2.0) - E, p1.0.max(p2.0) + E, p1.1.min(p2.1) - E, p1.1.max(p2.1) + E);
+            let blocked = line_crosses_solid(p1, p2, &is_solid)
                 || walls.iter().any(|w| segment_hits_wall(p1, p2, w, None))
-                || light_objs.iter().any(|o| segment_hits_polygon(p1, p2, &o.poly));
+                || light_objs.iter().any(|(o, bb)| {
+                    bb.2 >= lx0 && bb.0 <= lx1 && bb.3 >= ly0 && bb.1 <= ly1
+                        && segment_hits_polygon(p1, p2, &o.poly)
+                });
             if !blocked {
                 out.insert((gx, gy));
             }
@@ -983,7 +1041,7 @@ pub fn visible_cells(from: Pt, radius: f32, occ: &Occluders, floor: &HashSet<(i3
 /// Does the line pass through the interior of any solid cell? Sampled along the
 /// line (every 0.2 cells) so cost is proportional to length, not to the number of
 /// solid cells. Samples on a cell edge do not count, so grazing a face stays clear.
-fn line_crosses_solid(p1: Pt, p2: Pt, solid: &HashSet<(i32, i32)>) -> bool {
+fn line_crosses_solid(p1: Pt, p2: Pt, is_solid: impl Fn(i32, i32) -> bool) -> bool {
     let dx = p2.0 - p1.0;
     let dy = p2.1 - p1.1;
     let len = (dx * dx + dy * dy).sqrt();
@@ -1001,7 +1059,7 @@ fn line_crosses_solid(p1: Pt, p2: Pt, solid: &HashSet<(i32, i32)>) -> bool {
         if fx < EPS || fx > 1.0 - EPS || fy < EPS || fy > 1.0 - EPS {
             continue;
         }
-        if solid.contains(&(x.floor() as i32, y.floor() as i32)) {
+        if is_solid(x.floor() as i32, y.floor() as i32) {
             return true;
         }
     }
@@ -1055,7 +1113,7 @@ mod tests {
 
     fn occ(walls: &[(i32, i32)], creatures: &[(i32, i32)]) -> Occluders {
         Occluders {
-            floor: Arc::new(HashSet::new()),
+            floor: Arc::new(CellSet::default()),
             solid: Arc::new(walls.iter().copied().collect()),
             walls: Arc::new(Vec::new()),
             objects: Arc::new(Vec::new()),
@@ -1299,7 +1357,7 @@ mod tests {
 
     #[test]
     fn light_does_not_leak_to_the_neighbour_across_a_wall() {
-        let floor: HashSet<(i32, i32)> = (0..10).flat_map(|y| (0..10).map(move |x| (x, y))).collect();
+        let floor: CellSet = (0..10).flat_map(|y| (0..10).map(move |x| (x, y))).collect();
         let mut o = occ(&[], &[]);
         Arc::make_mut(&mut o.walls).push(Segment { a: (5.0, 0.0), b: (5.0, 10.0) });
         // Token adjacent to the wall
@@ -1311,7 +1369,7 @@ mod tests {
 
     #[test]
     fn visible_cells_respect_walls() {
-        let floor: HashSet<(i32, i32)> = (0..10).flat_map(|y| (0..10).map(move |x| (x, y))).collect();
+        let floor: CellSet = (0..10).flat_map(|y| (0..10).map(move |x| (x, y))).collect();
         let mut o = occ(&[], &[]);
         Arc::make_mut(&mut o.walls).push(Segment { a: (5.0, 0.0), b: (5.0, 10.0) });
         let seen = visible_cells((2.5, 5.5), 6.0, &o, &floor);

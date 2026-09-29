@@ -5,11 +5,10 @@
 //! with line of sight: lights and PC senses cast through door/wall geometry, and
 //! `party_visible` is what at least one party member can currently see.
 
-use std::collections::{HashMap, HashSet};
 
 use crate::model::{Dungeon, LightSource, SpatialLayout, TokenKind};
 use crate::render::themed::build_floor_set;
-use crate::util::{ViewTransform, GRID_PX};
+use crate::util::{CellMap, CellSet, ViewTransform, GRID_PX};
 use super::los::{self, Occluders, Pt};
 use super::{PresentationSnapshot, PresentationState, Visibility, VisibilityProvider};
 
@@ -74,22 +73,61 @@ pub struct VisionRing {
 #[derive(Clone, Debug)]
 pub struct LightMap {
     pub key: u64,
-    pub floor: HashSet<(i32, i32)>,
+    pub floor: CellSet,
     /// Non-floor cells touching the floor (the drawn walls/hatching). Shaded like the
     /// brightest floor cell they touch, so lit rooms show their walls.
-    pub band: HashSet<(i32, i32)>,
+    pub band: CellSet,
     /// Lit cells; absent = Dark.
-    pub cells: HashMap<(i32, i32), CellLight>,
+    pub cells: CellMap<CellLight>,
     /// Cells at least one party member can see (lit, or within a sense range, with LOS).
     /// With no PC tokens on the map this falls back to fog visibility.
-    pub party_visible: HashSet<(i32, i32)>,
+    pub party_visible: CellSet,
     pub lights: Vec<LightRing>,
     pub vision: Vec<VisionRing>,
+    /// Shading to draw, merged into horizontal runs of equal darkness so the overlay is
+    /// a few hundred rects rather than one per cell.
+    pub shade_runs: Vec<ShadeRun>,
+}
+
+/// Cells `x0..x1` of row `y` share one shade alpha (before the view's scale).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ShadeRun {
+    pub y: i32,
+    pub x0: i32,
+    pub x1: i32,
+    pub alpha: f32,
 }
 
 impl LightMap {
     pub fn level(&self, cell: (i32, i32)) -> CellLight {
         self.cells.get(&cell).copied().unwrap_or(CellLight::Dark)
+    }
+
+    /// Shade alpha for a cell: near-black where the party can't see, grey when dim.
+    fn shade_alpha(&self, c: (i32, i32)) -> Option<f32> {
+        if !self.party_visible.contains(&c) {
+            return Some(235.0);
+        }
+        match self.level(c) {
+            CellLight::Bright => None,
+            CellLight::Dim => Some(110.0),
+            CellLight::Dark => Some(170.0),
+        }
+    }
+
+    fn compute_shade_runs(&self) -> Vec<ShadeRun> {
+        let mut shaded: Vec<((i32, i32), f32)> = self.floor.iter().chain(self.band.iter())
+            .filter_map(|&c| self.shade_alpha(c).map(|a| (c, a)))
+            .collect();
+        shaded.sort_by_key(|&((x, y), _)| (y, x));
+        let mut runs: Vec<ShadeRun> = Vec::new();
+        for ((x, y), alpha) in shaded {
+            match runs.last_mut() {
+                Some(r) if r.y == y && r.x1 == x && r.alpha == alpha => r.x1 += 1,
+                _ => runs.push(ShadeRun { y, x0: x, x1: x + 1, alpha }),
+            }
+        }
+        runs
     }
 }
 
@@ -181,7 +219,7 @@ pub fn compute_light_map(
     } else {
         CellLight::Dark
     };
-    let mut cells: HashMap<(i32, i32), CellLight> = HashMap::new();
+    let mut cells: CellMap<CellLight> = CellMap::default();
     if ambient != CellLight::Dark {
         for &c in &floor {
             cells.insert(c, ambient);
@@ -213,7 +251,7 @@ pub fn compute_light_map(
 
     // Party vision
     let mut vision = Vec::new();
-    let mut party_visible: HashSet<(i32, i32)> = HashSet::new();
+    let mut party_visible: CellSet = CellSet::default();
     let pc_tokens: Vec<(Pt, f32, f32)> = dungeon.tokens.iter().filter_map(|t| {
         let TokenKind::Player(pid) = &t.kind else { return None };
         let senses = dungeon.party.iter().find(|p| p.id == *pid).map(|p| p.senses).unwrap_or_default();
@@ -262,7 +300,7 @@ pub fn compute_light_map(
     }
 
     // Wall band: one cell out from the floor, inheriting the best neighbouring floor cell
-    let mut band: HashSet<(i32, i32)> = HashSet::new();
+    let mut band: CellSet = CellSet::default();
     for &(x, y) in &floor {
         for dy in -1..=1 {
             for dx in -1..=1 {
@@ -292,31 +330,23 @@ pub fn compute_light_map(
         if seen { party_visible.insert(c); }
     }
 
-    LightMap { key, floor, band, cells, party_visible, lights, vision }
+    let mut map = LightMap { key, floor, band, cells, party_visible, lights, vision, shade_runs: Vec::new() };
+    map.shade_runs = map.compute_shade_runs();
+    map
 }
 
 /// Shade cells the party cannot see (near-black) and dim cells (grey).
 /// `alpha_scale` lets the DM canvas draw the same map faintly.
 pub fn render_light_overlay(painter: &egui::Painter, t: &ViewTransform, map: &LightMap, alpha_scale: f32) {
     let clip = painter.clip_rect();
-    for &c in map.floor.iter().chain(map.band.iter()) {
-        let (alpha, lvl) = if !map.party_visible.contains(&c) {
-            (235.0, CellLight::Dark)
-        } else {
-            match map.level(c) {
-                CellLight::Bright => continue,
-                CellLight::Dim => (110.0, CellLight::Dim),
-                CellLight::Dark => (170.0, CellLight::Dark),
-            }
-        };
-        let _ = lvl;
-        let min = t.world_to_screen(egui::pos2(c.0 as f32 * GRID_PX, c.1 as f32 * GRID_PX));
-        let max = t.world_to_screen(egui::pos2((c.0 + 1) as f32 * GRID_PX, (c.1 + 1) as f32 * GRID_PX));
+    for run in &map.shade_runs {
+        let min = t.world_to_screen(egui::pos2(run.x0 as f32 * GRID_PX, run.y as f32 * GRID_PX));
+        let max = t.world_to_screen(egui::pos2(run.x1 as f32 * GRID_PX, (run.y + 1) as f32 * GRID_PX));
         let rect = egui::Rect::from_two_pos(min, max).expand(0.5);
         if !clip.intersects(rect) {
             continue;
         }
-        let a = (alpha * alpha_scale).clamp(0.0, 255.0) as u8;
+        let a = (run.alpha * alpha_scale).clamp(0.0, 255.0) as u8;
         painter.rect_filled(rect, 0.0, egui::Color32::from_rgba_unmultiplied(0, 0, 0, a));
     }
 }
@@ -366,6 +396,24 @@ fn dashed_circle(painter: &egui::Painter, center: egui::Pos2, radius: f32, strok
 mod tests {
     use super::*;
     use crate::model::{RoomLayout, SpatialLayout};
+
+    #[test]
+    fn shade_runs_cover_exactly_the_shaded_cells() {
+        // Row 0: dim, dim, bright, unseen. Row 1: dark, dark. Band cell above: unseen.
+        let floor: CellSet = [(0, 0), (1, 0), (2, 0), (3, 0), (0, 1), (1, 1)].into_iter().collect();
+        let band: CellSet = [(0, -1)].into_iter().collect();
+        let cells: CellMap<CellLight> =
+            [((0, 0), CellLight::Dim), ((1, 0), CellLight::Dim), ((2, 0), CellLight::Bright)].into_iter().collect();
+        let party_visible: CellSet = [(0, 0), (1, 0), (2, 0), (0, 1), (1, 1)].into_iter().collect();
+        let mut map = LightMap { key: 0, floor, band, cells, party_visible, lights: Vec::new(), vision: Vec::new(), shade_runs: Vec::new() };
+        map.shade_runs = map.compute_shade_runs();
+        assert_eq!(map.shade_runs, vec![
+            ShadeRun { y: -1, x0: 0, x1: 1, alpha: 235.0 },
+            ShadeRun { y: 0, x0: 0, x1: 2, alpha: 110.0 },
+            ShadeRun { y: 0, x0: 3, x1: 4, alpha: 235.0 },
+            ShadeRun { y: 1, x0: 0, x1: 2, alpha: 170.0 },
+        ]);
+    }
 
     fn make_layout_with_room(room_id: &str, x: i32, y: i32, w: u32, h: u32) -> SpatialLayout {
         SpatialLayout {
