@@ -259,365 +259,18 @@ fn handle_spatial_interactions(
     }
 
     // === DRAG START ===
-    if response.drag_started_by(egui::PointerButton::Primary) {
-        if let Some(pos) = response.hover_pos() {
-            let world = transform.screen_to_world(pos);
-
-            // Rotation handle of the selected room
-            if let (Some(room_id), Some(layout)) = (&state.selected_room, &dungeon.layout) {
-                if let Some(rl) = layout.room_by_id(room_id) {
-                    let (hx, hy) = rotation_handle_pos(rl);
-                    if pos.distance(transform.world_to_screen(egui::pos2(hx, hy))) < HANDLE_HIT_RADIUS {
-                        state.drag_target = DragTarget::Rotate(room_id.clone());
-                        return;
-                    }
-                }
-            }
-
-            // First check: waypoint handles (highest priority when a corridor is selected)
-            if let Some(ci) = state.selected_corridor {
-                if let Some(layout) = &dungeon.layout {
-                    if ci < layout.corridors.len() {
-                        let corridor = &layout.corridors[ci];
-                        for (wi, wp) in corridor.waypoints.iter().enumerate() {
-                            let wp_screen = transform.world_to_screen(
-                                egui::pos2(grid_to_world(wp.x), grid_to_world(wp.y)),
-                            );
-                            if pos.distance(wp_screen) < HANDLE_HIT_RADIUS {
-                                state.selected_waypoint = Some(wi);
-                                state.drag_target = DragTarget::Waypoint(ci, wi);
-                                state.drag_accum = egui::Vec2::ZERO;
-                                return;
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Check exit handles (when a room is selected)
-            if let Some(ref selected_room_id) = state.selected_room {
-                if let Some(layout) = &dungeon.layout {
-                    if let Some((conn_id, is_source)) = hit_test_exit_handles(
-                        pos, selected_room_id, layout, &dungeon.graph, &transform, state.view.zoom,
-                    ) {
-                        state.drag_target = DragTarget::Exit(conn_id, is_source);
-                        state.drag_accum = egui::Vec2::ZERO;
-                        return;
-                    }
-                }
-            }
-
-            // Check group corners (when a group with constraints is visible)
-            if let Some(layout) = &dungeon.layout {
-                for (gi, group) in dungeon.graph.groups.iter().enumerate() {
-                    if group.max_width.is_none() && group.max_height.is_none() {
-                        continue;
-                    }
-                    if let Some((gx, gy, gw, gh)) = group.spatial_bounds(layout) {
-                        let corners = [
-                            (gx, gy),                              // TL
-                            (gx + gw as i32, gy),                  // TR
-                            (gx, gy + gh as i32),                  // BL
-                            (gx + gw as i32, gy + gh as i32),     // BR
-                        ];
-                        for (ci, &(cx, cy)) in corners.iter().enumerate() {
-                            let screen_c = transform.world_to_screen(
-                                egui::pos2(grid_to_world(cx), grid_to_world(cy)),
-                            );
-                            if pos.distance(screen_c) < HANDLE_HIT_RADIUS {
-                                state.selected_group = Some(gi);
-                                state.drag_target = DragTarget::GroupCorner(gi, ci as u8);
-                                state.drag_accum = egui::Vec2::ZERO;
-                                return;
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Check elevation sections (if a room with sections is selected)
-            if let Some((ref sec_room_id, sec_idx)) = state.selected_section {
-                if let Some(layout) = &dungeon.layout {
-                    if let Some(rl) = layout.room_by_id(sec_room_id) {
-                        if let Some(room) = dungeon.graph.room_by_id(sec_room_id) {
-                            if sec_idx < room.sections.len() {
-                                let sec = &room.sections[sec_idx];
-                                let (lx, ly) = rl.to_local(world.x / GRID_PX, world.y / GRID_PX);
-                                if lx >= sec.x && lx <= sec.x + sec.width
-                                    && ly >= sec.y && ly <= sec.y + sec.length
-                                {
-                                    state.drag_target = DragTarget::Section(sec_room_id.clone(), sec_idx);
-                                    state.drag_accum = egui::Vec2::ZERO;
-                                    return;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Check rooms — prefer deepest-nested (smallest) room at click point
-            let gx = world_to_grid(world.x);
-            let gy = world_to_grid(world.y);
-            if let Some(layout) = &dungeon.layout {
-                let mut best_hit: Option<(&RoomLayout, u32)> = None; // (room_layout, nesting_depth)
-                for rl in &layout.rooms {
-                    if let Some(floor) = state.current_floor {
-                        if let Some(room) = dungeon.graph.room_by_id(&rl.room_id) {
-                            if !room.floor.visible_on(floor) {
-                                continue;
-                            }
-                        }
-                    }
-
-                    if room_hit(rl, world, 0.4) {
-                        let depth = dungeon.graph.nesting_depth(&rl.room_id);
-                        let area = rl.width * rl.height;
-                        let is_better = match &best_hit {
-                            None => true,
-                            Some((prev, prev_depth)) => {
-                                depth > *prev_depth
-                                    || (depth == *prev_depth && area < prev.width * prev.height)
-                            }
-                        };
-                        if is_better {
-                            best_hit = Some((rl, depth));
-                        }
-                    }
-                }
-
-                if let Some((rl, _)) = best_hit {
-                    let rl_id = rl.room_id.clone();
-                    if state.selected_room.as_deref() != Some(&rl_id) {
-                        state.cave_edit_mode = false;
-                    }
-                    state.selected_room = Some(rl_id.clone());
-                    state.selected_corridor = None;
-                    state.selected_waypoint = None;
-                    state.drag_target = DragTarget::Room(rl_id);
-                    state.drag_accum = egui::Vec2::ZERO;
-                    return;
-                }
-
-                // Check group body (after rooms, so rooms take priority)
-                for (gi, group) in dungeon.graph.groups.iter().enumerate() {
-                    if let Some((bx, by, bw, bh)) = group.spatial_bounds(layout) {
-                        if gx >= bx && gx < bx + bw as i32
-                            && gy >= by && gy < by + bh as i32
-                        {
-                            state.selected_group = Some(gi);
-                            state.selected_room = None;
-                            state.selected_corridor = None;
-                            state.selected_waypoint = None;
-                            state.drag_target = DragTarget::Group(gi);
-                            state.drag_accum = egui::Vec2::ZERO;
-                            return;
-                        }
-                    }
-                }
-            }
-        }
+    if response.drag_started_by(egui::PointerButton::Primary) && on_drag_start(response, transform, dungeon, state) {
+        return;
     }
 
     // === DOUBLE-CLICK — insert waypoint on any corridor segment ===
-    if response.double_clicked() {
-        if let Some(pos) = response.hover_pos() {
-            let world = transform.screen_to_world(pos);
-            if let Some(layout) = &mut dungeon.layout {
-                // Search all corridors for the best hit
-                let mut best_hit: Option<(usize, usize, f32)> = None; // (corridor_idx, segment_idx, dist)
-                for (ci, corridor) in layout.corridors.iter().enumerate() {
-                    for (si, pair) in corridor.waypoints.windows(2).enumerate() {
-                        let a = egui::pos2(grid_to_world(pair[0].x), grid_to_world(pair[0].y));
-                        let b = egui::pos2(grid_to_world(pair[1].x), grid_to_world(pair[1].y));
-                        let dist = point_to_segment_dist(world, a, b);
-                        let threshold = corridor.width as f32 * GRID_PX / 2.0 + HANDLE_HIT_RADIUS / state.view.zoom;
-                        if dist < threshold
-                            && best_hit.is_none_or(|(_, _, bd)| dist < bd)
-                        {
-                            best_hit = Some((ci, si, dist));
-                        }
-                    }
-                }
-                if let Some((ci, si, _)) = best_hit {
-                    let new_wp = GridPos {
-                        x: world_to_grid(world.x),
-                        y: world_to_grid(world.y),
-                    };
-                    layout.corridors[ci].waypoints.insert(si + 1, new_wp);
-                    if is_orthogonal(&dungeon.graph, &layout.corridors[ci]) {
-                        resolve_diagonal_segments(&mut layout.corridors[ci].waypoints);
-                    }
-                    layout.corridors[ci].pinned_waypoints =
-                        layout.corridors[ci].waypoints.clone();
-                    state.selected_corridor = Some(ci);
-                    // Find the inserted waypoint (may have shifted due to diagonal resolution)
-                    state.selected_waypoint = layout.corridors[ci].waypoints.iter()
-                        .position(|wp| wp.x == new_wp.x && wp.y == new_wp.y)
-                        .or(Some(si + 1));
-                    state.selected_room = None;
-                    state.selected_group = None;
-                }
-            }
-        }
+    if response.double_clicked() && on_double_click(response, transform, dungeon, state) {
+        return;
     }
 
     // === CLICK (no drag) — select corridors / waypoints ===
-    if response.clicked() && !response.double_clicked() {
-        if let Some(pos) = response.hover_pos() {
-            let world = transform.screen_to_world(pos);
-
-            // First: if corridor selected, check waypoint handle click
-            if let Some(ci) = state.selected_corridor {
-                if let Some(layout) = &dungeon.layout {
-                    if ci < layout.corridors.len() {
-                        let corridor = &layout.corridors[ci];
-                        for (wi, wp) in corridor.waypoints.iter().enumerate() {
-                            let wp_screen = transform.world_to_screen(
-                                egui::pos2(grid_to_world(wp.x), grid_to_world(wp.y)),
-                            );
-                            if pos.distance(wp_screen) < HANDLE_HIT_RADIUS {
-                                state.selected_waypoint = Some(wi);
-                                return;
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Check exit handles (when room is selected)
-            if let Some(ref selected_room_id) = state.selected_room {
-                if let Some(layout) = &dungeon.layout {
-                    if hit_test_exit_handles(
-                        pos, selected_room_id, layout, &dungeon.graph, &transform, state.view.zoom,
-                    ).is_some() {
-                        // Click on exit handle — keep room selected, don't change selection
-                        return;
-                    }
-                }
-            }
-
-            // Check corridor segment hit
-            if let Some(layout) = &dungeon.layout {
-                let mut hit_corridor = None;
-                for (ci, corridor) in layout.corridors.iter().enumerate() {
-                    // Floor filtering: skip corridors not on the current floor
-                    if let (Some(floor), Some(edge)) = (state.current_floor, dungeon.graph.connection_by_id(&corridor.connection_id)) {
-                        if dungeon.graph.edge_floor_relation(edge, floor) != FloorRel::On {
-                            continue;
-                        }
-                    }
-                    for pair in corridor.waypoints.windows(2) {
-                        let a = egui::pos2(grid_to_world(pair[0].x), grid_to_world(pair[0].y));
-                        let b = egui::pos2(grid_to_world(pair[1].x), grid_to_world(pair[1].y));
-                        let dist = point_to_segment_dist(world, a, b);
-                        let threshold = corridor.width as f32 * GRID_PX / 2.0 + HANDLE_HIT_RADIUS / state.view.zoom;
-                        if dist < threshold {
-                            hit_corridor = Some(ci);
-                            break;
-                        }
-                    }
-                    if hit_corridor.is_some() {
-                        break;
-                    }
-                }
-
-                if let Some(ci) = hit_corridor {
-                    state.selected_corridor = Some(ci);
-                    state.selected_waypoint = None;
-                    state.selected_room = None;
-                    state.selected_group = None;
-                } else {
-                    // Check room hit — prefer deepest-nested room
-                    let mut hit_room = false;
-                    let mut best_hit: Option<(&RoomLayout, u32)> = None;
-                    for rl in &layout.rooms {
-                        if let Some(floor) = state.current_floor {
-                            if let Some(room) = dungeon.graph.room_by_id(&rl.room_id) {
-                                if !room.floor.visible_on(floor) {
-                                    continue;
-                                }
-                            }
-                        }
-                        if room_hit(rl, world, 0.4) {
-                            let depth = dungeon.graph.nesting_depth(&rl.room_id);
-                            let area = rl.width * rl.height;
-                            let is_better = match &best_hit {
-                                None => true,
-                                Some((prev, prev_depth)) => {
-                                    depth > *prev_depth
-                                        || (depth == *prev_depth && area < prev.width * prev.height)
-                                }
-                            };
-                            if is_better {
-                                best_hit = Some((rl, depth));
-                            }
-                        }
-                    }
-                    if let Some((rl, _)) = best_hit {
-                        let rl_id = rl.room_id.clone();
-                        if !hit_room {
-                            // Check if click is on an elevation section
-                            let room_px_x = rl.x as f32 * GRID_PX;
-                            let room_px_y = rl.y as f32 * GRID_PX;
-                            let mut hit_section = None;
-                            if let Some(room) = dungeon.graph.room_by_id(&rl_id) {
-                                for (si, sec) in room.sections.iter().enumerate() {
-                                    let sx = room_px_x + sec.x * GRID_PX;
-                                    let sy = room_px_y + sec.y * GRID_PX;
-                                    let sw = sec.width * GRID_PX;
-                                    let sh = sec.length * GRID_PX;
-                                    if world.x >= sx && world.x <= sx + sw
-                                        && world.y >= sy && world.y <= sy + sh
-                                    {
-                                        hit_section = Some((rl_id.clone(), si));
-                                        break;
-                                    }
-                                }
-                            }
-
-                            state.selected_room = Some(rl_id);
-                            state.selected_corridor = None;
-                            state.selected_waypoint = None;
-                            state.selected_group = None;
-                            state.selected_section = hit_section;
-                            hit_room = true;
-                        }
-                    }
-                    if !hit_room {
-                        // Check group hit
-                        let gx = world_to_grid(world.x);
-                        let gy = world_to_grid(world.y);
-                        let mut hit_group = false;
-                        for (gi, group) in dungeon.graph.groups.iter().enumerate() {
-                            if group.max_width.is_none() && group.max_height.is_none() {
-                                continue;
-                            }
-                            if let Some((bx, by, bw, bh)) = group.spatial_bounds(layout) {
-                                if gx >= bx && gx < bx + bw as i32
-                                    && gy >= by && gy < by + bh as i32
-                                {
-                                    state.selected_group = Some(gi);
-                                    state.selected_corridor = None;
-                                    state.selected_waypoint = None;
-                                    state.selected_room = None;
-                                    hit_group = true;
-                                    break;
-                                }
-                            }
-                        }
-                        if !hit_group {
-                            state.selected_room = None;
-                            state.selected_corridor = None;
-                            state.selected_waypoint = None;
-                            state.selected_group = None;
-                            state.selected_section = None;
-                            state.cave_edit_mode = false;
-                        }
-                    }
-                }
-            }
-        }
+    if response.clicked() && !response.double_clicked() && on_click(response, transform, dungeon, state) {
+        return;
     }
 
     // === DELETE KEY — remove selected waypoint ===
@@ -652,467 +305,874 @@ fn handle_spatial_interactions(
 
 
     // === DRAGGING ===
-    if response.dragged_by(egui::PointerButton::Primary) {
-        // Rotation follows the cursor's angle around the room's center
-        if let DragTarget::Rotate(ref room_id) = state.drag_target {
-            let snap = ui.input(|i| i.modifiers.shift);
-            if let (Some(ptr), Some(layout)) = (response.interact_pointer_pos(), &mut dungeon.layout) {
-                if let Some(rl) = layout.room_by_id_mut(room_id) {
-                    let world = transform.screen_to_world(ptr);
-                    let (cx, cy) = rl.center();
-                    // The handle sits straight above the center at 0°
-                    let deg = (world.y / GRID_PX - cy).atan2(world.x / GRID_PX - cx).to_degrees() + 90.0;
-                    let step = if snap { 15.0 } else { 1.0 };
-                    let deg = (deg / step).round() * step;
-                    rl.rotation = (deg + 180.0).rem_euclid(360.0) - 180.0;
+    if response.dragged_by(egui::PointerButton::Primary) && on_drag(ui, response, transform, dungeon, state) {
+        return;
+    }
+
+    // === DRAG STOP ===
+    if response.drag_stopped_by(egui::PointerButton::Primary) && on_drag_stop(dungeon, state) {
+        return;
+    }
+}
+
+/// A primary drag starting: pick what it grabs (rotation handle, waypoint, exit, group corner, section, room or group). Returns true when the input is used up.
+fn on_drag_start(
+    response: &egui::Response,
+    transform: &ViewTransform,
+    dungeon: &mut Dungeon,
+    state: &mut SpatialViewState,
+) -> bool {
+    if let Some(pos) = response.hover_pos() {
+        let world = transform.screen_to_world(pos);
+
+        // Rotation handle of the selected room
+        if let (Some(room_id), Some(layout)) = (&state.selected_room, &dungeon.layout) {
+            if let Some(rl) = layout.room_by_id(room_id) {
+                let (hx, hy) = rotation_handle_pos(rl);
+                if pos.distance(transform.world_to_screen(egui::pos2(hx, hy))) < HANDLE_HIT_RADIUS {
+                    state.drag_target = DragTarget::Rotate(room_id.clone());
+                    return true;
                 }
             }
-            return;
         }
-        // Exit drag uses absolute cursor position — handle before grid-step accumulation
-        if let DragTarget::Exit(ref conn_id, is_source) = state.drag_target {
-            let conn_id = conn_id.clone();
-            if let Some(ptr_pos) = response.interact_pointer_pos() {
-                let world = transform.screen_to_world(ptr_pos);
-                let room_id = dungeon.graph.connections.iter()
-                    .find(|e| e.connection.id == conn_id)
-                    .map(|e| if is_source { &e.source_room_id } else { &e.target_room_id })
-                    .cloned();
-                let cw = dungeon.graph.connections.iter()
-                    .find(|e| e.connection.id == conn_id)
-                    .map(|e| e.connection.corridor_width)
-                    .unwrap_or(2);
-                if let Some(room_id) = room_id {
-                    if let Some(layout) = &dungeon.layout {
-                        if let Some(room_rl) = layout.room_by_id(&room_id) {
-                            let new_exit = snap_to_perimeter(world, room_rl, cw);
-                            if let Some(edge) = dungeon.graph.connections.iter_mut()
-                                .find(|e| e.connection.id == conn_id)
+
+        // First check: waypoint handles (highest priority when a corridor is selected)
+        if let Some(ci) = state.selected_corridor {
+            if let Some(layout) = &dungeon.layout {
+                if ci < layout.corridors.len() {
+                    let corridor = &layout.corridors[ci];
+                    for (wi, wp) in corridor.waypoints.iter().enumerate() {
+                        let wp_screen = transform.world_to_screen(
+                            egui::pos2(grid_to_world(wp.x), grid_to_world(wp.y)),
+                        );
+                        if pos.distance(wp_screen) < HANDLE_HIT_RADIUS {
+                            state.selected_waypoint = Some(wi);
+                            state.drag_target = DragTarget::Waypoint(ci, wi);
+                            state.drag_accum = egui::Vec2::ZERO;
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Check exit handles (when a room is selected)
+        if let Some(ref selected_room_id) = state.selected_room {
+            if let Some(layout) = &dungeon.layout {
+                if let Some((conn_id, is_source)) = hit_test_exit_handles(
+                    pos, selected_room_id, layout, &dungeon.graph, &transform, state.view.zoom,
+                ) {
+                    state.drag_target = DragTarget::Exit(conn_id, is_source);
+                    state.drag_accum = egui::Vec2::ZERO;
+                    return true;
+                }
+            }
+        }
+
+        // Check group corners (when a group with constraints is visible)
+        if let Some(layout) = &dungeon.layout {
+            for (gi, group) in dungeon.graph.groups.iter().enumerate() {
+                if group.max_width.is_none() && group.max_height.is_none() {
+                    continue;
+                }
+                if let Some((gx, gy, gw, gh)) = group.spatial_bounds(layout) {
+                    let corners = [
+                        (gx, gy),                              // TL
+                        (gx + gw as i32, gy),                  // TR
+                        (gx, gy + gh as i32),                  // BL
+                        (gx + gw as i32, gy + gh as i32),     // BR
+                    ];
+                    for (ci, &(cx, cy)) in corners.iter().enumerate() {
+                        let screen_c = transform.world_to_screen(
+                            egui::pos2(grid_to_world(cx), grid_to_world(cy)),
+                        );
+                        if pos.distance(screen_c) < HANDLE_HIT_RADIUS {
+                            state.selected_group = Some(gi);
+                            state.drag_target = DragTarget::GroupCorner(gi, ci as u8);
+                            state.drag_accum = egui::Vec2::ZERO;
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Check elevation sections (if a room with sections is selected)
+        if let Some((ref sec_room_id, sec_idx)) = state.selected_section {
+            if let Some(layout) = &dungeon.layout {
+                if let Some(rl) = layout.room_by_id(sec_room_id) {
+                    if let Some(room) = dungeon.graph.room_by_id(sec_room_id) {
+                        if sec_idx < room.sections.len() {
+                            let sec = &room.sections[sec_idx];
+                            let (lx, ly) = rl.to_local(world.x / GRID_PX, world.y / GRID_PX);
+                            if lx >= sec.x && lx <= sec.x + sec.width
+                                && ly >= sec.y && ly <= sec.y + sec.length
                             {
-                                if is_source {
-                                    edge.source_exit = Some(new_exit);
-                                } else {
-                                    edge.target_exit = Some(new_exit);
+                                state.drag_target = DragTarget::Section(sec_room_id.clone(), sec_idx);
+                                state.drag_accum = egui::Vec2::ZERO;
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Check rooms — prefer deepest-nested (smallest) room at click point
+        let gx = world_to_grid(world.x);
+        let gy = world_to_grid(world.y);
+        if let Some(layout) = &dungeon.layout {
+            let mut best_hit: Option<(&RoomLayout, u32)> = None; // (room_layout, nesting_depth)
+            for rl in &layout.rooms {
+                if let Some(floor) = state.current_floor {
+                    if let Some(room) = dungeon.graph.room_by_id(&rl.room_id) {
+                        if !room.floor.visible_on(floor) {
+                            continue;
+                        }
+                    }
+                }
+
+                if room_hit(rl, world, 0.4) {
+                    let depth = dungeon.graph.nesting_depth(&rl.room_id);
+                    let area = rl.width * rl.height;
+                    let is_better = match &best_hit {
+                        None => true,
+                        Some((prev, prev_depth)) => {
+                            depth > *prev_depth
+                                || (depth == *prev_depth && area < prev.width * prev.height)
+                        }
+                    };
+                    if is_better {
+                        best_hit = Some((rl, depth));
+                    }
+                }
+            }
+
+            if let Some((rl, _)) = best_hit {
+                let rl_id = rl.room_id.clone();
+                if state.selected_room.as_deref() != Some(&rl_id) {
+                    state.cave_edit_mode = false;
+                }
+                state.selected_room = Some(rl_id.clone());
+                state.selected_corridor = None;
+                state.selected_waypoint = None;
+                state.drag_target = DragTarget::Room(rl_id);
+                state.drag_accum = egui::Vec2::ZERO;
+                return true;
+            }
+
+            // Check group body (after rooms, so rooms take priority)
+            for (gi, group) in dungeon.graph.groups.iter().enumerate() {
+                if let Some((bx, by, bw, bh)) = group.spatial_bounds(layout) {
+                    if gx >= bx && gx < bx + bw as i32
+                        && gy >= by && gy < by + bh as i32
+                    {
+                        state.selected_group = Some(gi);
+                        state.selected_room = None;
+                        state.selected_corridor = None;
+                        state.selected_waypoint = None;
+                        state.drag_target = DragTarget::Group(gi);
+                        state.drag_accum = egui::Vec2::ZERO;
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    false
+}
+
+/// Double-click: insert a waypoint on the nearest corridor segment. Returns true when the input is used up.
+fn on_double_click(
+    response: &egui::Response,
+    transform: &ViewTransform,
+    dungeon: &mut Dungeon,
+    state: &mut SpatialViewState,
+) -> bool {
+    if let Some(pos) = response.hover_pos() {
+        let world = transform.screen_to_world(pos);
+        if let Some(layout) = &mut dungeon.layout {
+            // Search all corridors for the best hit
+            let mut best_hit: Option<(usize, usize, f32)> = None; // (corridor_idx, segment_idx, dist)
+            for (ci, corridor) in layout.corridors.iter().enumerate() {
+                for (si, pair) in corridor.waypoints.windows(2).enumerate() {
+                    let a = egui::pos2(grid_to_world(pair[0].x), grid_to_world(pair[0].y));
+                    let b = egui::pos2(grid_to_world(pair[1].x), grid_to_world(pair[1].y));
+                    let dist = point_to_segment_dist(world, a, b);
+                    let threshold = corridor.width as f32 * GRID_PX / 2.0 + HANDLE_HIT_RADIUS / state.view.zoom;
+                    if dist < threshold
+                        && best_hit.is_none_or(|(_, _, bd)| dist < bd)
+                    {
+                        best_hit = Some((ci, si, dist));
+                    }
+                }
+            }
+            if let Some((ci, si, _)) = best_hit {
+                let new_wp = GridPos {
+                    x: world_to_grid(world.x),
+                    y: world_to_grid(world.y),
+                };
+                layout.corridors[ci].waypoints.insert(si + 1, new_wp);
+                if is_orthogonal(&dungeon.graph, &layout.corridors[ci]) {
+                    resolve_diagonal_segments(&mut layout.corridors[ci].waypoints);
+                }
+                layout.corridors[ci].pinned_waypoints =
+                    layout.corridors[ci].waypoints.clone();
+                state.selected_corridor = Some(ci);
+                // Find the inserted waypoint (may have shifted due to diagonal resolution)
+                state.selected_waypoint = layout.corridors[ci].waypoints.iter()
+                    .position(|wp| wp.x == new_wp.x && wp.y == new_wp.y)
+                    .or(Some(si + 1));
+                state.selected_room = None;
+                state.selected_group = None;
+            }
+        }
+    }
+
+    false
+}
+
+/// A click: select a waypoint, exit, corridor, section, room or group. Returns true when the input is used up.
+fn on_click(
+    response: &egui::Response,
+    transform: &ViewTransform,
+    dungeon: &mut Dungeon,
+    state: &mut SpatialViewState,
+) -> bool {
+    if let Some(pos) = response.hover_pos() {
+        let world = transform.screen_to_world(pos);
+
+        // First: if corridor selected, check waypoint handle click
+        if let Some(ci) = state.selected_corridor {
+            if let Some(layout) = &dungeon.layout {
+                if ci < layout.corridors.len() {
+                    let corridor = &layout.corridors[ci];
+                    for (wi, wp) in corridor.waypoints.iter().enumerate() {
+                        let wp_screen = transform.world_to_screen(
+                            egui::pos2(grid_to_world(wp.x), grid_to_world(wp.y)),
+                        );
+                        if pos.distance(wp_screen) < HANDLE_HIT_RADIUS {
+                            state.selected_waypoint = Some(wi);
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Check exit handles (when room is selected)
+        if let Some(ref selected_room_id) = state.selected_room {
+            if let Some(layout) = &dungeon.layout {
+                if hit_test_exit_handles(
+                    pos, selected_room_id, layout, &dungeon.graph, &transform, state.view.zoom,
+                ).is_some() {
+                    // Click on exit handle — keep room selected, don't change selection
+                    return true;
+                }
+            }
+        }
+
+        // Check corridor segment hit
+        if let Some(layout) = &dungeon.layout {
+            let mut hit_corridor = None;
+            for (ci, corridor) in layout.corridors.iter().enumerate() {
+                // Floor filtering: skip corridors not on the current floor
+                if let (Some(floor), Some(edge)) = (state.current_floor, dungeon.graph.connection_by_id(&corridor.connection_id)) {
+                    if dungeon.graph.edge_floor_relation(edge, floor) != FloorRel::On {
+                        continue;
+                    }
+                }
+                for pair in corridor.waypoints.windows(2) {
+                    let a = egui::pos2(grid_to_world(pair[0].x), grid_to_world(pair[0].y));
+                    let b = egui::pos2(grid_to_world(pair[1].x), grid_to_world(pair[1].y));
+                    let dist = point_to_segment_dist(world, a, b);
+                    let threshold = corridor.width as f32 * GRID_PX / 2.0 + HANDLE_HIT_RADIUS / state.view.zoom;
+                    if dist < threshold {
+                        hit_corridor = Some(ci);
+                        break;
+                    }
+                }
+                if hit_corridor.is_some() {
+                    break;
+                }
+            }
+
+            if let Some(ci) = hit_corridor {
+                state.selected_corridor = Some(ci);
+                state.selected_waypoint = None;
+                state.selected_room = None;
+                state.selected_group = None;
+            } else {
+                // Check room hit — prefer deepest-nested room
+                let mut hit_room = false;
+                let mut best_hit: Option<(&RoomLayout, u32)> = None;
+                for rl in &layout.rooms {
+                    if let Some(floor) = state.current_floor {
+                        if let Some(room) = dungeon.graph.room_by_id(&rl.room_id) {
+                            if !room.floor.visible_on(floor) {
+                                continue;
+                            }
+                        }
+                    }
+                    if room_hit(rl, world, 0.4) {
+                        let depth = dungeon.graph.nesting_depth(&rl.room_id);
+                        let area = rl.width * rl.height;
+                        let is_better = match &best_hit {
+                            None => true,
+                            Some((prev, prev_depth)) => {
+                                depth > *prev_depth
+                                    || (depth == *prev_depth && area < prev.width * prev.height)
+                            }
+                        };
+                        if is_better {
+                            best_hit = Some((rl, depth));
+                        }
+                    }
+                }
+                if let Some((rl, _)) = best_hit {
+                    let rl_id = rl.room_id.clone();
+                    if !hit_room {
+                        // Check if click is on an elevation section
+                        let room_px_x = rl.x as f32 * GRID_PX;
+                        let room_px_y = rl.y as f32 * GRID_PX;
+                        let mut hit_section = None;
+                        if let Some(room) = dungeon.graph.room_by_id(&rl_id) {
+                            for (si, sec) in room.sections.iter().enumerate() {
+                                let sx = room_px_x + sec.x * GRID_PX;
+                                let sy = room_px_y + sec.y * GRID_PX;
+                                let sw = sec.width * GRID_PX;
+                                let sh = sec.length * GRID_PX;
+                                if world.x >= sx && world.x <= sx + sw
+                                    && world.y >= sy && world.y <= sy + sh
+                                {
+                                    hit_section = Some((rl_id.clone(), si));
+                                    break;
+                                }
+                            }
+                        }
+
+                        state.selected_room = Some(rl_id);
+                        state.selected_corridor = None;
+                        state.selected_waypoint = None;
+                        state.selected_group = None;
+                        state.selected_section = hit_section;
+                        hit_room = true;
+                    }
+                }
+                if !hit_room {
+                    // Check group hit
+                    let gx = world_to_grid(world.x);
+                    let gy = world_to_grid(world.y);
+                    let mut hit_group = false;
+                    for (gi, group) in dungeon.graph.groups.iter().enumerate() {
+                        if group.max_width.is_none() && group.max_height.is_none() {
+                            continue;
+                        }
+                        if let Some((bx, by, bw, bh)) = group.spatial_bounds(layout) {
+                            if gx >= bx && gx < bx + bw as i32
+                                && gy >= by && gy < by + bh as i32
+                            {
+                                state.selected_group = Some(gi);
+                                state.selected_corridor = None;
+                                state.selected_waypoint = None;
+                                state.selected_room = None;
+                                hit_group = true;
+                                break;
+                            }
+                        }
+                    }
+                    if !hit_group {
+                        state.selected_room = None;
+                        state.selected_corridor = None;
+                        state.selected_waypoint = None;
+                        state.selected_group = None;
+                        state.selected_section = None;
+                        state.cave_edit_mode = false;
+                    }
+                }
+            }
+        }
+    }
+
+    false
+}
+
+/// A primary drag in progress: move whatever the drag grabbed. Returns true when the input is used up.
+fn on_drag(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    transform: &ViewTransform,
+    dungeon: &mut Dungeon,
+    state: &mut SpatialViewState,
+) -> bool {
+    // Rotation follows the cursor's angle around the room's center
+    if let DragTarget::Rotate(ref room_id) = state.drag_target {
+        let snap = ui.input(|i| i.modifiers.shift);
+        if let (Some(ptr), Some(layout)) = (response.interact_pointer_pos(), &mut dungeon.layout) {
+            if let Some(rl) = layout.room_by_id_mut(room_id) {
+                let world = transform.screen_to_world(ptr);
+                let (cx, cy) = rl.center();
+                // The handle sits straight above the center at 0°
+                let deg = (world.y / GRID_PX - cy).atan2(world.x / GRID_PX - cx).to_degrees() + 90.0;
+                let step = if snap { 15.0 } else { 1.0 };
+                let deg = (deg / step).round() * step;
+                rl.rotation = (deg + 180.0).rem_euclid(360.0) - 180.0;
+            }
+        }
+        return true;
+    }
+    // Exit drag uses absolute cursor position — handle before grid-step accumulation
+    if let DragTarget::Exit(ref conn_id, is_source) = state.drag_target {
+        let conn_id = conn_id.clone();
+        if let Some(ptr_pos) = response.interact_pointer_pos() {
+            let world = transform.screen_to_world(ptr_pos);
+            let room_id = dungeon.graph.connections.iter()
+                .find(|e| e.connection.id == conn_id)
+                .map(|e| if is_source { &e.source_room_id } else { &e.target_room_id })
+                .cloned();
+            let cw = dungeon.graph.connections.iter()
+                .find(|e| e.connection.id == conn_id)
+                .map(|e| e.connection.corridor_width)
+                .unwrap_or(2);
+            if let Some(room_id) = room_id {
+                if let Some(layout) = &dungeon.layout {
+                    if let Some(room_rl) = layout.room_by_id(&room_id) {
+                        let new_exit = snap_to_perimeter(world, room_rl, cw);
+                        if let Some(edge) = dungeon.graph.connections.iter_mut()
+                            .find(|e| e.connection.id == conn_id)
+                        {
+                            if is_source {
+                                edge.source_exit = Some(new_exit);
+                            } else {
+                                edge.target_exit = Some(new_exit);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut delta = response.drag_delta() / state.view.zoom;
+    // A section of a rotated room moves in the room's own frame
+    if let (DragTarget::Section(room_id, _), Some(layout)) = (&state.drag_target, &dungeon.layout) {
+        if let Some(rl) = layout.room_by_id(room_id).filter(|rl| rl.is_rotated()) {
+            let (s, c) = rl.rotation.to_radians().sin_cos();
+            delta = egui::vec2(delta.x * c + delta.y * s, -delta.x * s + delta.y * c);
+        }
+    }
+    state.drag_accum += delta;
+
+    let grid_steps_x = (state.drag_accum.x / GRID_PX).round() as i32;
+    let grid_steps_y = (state.drag_accum.y / GRID_PX).round() as i32;
+
+    if grid_steps_x != 0 || grid_steps_y != 0 {
+        match &state.drag_target {
+            DragTarget::Room(room_id) => {
+                let room_id = room_id.clone();
+
+                // Find which connections are attached to this room
+                let connected_ids: Vec<(String, bool, bool)> = dungeon.graph.connections
+                    .iter()
+                    .filter_map(|e| {
+                        let is_src = e.source_room_id == room_id;
+                        let is_tgt = e.target_room_id == room_id;
+                        if is_src || is_tgt {
+                            Some((e.connection.id.clone(), is_src, is_tgt))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                // Collect children to move along with this room (recursive)
+                let mut children_to_move: Vec<String> = Vec::new();
+                {
+                    let mut stack = vec![room_id.clone()];
+                    while let Some(rid) = stack.pop() {
+                        for child_id in dungeon.graph.children_of(&rid) {
+                            children_to_move.push(child_id.to_string());
+                            stack.push(child_id.to_string());
+                        }
+                    }
+                }
+
+                // Also collect connections for children (for waypoint/exit shifting)
+                let mut child_connected_ids: Vec<(String, String, bool, bool)> = Vec::new(); // (conn_id, room_id, is_src, is_tgt)
+                for child_id in &children_to_move {
+                    for e in &dungeon.graph.connections {
+                        let is_src = e.source_room_id == *child_id;
+                        let is_tgt = e.target_room_id == *child_id;
+                        if is_src || is_tgt {
+                            child_connected_ids.push((e.connection.id.clone(), child_id.clone(), is_src, is_tgt));
+                        }
+                    }
+                }
+
+                if let Some(layout) = &mut dungeon.layout {
+                    // Move the room
+                    if let Some(rl) = layout.room_by_id_mut(&room_id) {
+                        rl.x += grid_steps_x;
+                        rl.y += grid_steps_y;
+                    }
+
+                    // Move all children along with the container
+                    for child_id in &children_to_move {
+                        if let Some(rl) = layout.room_by_id_mut(child_id) {
+                            rl.x += grid_steps_x;
+                            rl.y += grid_steps_y;
+                        }
+                    }
+
+                    // Shift pinned waypoints for children's corridors
+                    for corridor in &mut layout.corridors {
+                        for (conn_id, _, is_src, is_tgt) in &child_connected_ids {
+                            if corridor.connection_id != *conn_id { continue; }
+                            if !corridor.pinned_waypoints.is_empty() {
+                                if *is_src {
+                                    corridor.pinned_waypoints.first_mut().unwrap().x += grid_steps_x;
+                                    corridor.pinned_waypoints.first_mut().unwrap().y += grid_steps_y;
+                                }
+                                if *is_tgt {
+                                    corridor.pinned_waypoints.last_mut().unwrap().x += grid_steps_x;
+                                    corridor.pinned_waypoints.last_mut().unwrap().y += grid_steps_y;
+                                }
+                            }
+                        }
+                    }
+
+                    // Clamp child rooms to stay within parent bounds
+                    if let Some(parent_id) = dungeon.graph.parent_of(&room_id) {
+                        let padding = dungeon.graph.containment_group(parent_id)
+                            .map(|g| g.containment_padding as i32)
+                            .unwrap_or(1);
+                        let parent_bounds = layout.room_by_id(parent_id).map(|p| (p.x, p.y, p.width, p.height));
+                        if let (Some((px, py, pw, ph)), Some(rl)) = (parent_bounds, layout.room_by_id_mut(&room_id)) {
+                            let min_x = px + padding;
+                            let min_y = py + padding;
+                            let max_x = px + pw as i32 - padding - rl.width as i32;
+                            let max_y = py + ph as i32 - padding - rl.height as i32;
+                            rl.x = rl.x.clamp(min_x, max_x);
+                            rl.y = rl.y.clamp(min_y, max_y);
+                        }
+                    }
+
+                    // Shift pinned waypoints for connected corridors
+                    for corridor in &mut layout.corridors {
+                        for (conn_id, is_src, is_tgt) in &connected_ids {
+                            if corridor.connection_id != *conn_id {
+                                continue;
+                            }
+                            if !corridor.pinned_waypoints.is_empty() {
+                                // Shift the start waypoint if this room is the source
+                                if *is_src {
+                                    corridor.pinned_waypoints.first_mut().unwrap().x += grid_steps_x;
+                                    corridor.pinned_waypoints.first_mut().unwrap().y += grid_steps_y;
+                                }
+                                // Shift the end waypoint if this room is the target
+                                if *is_tgt {
+                                    corridor.pinned_waypoints.last_mut().unwrap().x += grid_steps_x;
+                                    corridor.pinned_waypoints.last_mut().unwrap().y += grid_steps_y;
                                 }
                             }
                         }
                     }
                 }
-            }
-        }
 
-        let mut delta = response.drag_delta() / state.view.zoom;
-        // A section of a rotated room moves in the room's own frame
-        if let (DragTarget::Section(room_id, _), Some(layout)) = (&state.drag_target, &dungeon.layout) {
-            if let Some(rl) = layout.room_by_id(room_id).filter(|rl| rl.is_rotated()) {
-                let (s, c) = rl.rotation.to_radians().sin_cos();
-                delta = egui::vec2(delta.x * c + delta.y * s, -delta.x * s + delta.y * c);
-            }
-        }
-        state.drag_accum += delta;
-
-        let grid_steps_x = (state.drag_accum.x / GRID_PX).round() as i32;
-        let grid_steps_y = (state.drag_accum.y / GRID_PX).round() as i32;
-
-        if grid_steps_x != 0 || grid_steps_y != 0 {
-            match &state.drag_target {
-                DragTarget::Room(room_id) => {
-                    let room_id = room_id.clone();
-
-                    // Find which connections are attached to this room
-                    let connected_ids: Vec<(String, bool, bool)> = dungeon.graph.connections
-                        .iter()
-                        .filter_map(|e| {
-                            let is_src = e.source_room_id == room_id;
-                            let is_tgt = e.target_room_id == room_id;
-                            if is_src || is_tgt {
-                                Some((e.connection.id.clone(), is_src, is_tgt))
-                            } else {
-                                None
+                // Shift exit positions for connected edges (room + children)
+                let all_exit_shifts: Vec<(String, bool, bool)> = connected_ids.iter()
+                    .map(|(c, s, t)| (c.clone(), *s, *t))
+                    .chain(child_connected_ids.iter().map(|(c, _, s, t)| (c.clone(), *s, *t)))
+                    .collect();
+                for (conn_id, is_src, is_tgt) in &all_exit_shifts {
+                    if let Some(edge) = dungeon.graph.connections.iter_mut()
+                        .find(|e| e.connection.id == *conn_id)
+                    {
+                        if *is_src {
+                            if let Some(ref mut exit) = edge.source_exit {
+                                exit.x += grid_steps_x as f32;
+                                exit.y += grid_steps_y as f32;
                             }
-                        })
+                        }
+                        if *is_tgt {
+                            if let Some(ref mut exit) = edge.target_exit {
+                                exit.x += grid_steps_x as f32;
+                                exit.y += grid_steps_y as f32;
+                            }
+                        }
+                    }
+                }
+            }
+            DragTarget::Waypoint(ci, wi) => {
+                let ci = *ci;
+                let wi = *wi;
+                if let Some(layout) = &mut dungeon.layout {
+                    // Angled corridors keep their angles: only orthogonal ones drag
+                    // neighbours along and get their corners squared
+                    let ortho = is_orthogonal(&dungeon.graph, &layout.corridors[ci]);
+                    let wps = &mut layout.corridors[ci].waypoints;
+                    if wi < wps.len() {
+                        // Check segment orientations BEFORE moving
+                        let prev_horizontal = wi > 0 && wps[wi - 1].y == wps[wi].y;
+                        let prev_vertical = wi > 0 && wps[wi - 1].x == wps[wi].x;
+                        let next_horizontal = wi + 1 < wps.len() && wps[wi + 1].y == wps[wi].y;
+                        let next_vertical = wi + 1 < wps.len() && wps[wi + 1].x == wps[wi].x;
+
+                        // Remember the dragged point's identity
+
+                        // Move the dragged waypoint
+                        wps[wi].x += grid_steps_x;
+                        wps[wi].y += grid_steps_y;
+
+                        let dragged_pos_after = wps[wi];
+                        let last = wps.len() - 1;
+
+                        // Pull the previous neighbor along the shared axis,
+                        // but never move the first endpoint (index 0)
+                        if ortho && wi > 0 && wi - 1 != 0 {
+                            if prev_horizontal {
+                                wps[wi - 1].y += grid_steps_y;
+                            }
+                            if prev_vertical {
+                                wps[wi - 1].x += grid_steps_x;
+                            }
+                        }
+
+                        // Pull the next neighbor along the shared axis,
+                        // but never move the last endpoint
+                        if ortho && wi + 1 < wps.len() && wi + 1 != last {
+                            if next_horizontal {
+                                wps[wi + 1].y += grid_steps_y;
+                            }
+                            if next_vertical {
+                                wps[wi + 1].x += grid_steps_x;
+                            }
+                        }
+
+                        // Clean up stale auto-corners and resolve new diagonals
+                        if ortho {
+                            resolve_diagonal_segments_clean(wps);
+                        }
+
+                        // Update the drag target index to track the moved waypoint
+                        if let Some(new_wi) = wps.iter().position(|wp| wp.x == dragged_pos_after.x && wp.y == dragged_pos_after.y) {
+                            state.drag_target = DragTarget::Waypoint(ci, new_wi);
+                        }
+                    }
+                }
+            }
+            DragTarget::GroupCorner(gi, corner) => {
+                let gi = *gi;
+                let corner = *corner;
+                if gi < dungeon.graph.groups.len() {
+                    if let Some(layout) = &dungeon.layout {
+                        if let Some((gx, gy, gw, gh)) = dungeon.graph.groups[gi].spatial_bounds(layout) {
+                            let group = &mut dungeon.graph.groups[gi];
+                            match corner {
+                                0 => { // TL: move origin, shrink size
+                                    let new_x = gx + grid_steps_x;
+                                    let new_y = gy + grid_steps_y;
+                                    let new_w = (gw as i32 - grid_steps_x).max(1) as u32;
+                                    let new_h = (gh as i32 - grid_steps_y).max(1) as u32;
+                                    group.spatial_x = Some(new_x);
+                                    group.spatial_y = Some(new_y);
+                                    group.max_width = Some(new_w);
+                                    group.max_height = Some(new_h);
+                                }
+                                1 => { // TR: grow/shrink width
+                                    let new_w = (gw as i32 + grid_steps_x).max(1) as u32;
+                                    let new_h = (gh as i32 - grid_steps_y).max(1) as u32;
+                                    let new_y = gy + grid_steps_y;
+                                    group.spatial_y = Some(new_y);
+                                    group.max_width = Some(new_w);
+                                    group.max_height = Some(new_h);
+                                }
+                                2 => { // BL: grow/shrink height
+                                    let new_x = gx + grid_steps_x;
+                                    let new_w = (gw as i32 - grid_steps_x).max(1) as u32;
+                                    let new_h = (gh as i32 + grid_steps_y).max(1) as u32;
+                                    group.spatial_x = Some(new_x);
+                                    group.max_width = Some(new_w);
+                                    group.max_height = Some(new_h);
+                                }
+                                3 => { // BR: grow both
+                                    let new_w = (gw as i32 + grid_steps_x).max(1) as u32;
+                                    let new_h = (gh as i32 + grid_steps_y).max(1) as u32;
+                                    group.max_width = Some(new_w);
+                                    group.max_height = Some(new_h);
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+            DragTarget::Group(gi) => {
+                let gi = *gi;
+                if gi < dungeon.graph.groups.len() {
+                    let group_room_ids = dungeon.graph.groups[gi].room_ids.clone();
+                    let room_id_set: std::collections::HashSet<&String> = group_room_ids.iter().collect();
+
+                    // Find connections internal to the group
+                    let internal_conn_ids: Vec<String> = dungeon.graph.connections.iter()
+                        .filter(|e| room_id_set.contains(&e.source_room_id) && room_id_set.contains(&e.target_room_id))
+                        .map(|e| e.connection.id.clone())
                         .collect();
 
-                    // Collect children to move along with this room (recursive)
-                    let mut children_to_move: Vec<String> = Vec::new();
-                    {
-                        let mut stack = vec![room_id.clone()];
-                        while let Some(rid) = stack.pop() {
-                            for child_id in dungeon.graph.children_of(&rid) {
-                                children_to_move.push(child_id.to_string());
-                                stack.push(child_id.to_string());
-                            }
-                        }
-                    }
-
-                    // Also collect connections for children (for waypoint/exit shifting)
-                    let mut child_connected_ids: Vec<(String, String, bool, bool)> = Vec::new(); // (conn_id, room_id, is_src, is_tgt)
-                    for child_id in &children_to_move {
-                        for e in &dungeon.graph.connections {
-                            let is_src = e.source_room_id == *child_id;
-                            let is_tgt = e.target_room_id == *child_id;
-                            if is_src || is_tgt {
-                                child_connected_ids.push((e.connection.id.clone(), child_id.clone(), is_src, is_tgt));
-                            }
-                        }
-                    }
-
                     if let Some(layout) = &mut dungeon.layout {
-                        // Move the room
-                        if let Some(rl) = layout.room_by_id_mut(&room_id) {
-                            rl.x += grid_steps_x;
-                            rl.y += grid_steps_y;
-                        }
-
-                        // Move all children along with the container
-                        for child_id in &children_to_move {
-                            if let Some(rl) = layout.room_by_id_mut(child_id) {
+                        // Move all rooms in the group
+                        for rid in &group_room_ids {
+                            if let Some(rl) = layout.room_by_id_mut(rid) {
                                 rl.x += grid_steps_x;
                                 rl.y += grid_steps_y;
                             }
                         }
-
-                        // Shift pinned waypoints for children's corridors
+                        // Move internal corridor waypoints
                         for corridor in &mut layout.corridors {
-                            for (conn_id, _, is_src, is_tgt) in &child_connected_ids {
-                                if corridor.connection_id != *conn_id { continue; }
-                                if !corridor.pinned_waypoints.is_empty() {
-                                    if *is_src {
-                                        corridor.pinned_waypoints.first_mut().unwrap().x += grid_steps_x;
-                                        corridor.pinned_waypoints.first_mut().unwrap().y += grid_steps_y;
-                                    }
-                                    if *is_tgt {
-                                        corridor.pinned_waypoints.last_mut().unwrap().x += grid_steps_x;
-                                        corridor.pinned_waypoints.last_mut().unwrap().y += grid_steps_y;
-                                    }
+                            if internal_conn_ids.contains(&corridor.connection_id) {
+                                for wp in &mut corridor.waypoints {
+                                    wp.x += grid_steps_x;
+                                    wp.y += grid_steps_y;
                                 }
-                            }
-                        }
-
-                        // Clamp child rooms to stay within parent bounds
-                        if let Some(parent_id) = dungeon.graph.parent_of(&room_id) {
-                            let padding = dungeon.graph.containment_group(parent_id)
-                                .map(|g| g.containment_padding as i32)
-                                .unwrap_or(1);
-                            let parent_bounds = layout.room_by_id(parent_id).map(|p| (p.x, p.y, p.width, p.height));
-                            if let (Some((px, py, pw, ph)), Some(rl)) = (parent_bounds, layout.room_by_id_mut(&room_id)) {
-                                let min_x = px + padding;
-                                let min_y = py + padding;
-                                let max_x = px + pw as i32 - padding - rl.width as i32;
-                                let max_y = py + ph as i32 - padding - rl.height as i32;
-                                rl.x = rl.x.clamp(min_x, max_x);
-                                rl.y = rl.y.clamp(min_y, max_y);
-                            }
-                        }
-
-                        // Shift pinned waypoints for connected corridors
-                        for corridor in &mut layout.corridors {
-                            for (conn_id, is_src, is_tgt) in &connected_ids {
-                                if corridor.connection_id != *conn_id {
-                                    continue;
-                                }
-                                if !corridor.pinned_waypoints.is_empty() {
-                                    // Shift the start waypoint if this room is the source
-                                    if *is_src {
-                                        corridor.pinned_waypoints.first_mut().unwrap().x += grid_steps_x;
-                                        corridor.pinned_waypoints.first_mut().unwrap().y += grid_steps_y;
-                                    }
-                                    // Shift the end waypoint if this room is the target
-                                    if *is_tgt {
-                                        corridor.pinned_waypoints.last_mut().unwrap().x += grid_steps_x;
-                                        corridor.pinned_waypoints.last_mut().unwrap().y += grid_steps_y;
-                                    }
+                                for wp in &mut corridor.pinned_waypoints {
+                                    wp.x += grid_steps_x;
+                                    wp.y += grid_steps_y;
                                 }
                             }
                         }
                     }
 
-                    // Shift exit positions for connected edges (room + children)
-                    let all_exit_shifts: Vec<(String, bool, bool)> = connected_ids.iter()
-                        .map(|(c, s, t)| (c.clone(), *s, *t))
-                        .chain(child_connected_ids.iter().map(|(c, _, s, t)| (c.clone(), *s, *t)))
-                        .collect();
-                    for (conn_id, is_src, is_tgt) in &all_exit_shifts {
-                        if let Some(edge) = dungeon.graph.connections.iter_mut()
-                            .find(|e| e.connection.id == *conn_id)
-                        {
-                            if *is_src {
-                                if let Some(ref mut exit) = edge.source_exit {
-                                    exit.x += grid_steps_x as f32;
-                                    exit.y += grid_steps_y as f32;
-                                }
+                    // Shift exit positions for connections touching group rooms
+                    for edge in &mut dungeon.graph.connections {
+                        if room_id_set.contains(&edge.source_room_id) {
+                            if let Some(ref mut exit) = edge.source_exit {
+                                exit.x += grid_steps_x as f32;
+                                exit.y += grid_steps_y as f32;
                             }
-                            if *is_tgt {
-                                if let Some(ref mut exit) = edge.target_exit {
-                                    exit.x += grid_steps_x as f32;
-                                    exit.y += grid_steps_y as f32;
-                                }
+                        }
+                        if room_id_set.contains(&edge.target_room_id) {
+                            if let Some(ref mut exit) = edge.target_exit {
+                                exit.x += grid_steps_x as f32;
+                                exit.y += grid_steps_y as f32;
                             }
                         }
                     }
                 }
-                DragTarget::Waypoint(ci, wi) => {
-                    let ci = *ci;
-                    let wi = *wi;
-                    if let Some(layout) = &mut dungeon.layout {
-                        // Angled corridors keep their angles: only orthogonal ones drag
-                        // neighbours along and get their corners squared
-                        let ortho = is_orthogonal(&dungeon.graph, &layout.corridors[ci]);
-                        let wps = &mut layout.corridors[ci].waypoints;
-                        if wi < wps.len() {
-                            // Check segment orientations BEFORE moving
-                            let prev_horizontal = wi > 0 && wps[wi - 1].y == wps[wi].y;
-                            let prev_vertical = wi > 0 && wps[wi - 1].x == wps[wi].x;
-                            let next_horizontal = wi + 1 < wps.len() && wps[wi + 1].y == wps[wi].y;
-                            let next_vertical = wi + 1 < wps.len() && wps[wi + 1].x == wps[wi].x;
-
-                            // Remember the dragged point's identity
-
-                            // Move the dragged waypoint
-                            wps[wi].x += grid_steps_x;
-                            wps[wi].y += grid_steps_y;
-
-                            let dragged_pos_after = wps[wi];
-                            let last = wps.len() - 1;
-
-                            // Pull the previous neighbor along the shared axis,
-                            // but never move the first endpoint (index 0)
-                            if ortho && wi > 0 && wi - 1 != 0 {
-                                if prev_horizontal {
-                                    wps[wi - 1].y += grid_steps_y;
-                                }
-                                if prev_vertical {
-                                    wps[wi - 1].x += grid_steps_x;
-                                }
-                            }
-
-                            // Pull the next neighbor along the shared axis,
-                            // but never move the last endpoint
-                            if ortho && wi + 1 < wps.len() && wi + 1 != last {
-                                if next_horizontal {
-                                    wps[wi + 1].y += grid_steps_y;
-                                }
-                                if next_vertical {
-                                    wps[wi + 1].x += grid_steps_x;
-                                }
-                            }
-
-                            // Clean up stale auto-corners and resolve new diagonals
-                            if ortho {
-                                resolve_diagonal_segments_clean(wps);
-                            }
-
-                            // Update the drag target index to track the moved waypoint
-                            if let Some(new_wi) = wps.iter().position(|wp| wp.x == dragged_pos_after.x && wp.y == dragged_pos_after.y) {
-                                state.drag_target = DragTarget::Waypoint(ci, new_wi);
-                            }
-                        }
-                    }
-                }
-                DragTarget::GroupCorner(gi, corner) => {
-                    let gi = *gi;
-                    let corner = *corner;
-                    if gi < dungeon.graph.groups.len() {
-                        if let Some(layout) = &dungeon.layout {
-                            if let Some((gx, gy, gw, gh)) = dungeon.graph.groups[gi].spatial_bounds(layout) {
-                                let group = &mut dungeon.graph.groups[gi];
-                                match corner {
-                                    0 => { // TL: move origin, shrink size
-                                        let new_x = gx + grid_steps_x;
-                                        let new_y = gy + grid_steps_y;
-                                        let new_w = (gw as i32 - grid_steps_x).max(1) as u32;
-                                        let new_h = (gh as i32 - grid_steps_y).max(1) as u32;
-                                        group.spatial_x = Some(new_x);
-                                        group.spatial_y = Some(new_y);
-                                        group.max_width = Some(new_w);
-                                        group.max_height = Some(new_h);
-                                    }
-                                    1 => { // TR: grow/shrink width
-                                        let new_w = (gw as i32 + grid_steps_x).max(1) as u32;
-                                        let new_h = (gh as i32 - grid_steps_y).max(1) as u32;
-                                        let new_y = gy + grid_steps_y;
-                                        group.spatial_y = Some(new_y);
-                                        group.max_width = Some(new_w);
-                                        group.max_height = Some(new_h);
-                                    }
-                                    2 => { // BL: grow/shrink height
-                                        let new_x = gx + grid_steps_x;
-                                        let new_w = (gw as i32 - grid_steps_x).max(1) as u32;
-                                        let new_h = (gh as i32 + grid_steps_y).max(1) as u32;
-                                        group.spatial_x = Some(new_x);
-                                        group.max_width = Some(new_w);
-                                        group.max_height = Some(new_h);
-                                    }
-                                    3 => { // BR: grow both
-                                        let new_w = (gw as i32 + grid_steps_x).max(1) as u32;
-                                        let new_h = (gh as i32 + grid_steps_y).max(1) as u32;
-                                        group.max_width = Some(new_w);
-                                        group.max_height = Some(new_h);
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                    }
-                }
-                DragTarget::Group(gi) => {
-                    let gi = *gi;
-                    if gi < dungeon.graph.groups.len() {
-                        let group_room_ids = dungeon.graph.groups[gi].room_ids.clone();
-                        let room_id_set: std::collections::HashSet<&String> = group_room_ids.iter().collect();
-
-                        // Find connections internal to the group
-                        let internal_conn_ids: Vec<String> = dungeon.graph.connections.iter()
-                            .filter(|e| room_id_set.contains(&e.source_room_id) && room_id_set.contains(&e.target_room_id))
-                            .map(|e| e.connection.id.clone())
-                            .collect();
-
-                        if let Some(layout) = &mut dungeon.layout {
-                            // Move all rooms in the group
-                            for rid in &group_room_ids {
-                                if let Some(rl) = layout.room_by_id_mut(rid) {
-                                    rl.x += grid_steps_x;
-                                    rl.y += grid_steps_y;
-                                }
-                            }
-                            // Move internal corridor waypoints
-                            for corridor in &mut layout.corridors {
-                                if internal_conn_ids.contains(&corridor.connection_id) {
-                                    for wp in &mut corridor.waypoints {
-                                        wp.x += grid_steps_x;
-                                        wp.y += grid_steps_y;
-                                    }
-                                    for wp in &mut corridor.pinned_waypoints {
-                                        wp.x += grid_steps_x;
-                                        wp.y += grid_steps_y;
-                                    }
-                                }
-                            }
-                        }
-
-                        // Shift exit positions for connections touching group rooms
-                        for edge in &mut dungeon.graph.connections {
-                            if room_id_set.contains(&edge.source_room_id) {
-                                if let Some(ref mut exit) = edge.source_exit {
-                                    exit.x += grid_steps_x as f32;
-                                    exit.y += grid_steps_y as f32;
-                                }
-                            }
-                            if room_id_set.contains(&edge.target_room_id) {
-                                if let Some(ref mut exit) = edge.target_exit {
-                                    exit.x += grid_steps_x as f32;
-                                    exit.y += grid_steps_y as f32;
-                                }
-                            }
-                        }
-                    }
-                }
-                DragTarget::Section(room_id, sec_idx) => {
-                    let room_id = room_id.clone();
-                    let sec_idx = *sec_idx;
-                    // Use layout dimensions (which reflect rotation) rather than model grid_size()
-                    let layout_size = dungeon.layout.as_ref()
-                        .and_then(|l| l.room_by_id(&room_id))
-                        .map(|rl| (rl.width as f32, rl.height as f32));
-                    if let Some(room) = dungeon.graph.room_by_id_mut(&room_id) {
-                        if sec_idx < room.sections.len() {
-                            let (rw, rh) = layout_size.unwrap_or_else(|| {
-                                let (w, h) = room.grid_size();
-                                (w as f32, h as f32)
-                            });
-                            let sec = &mut room.sections[sec_idx];
-                            let max_x = (rw - sec.width).max(0.0);
-                            let max_y = (rh - sec.length).max(0.0);
-                            sec.x = (sec.x + grid_steps_x as f32).clamp(0.0, max_x);
-                            sec.y = (sec.y + grid_steps_y as f32).clamp(0.0, max_y);
-                        }
-                    }
-                }
-                DragTarget::Exit(_, _) | DragTarget::Rotate(_) => {} // handled above, before grid-step check
-                DragTarget::None => {}
             }
-            state.drag_accum.x -= grid_steps_x as f32 * GRID_PX;
-            state.drag_accum.y -= grid_steps_y as f32 * GRID_PX;
-        }
-    }
-
-    // === DRAG STOP ===
-    if response.drag_stopped_by(egui::PointerButton::Primary) {
-        match &state.drag_target {
-            DragTarget::Room(room_id) => {
+            DragTarget::Section(room_id, sec_idx) => {
                 let room_id = room_id.clone();
-                if let Some(layout) = &mut dungeon.layout {
-                    let affected = std::collections::HashSet::from([room_id]);
-                    layout.corridors =
-                        crate::solver::corridor::route_corridors_for_rooms(
-                            &dungeon.graph, layout, &affected,
-                        );
-                    layout.recheck_corridor_overlaps();
-                }
-                // Cave contours are stored in world space and depend on the neighbours
-                state.cave_contours_dirty = true;
-            }
-            DragTarget::Waypoint(ci, _) => {
-                let ci = *ci;
-                if let Some(layout) = &mut dungeon.layout {
-                    if ci < layout.corridors.len() {
-                        if is_orthogonal(&dungeon.graph, &layout.corridors[ci]) {
-                            resolve_diagonal_segments(&mut layout.corridors[ci].waypoints);
-                        }
-                        layout.corridors[ci].pinned_waypoints =
-                            layout.corridors[ci].waypoints.clone();
-                    }
-                    layout.recheck_corridor_overlaps();
-                }
-            }
-            DragTarget::GroupCorner(_, _) => {
-                // Group constraint changed — will trigger re-solve via hash check
-            }
-            DragTarget::Group(gi) => {
-                let gi = *gi;
-                // Re-route only corridors connected to rooms in the group
-                if let Some(layout) = &mut dungeon.layout {
-                    let affected: std::collections::HashSet<String> =
-                        if gi < dungeon.graph.groups.len() {
-                            dungeon.graph.groups[gi].room_ids.iter().cloned().collect()
-                        } else {
-                            std::collections::HashSet::new()
-                        };
-                    layout.corridors =
-                        crate::solver::corridor::route_corridors_for_rooms(
-                            &dungeon.graph, layout, &affected,
-                        );
-                    layout.recheck_corridor_overlaps();
-                }
-                state.cave_contours_dirty = true;
-            }
-            DragTarget::Section(_, _) => {} // position already updated during drag
-            DragTarget::Rotate(room_id) => {
-                reroute_room(dungeon, room_id);
-                state.cave_contours_dirty = true;
-            }
-            DragTarget::Exit(conn_id, _) => {
-                // Re-route the corridor for this connection
-                let conn_id = conn_id.clone();
-                if let Some(edge) = dungeon.graph.connection_by_id(&conn_id) {
-                    let affected = std::collections::HashSet::from([
-                        edge.source_room_id.clone(),
-                        edge.target_room_id.clone(),
-                    ]);
-                    if let Some(layout) = &mut dungeon.layout {
-                        layout.corridors =
-                            crate::solver::corridor::route_corridors_for_rooms(
-                                &dungeon.graph, layout, &affected,
-                            );
-                        layout.recheck_corridor_overlaps();
+                let sec_idx = *sec_idx;
+                // Use layout dimensions (which reflect rotation) rather than model grid_size()
+                let layout_size = dungeon.layout.as_ref()
+                    .and_then(|l| l.room_by_id(&room_id))
+                    .map(|rl| (rl.width as f32, rl.height as f32));
+                if let Some(room) = dungeon.graph.room_by_id_mut(&room_id) {
+                    if sec_idx < room.sections.len() {
+                        let (rw, rh) = layout_size.unwrap_or_else(|| {
+                            let (w, h) = room.grid_size();
+                            (w as f32, h as f32)
+                        });
+                        let sec = &mut room.sections[sec_idx];
+                        let max_x = (rw - sec.width).max(0.0);
+                        let max_y = (rh - sec.length).max(0.0);
+                        sec.x = (sec.x + grid_steps_x as f32).clamp(0.0, max_x);
+                        sec.y = (sec.y + grid_steps_y as f32).clamp(0.0, max_y);
                     }
                 }
             }
+            DragTarget::Exit(_, _) | DragTarget::Rotate(_) => {} // handled above, before grid-step check
             DragTarget::None => {}
         }
-        state.drag_target = DragTarget::None;
+        state.drag_accum.x -= grid_steps_x as f32 * GRID_PX;
+        state.drag_accum.y -= grid_steps_y as f32 * GRID_PX;
     }
+
+    false
 }
+
+/// A primary drag ending: re-route what moved. Returns true when the input is used up.
+fn on_drag_stop(
+    dungeon: &mut Dungeon,
+    state: &mut SpatialViewState,
+) -> bool {
+    match &state.drag_target {
+        DragTarget::Room(room_id) => {
+            let room_id = room_id.clone();
+            if let Some(layout) = &mut dungeon.layout {
+                let affected = std::collections::HashSet::from([room_id]);
+                layout.corridors =
+                    crate::solver::corridor::route_corridors_for_rooms(
+                        &dungeon.graph, layout, &affected,
+                    );
+                layout.recheck_corridor_overlaps();
+            }
+            // Cave contours are stored in world space and depend on the neighbours
+            state.cave_contours_dirty = true;
+        }
+        DragTarget::Waypoint(ci, _) => {
+            let ci = *ci;
+            if let Some(layout) = &mut dungeon.layout {
+                if ci < layout.corridors.len() {
+                    if is_orthogonal(&dungeon.graph, &layout.corridors[ci]) {
+                        resolve_diagonal_segments(&mut layout.corridors[ci].waypoints);
+                    }
+                    layout.corridors[ci].pinned_waypoints =
+                        layout.corridors[ci].waypoints.clone();
+                }
+                layout.recheck_corridor_overlaps();
+            }
+        }
+        DragTarget::GroupCorner(_, _) => {
+            // Group constraint changed — will trigger re-solve via hash check
+        }
+        DragTarget::Group(gi) => {
+            let gi = *gi;
+            // Re-route only corridors connected to rooms in the group
+            if let Some(layout) = &mut dungeon.layout {
+                let affected: std::collections::HashSet<String> =
+                    if gi < dungeon.graph.groups.len() {
+                        dungeon.graph.groups[gi].room_ids.iter().cloned().collect()
+                    } else {
+                        std::collections::HashSet::new()
+                    };
+                layout.corridors =
+                    crate::solver::corridor::route_corridors_for_rooms(
+                        &dungeon.graph, layout, &affected,
+                    );
+                layout.recheck_corridor_overlaps();
+            }
+            state.cave_contours_dirty = true;
+        }
+        DragTarget::Section(_, _) => {} // position already updated during drag
+        DragTarget::Rotate(room_id) => {
+            reroute_room(dungeon, room_id);
+            state.cave_contours_dirty = true;
+        }
+        DragTarget::Exit(conn_id, _) => {
+            // Re-route the corridor for this connection
+            let conn_id = conn_id.clone();
+            if let Some(edge) = dungeon.graph.connection_by_id(&conn_id) {
+                let affected = std::collections::HashSet::from([
+                    edge.source_room_id.clone(),
+                    edge.target_room_id.clone(),
+                ]);
+                if let Some(layout) = &mut dungeon.layout {
+                    layout.corridors =
+                        crate::solver::corridor::route_corridors_for_rooms(
+                            &dungeon.graph, layout, &affected,
+                        );
+                    layout.recheck_corridor_overlaps();
+                }
+            }
+        }
+        DragTarget::None => {}
+    }
+    state.drag_target = DragTarget::None;
+
+    false
+}
+
 
 /// Paint the selected cave's cells: left button digs (floor), right button fills (wall).
 /// A stroke must start inside the cave; it then paints every cell the pointer passes
