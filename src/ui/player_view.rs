@@ -139,18 +139,7 @@ pub fn player_viewport(
         if cache_ready {
             state.render_cache.paint(&painter, &transform);
         } else {
-            let msg = format!("Rendering {}...",
-                state.render_cache.pending_label().unwrap_or("player view"));
-            let spinner_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(200.0, 40.0));
-            painter.rect_filled(spinner_rect, 8.0, egui::Color32::from_rgba_unmultiplied(0, 0, 0, 180));
-            painter.text(
-                spinner_rect.center(),
-                egui::Align2::CENTER_CENTER,
-                &msg,
-                egui::FontId::proportional(14.0),
-                egui::Color32::WHITE,
-            );
-            ui.ctx().request_repaint();
+            crate::ui::canvas_common::paint_render_pending(ui, &painter, rect, state.render_cache.pending_label().unwrap_or("player view"));
         }
 
         // Light / vision shading (computed by the DM canvas each frame)

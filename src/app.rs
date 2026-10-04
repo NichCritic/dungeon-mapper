@@ -1616,13 +1616,13 @@ impl eframe::App for DungeonApp {
                     stale_renders.push("Bestiary");
                 }
                 if let Some(layout) = &self.dungeon.layout {
-                    let enc_hash = crate::ui::encounters_view::render_cache_hash(layout, &self.dungeon.graph, &self.dungeon.theme);
+                    let enc_hash = crate::ui::encounters_view::cache_spec(layout, &self.dungeon.graph, &self.dungeon.theme).hash;
                     if !self.encounters_state.render_cache.is_current(enc_hash) { stale_renders.push("Encounters"); }
-                    let pres_hash = crate::ui::presentation_view::render_cache_hash(layout, &self.dungeon.graph, &self.dungeon.theme);
+                    let pres_hash = crate::ui::presentation_view::cache_spec(layout, &self.dungeon.graph, &self.dungeon.theme).hash;
                     if !self.presentation_view_state.render_cache.is_current(pres_hash) { stale_renders.push("Presentation"); }
-                    let styled_hash = crate::ui::styled_view::render_cache_hash(layout, &self.dungeon.graph, &self.dungeon.theme, self.styled_state.show_grid, self.styled_state.current_floor);
+                    let styled_hash = crate::ui::styled_view::cache_spec(layout, &self.dungeon.graph, &self.dungeon.theme, self.styled_state.show_grid, self.styled_state.current_floor).hash;
                     if !self.styled_state.render_cache.is_current(styled_hash) { stale_renders.push("Styled"); }
-                    let decor_hash = crate::ui::decor_view::render_cache_hash(layout, &self.dungeon.graph, &self.dungeon.theme, self.decor_state.current_floor);
+                    let decor_hash = crate::ui::decor_view::cache_spec(layout, &self.dungeon.graph, &self.dungeon.theme, self.decor_state.current_floor).hash;
                     if !self.decor_state.render_cache.is_current(decor_hash) { stale_renders.push("Decor"); }
                 }
             }
@@ -2150,7 +2150,6 @@ impl DungeonApp {
     /// Pre-warm render caches for all views in the background.
     /// Uses debouncing: only triggers builds after the dungeon hash has been stable for 500ms.
     fn prewarm_render_caches(&mut self, ctx: &egui::Context) {
-        use crate::render::themed::RenderOptions;
 
         let Some(layout) = &self.dungeon.layout else { return };
         if !self.prewarm_immediate && self.prewarm_checked_at.elapsed() < CACHE_CHECK_INTERVAL {
@@ -2197,62 +2196,22 @@ impl DungeonApp {
         let graph = &self.dungeon.graph;
         let theme = &self.dungeon.theme;
 
-        // Encounters view cache
-        let enc_hash = crate::ui::encounters_view::render_cache_hash(layout, graph, theme);
-        if !self.encounters_state.render_cache.is_current(enc_hash)
-            && self.encounters_state.render_cache.pending_label().is_none()
-        {
-            self.encounters_state.render_cache.ensure(
-                enc_hash, graph, layout, theme,
-                RenderOptions { show_grid: true, show_labels: true, show_notes: false, show_secrets: false, show_decor: true, show_lighting: true },
-                "Encounters",
-            );
-            ctx.request_repaint_after(CACHE_CHECK_INTERVAL);
-            return;
-        }
-
-        // Presentation view cache
-        let pres_hash = crate::ui::presentation_view::render_cache_hash(layout, graph, theme);
-        if !self.presentation_view_state.render_cache.is_current(pres_hash)
-            && self.presentation_view_state.render_cache.pending_label().is_none()
-        {
-            self.presentation_view_state.render_cache.ensure(
-                pres_hash, graph, layout, theme,
-                RenderOptions { show_grid: true, show_labels: true, show_notes: true, show_secrets: true, show_decor: true, show_lighting: true },
-                "Presentation",
-            );
-            ctx.request_repaint_after(CACHE_CHECK_INTERVAL);
-            return;
-        }
-
-        // Styled view cache
-        let styled_hash = crate::ui::styled_view::render_cache_hash(layout, graph, theme, self.styled_state.show_grid, self.styled_state.current_floor);
-        // A floor-filtered view renders a filtered layout under this hash, so leave it to the view
-        if self.styled_state.current_floor.is_none()
-            && !self.styled_state.render_cache.is_current(styled_hash)
-            && self.styled_state.render_cache.pending_label().is_none()
-        {
-            self.styled_state.render_cache.ensure(
-                styled_hash, graph, layout, theme,
-                RenderOptions { show_grid: self.styled_state.show_grid, show_labels: true, show_notes: true, show_secrets: true, show_decor: true, show_lighting: true },
-                "Styled",
-            );
-            ctx.request_repaint_after(CACHE_CHECK_INTERVAL);
-            return;
-        }
-
-        // Decor view cache
-        let decor_hash = crate::ui::decor_view::render_cache_hash(layout, graph, theme, self.decor_state.current_floor);
-        if self.decor_state.current_floor.is_none()
-            && !self.decor_state.render_cache.is_current(decor_hash)
-            && self.decor_state.render_cache.pending_label().is_none()
-        {
-            self.decor_state.render_cache.ensure(
-                decor_hash, graph, layout, theme,
-                RenderOptions { show_grid: true, show_labels: true, show_notes: false, show_secrets: false, show_decor: false, show_lighting: true },
-                "Decor",
-            );
-            ctx.request_repaint_after(CACHE_CHECK_INTERVAL);
+        // One stale cache at a time, to avoid thread spam. A floor-filtered view renders a
+        // filtered layout under its key, so leave that to the view itself.
+        let styled_filtered = self.styled_state.current_floor.is_some();
+        let decor_filtered = self.decor_state.current_floor.is_some();
+        let caches = [
+            (crate::ui::encounters_view::cache_spec(layout, graph, theme), &mut self.encounters_state.render_cache, false),
+            (crate::ui::presentation_view::cache_spec(layout, graph, theme), &mut self.presentation_view_state.render_cache, false),
+            (crate::ui::styled_view::cache_spec(layout, graph, theme, self.styled_state.show_grid, self.styled_state.current_floor), &mut self.styled_state.render_cache, styled_filtered),
+            (crate::ui::decor_view::cache_spec(layout, graph, theme, self.decor_state.current_floor), &mut self.decor_state.render_cache, decor_filtered),
+        ];
+        for (spec, cache, filtered) in caches {
+            if !filtered && !cache.is_current(spec.hash) && cache.pending_label().is_none() {
+                cache.ensure_spec(&spec, graph, layout, theme);
+                ctx.request_repaint_after(CACHE_CHECK_INTERVAL);
+                return;
+            }
         }
     }
 }

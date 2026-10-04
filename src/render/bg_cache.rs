@@ -62,6 +62,14 @@ pub fn map_render_hash(
     hash_serde(h, theme);
 }
 
+/// What a view's cached map render is built from: its key, options and label. Each
+/// view builds this in one place, used by both the view and the app's pre-warming.
+pub struct CacheSpec {
+    pub hash: u64,
+    pub options: RenderOptions,
+    pub label: &'static str,
+}
+
 /// A render cache that builds on a background thread, showing a spinner while loading.
 pub struct BackgroundRenderCache {
     /// Completed render commands.
@@ -137,6 +145,11 @@ impl BackgroundRenderCache {
         });
         self.pending = Some(PendingRender { rx, hash, label: label.to_string() });
         false
+    }
+
+    /// [`Self::ensure`] for a view's [`CacheSpec`].
+    pub fn ensure_spec(&mut self, spec: &CacheSpec, graph: &DungeonGraph, layout: &SpatialLayout, theme: &Theme) -> bool {
+        self.ensure(spec.hash, graph, layout, theme, spec.options, spec.label)
     }
 
     /// Generic version: `prepare` is called only when a rebuild is actually needed (so its

@@ -87,6 +87,21 @@ pub fn draw_dashed_line(
     }
 }
 
+/// The "Rendering ..." placard shown while a view's map render builds; keeps
+/// repainting so the finished render shows up.
+pub fn paint_render_pending(ui: &egui::Ui, painter: &egui::Painter, rect: egui::Rect, what: &str) {
+    let spinner_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(200.0, 40.0));
+    painter.rect_filled(spinner_rect, 8.0, egui::Color32::from_rgba_unmultiplied(0, 0, 0, 180));
+    painter.text(
+        spinner_rect.center(),
+        egui::Align2::CENTER_CENTER,
+        format!("Rendering {}...", what),
+        egui::FontId::proportional(14.0),
+        egui::Color32::WHITE,
+    );
+    ui.ctx().request_repaint();
+}
+
 /// A room's outline on screen (turned with the room when rotated).
 pub fn room_screen_outline(rl: &crate::model::RoomLayout, transform: &crate::util::ViewTransform) -> Vec<egui::Pos2> {
     rl.corners().iter()

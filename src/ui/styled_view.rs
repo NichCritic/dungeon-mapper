@@ -3,6 +3,7 @@ use std::hash::{Hash, Hasher};
 
 use crate::model::*;
 use crate::render::themed::RenderOptions;
+use crate::render::bg_cache::CacheSpec;
 use crate::ui::canvas_common::{handle_pan_zoom, truncate_to_fit, ViewState, COLOR_PLACEHOLDER_TEXT};
 use crate::ui::spatial_view::collect_floors;
 use crate::util::{grid_to_world, ViewTransform, GRID_PX};
@@ -39,19 +40,15 @@ impl Default for StyledViewState {
     }
 }
 
-/// Compute a hash over all inputs that affect the cached render commands.
-/// Text (labels, notes, secret "S" markers) is drawn as a live overlay
-/// so show_labels/show_notes don't trigger a cache rebuild.
-pub fn render_cache_hash(layout: &SpatialLayout, graph: &DungeonGraph, theme: &Theme, show_grid: bool, current_floor: Option<i32>) -> u64 {
-    render_input_hash(layout, graph, theme, show_grid, current_floor)
-}
-
-fn render_input_hash(layout: &SpatialLayout, graph: &DungeonGraph, theme: &Theme, show_grid: bool, current_floor: Option<i32>) -> u64 {
+/// The styled view's cached render. Text (labels, notes, secret "S" markers) is drawn
+/// as a live overlay, so it doesn't affect the key.
+pub fn cache_spec(layout: &SpatialLayout, graph: &DungeonGraph, theme: &Theme, show_grid: bool, current_floor: Option<i32>) -> CacheSpec {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     crate::render::bg_cache::map_render_hash(&mut h, layout, graph, theme, true);
     show_grid.hash(&mut h);
     current_floor.hash(&mut h);
-    h.finish()
+    let options = RenderOptions { show_grid, show_labels: true, show_notes: true, show_secrets: true, show_decor: true, show_lighting: true };
+    CacheSpec { hash: h.finish(), options, label: "Styled" }
 }
 
 pub fn styled_view(ui: &mut egui::Ui, dungeon: &Dungeon, state: &mut StyledViewState) {
@@ -79,34 +76,13 @@ pub fn styled_view(ui: &mut egui::Ui, dungeon: &Dungeon, state: &mut StyledViewS
         };
 
         // Rebuild cached render commands if inputs changed
-        let hash = render_input_hash(layout, &dungeon.graph, &dungeon.theme, state.show_grid, state.current_floor);
-        let options = RenderOptions {
-            show_grid: state.show_grid,
-            show_labels: true,
-            show_notes: true,
-            show_secrets: true,
-            show_decor: true,
-            show_lighting: true,
-        };
-        let cache_ready = state.render_cache.ensure(
-            hash, &dungeon.graph, render_layout, &dungeon.theme, options, "Styled",
-        );
+        let spec = cache_spec(layout, &dungeon.graph, &dungeon.theme, state.show_grid, state.current_floor);
+        let cache_ready = state.render_cache.ensure_spec(&spec, &dungeon.graph, render_layout, &dungeon.theme);
 
         if cache_ready {
             state.render_cache.paint(&painter, &transform);
         } else {
-            let msg = format!("Rendering {}...",
-                state.render_cache.pending_label().unwrap_or("map"));
-            let spinner_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(200.0, 40.0));
-            painter.rect_filled(spinner_rect, 8.0, egui::Color32::from_rgba_unmultiplied(0, 0, 0, 180));
-            painter.text(
-                spinner_rect.center(),
-                egui::Align2::CENTER_CENTER,
-                &msg,
-                egui::FontId::proportional(14.0),
-                egui::Color32::WHITE,
-            );
-            ui.ctx().request_repaint();
+            crate::ui::canvas_common::paint_render_pending(ui, &painter, rect, state.render_cache.pending_label().unwrap_or("map"));
         }
 
         // Draw lower-floor room/corridor silhouettes as dark semi-transparent shapes

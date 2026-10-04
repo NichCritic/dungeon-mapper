@@ -9,6 +9,7 @@ use crate::render::traits::MapRenderer;
 use crate::util::{DECOR_HALF_SIZE, GRID_PX};
 
 /// Options controlling which elements to render.
+#[derive(Clone, Copy)]
 pub struct RenderOptions {
     pub show_grid: bool,
     pub show_labels: bool,

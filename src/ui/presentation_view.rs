@@ -9,6 +9,7 @@ use crate::presentation::dice;
 use crate::presentation::fog;
 use crate::render::presentation::render_dm_overlay;
 use crate::render::themed::RenderOptions;
+use crate::render::bg_cache::CacheSpec;
 use crate::ui::canvas_common::{handle_pan_zoom, ViewState, COLOR_PLACEHOLDER_TEXT};
 use crate::ui::window_dock::{dock_window, DockWindow, WindowDock};
 use crate::presentation::tokens::{self, TokenDrag, TokenStyle};
@@ -70,19 +71,13 @@ impl Default for PresentationViewState {
     }
 }
 
-pub fn render_cache_hash(layout: &SpatialLayout, graph: &DungeonGraph, theme: &Theme) -> u64 {
-    presentation_input_hash(layout, graph, theme)
-}
-
-fn presentation_input_hash(
-    layout: &SpatialLayout,
-    graph: &DungeonGraph,
-    theme: &Theme,
-) -> u64 {
+/// The DM presentation canvas's cached render (the full map, secrets and notes too).
+pub fn cache_spec(layout: &SpatialLayout, graph: &DungeonGraph, theme: &Theme) -> CacheSpec {
     use std::hash::Hasher;
     let mut h = std::collections::hash_map::DefaultHasher::new();
     crate::render::bg_cache::map_render_hash(&mut h, layout, graph, theme, true);
-    h.finish()
+    let options = RenderOptions { show_grid: true, show_labels: true, show_notes: true, show_secrets: true, show_decor: true, show_lighting: true };
+    CacheSpec { hash: h.finish(), options, label: "Presentation" }
 }
 
 /// AoE marker controls in the sidebar.
@@ -1117,34 +1112,13 @@ pub fn presentation_view(
     };
 
     // Rebuild cached render commands for the full map (DM sees everything)
-    let hash = presentation_input_hash(layout, &dungeon.graph, &dungeon.theme);
-    let options = RenderOptions {
-        show_grid: true,
-        show_labels: true,
-        show_notes: true,
-        show_secrets: true,
-        show_decor: true,
-        show_lighting: true,
-    };
-    let cache_ready = view_state.render_cache.ensure(
-        hash, &dungeon.graph, layout, &dungeon.theme, options, "Presentation",
-    );
+    let spec = cache_spec(layout, &dungeon.graph, &dungeon.theme);
+    let cache_ready = view_state.render_cache.ensure_spec(&spec, &dungeon.graph, layout, &dungeon.theme);
 
     if cache_ready {
         view_state.render_cache.paint(&painter, &transform);
     } else {
-        let msg = format!("Rendering {}...",
-            view_state.render_cache.pending_label().unwrap_or("map"));
-        let spinner_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(200.0, 40.0));
-        painter.rect_filled(spinner_rect, 8.0, egui::Color32::from_rgba_unmultiplied(0, 0, 0, 180));
-        painter.text(
-            spinner_rect.center(),
-            egui::Align2::CENTER_CENTER,
-            &msg,
-            egui::FontId::proportional(14.0),
-            egui::Color32::WHITE,
-        );
-        ui.ctx().request_repaint();
+        crate::ui::canvas_common::paint_render_pending(ui, &painter, rect, view_state.render_cache.pending_label().unwrap_or("map"));
     }
 
     // Draw text overlay (labels/notes visible to DM)

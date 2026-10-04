@@ -3,6 +3,7 @@ use std::hash::{Hash, Hasher};
 use crate::model::*;
 use crate::render::decor::{draw_decor, DecorPalette, PainterSink};
 use crate::render::themed::RenderOptions;
+use crate::render::bg_cache::CacheSpec;
 use crate::ui::canvas_common::{handle_pan_zoom, ViewState, COLOR_PLACEHOLDER_TEXT};
 use crate::ui::spatial_view::collect_floors;
 use crate::util::{ViewTransform, DECOR_HALF_SIZE, GRID_PX};
@@ -91,17 +92,14 @@ impl DecorViewState {
     }
 }
 
-pub fn render_cache_hash(layout: &SpatialLayout, graph: &DungeonGraph, theme: &Theme, current_floor: Option<i32>) -> u64 {
-    render_input_hash(layout, graph, theme, current_floor)
-}
-
-fn render_input_hash(layout: &SpatialLayout, graph: &DungeonGraph, theme: &Theme, current_floor: Option<i32>) -> u64 {
+/// The decor view's cached render. Decor is left out: the decor view draws it as a
+/// live overlay so that dragging doesn't trigger expensive cache rebuilds every frame.
+pub fn cache_spec(layout: &SpatialLayout, graph: &DungeonGraph, theme: &Theme, current_floor: Option<i32>) -> CacheSpec {
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    // Decor is left out: the decor view draws it as a live overlay so that dragging
-    // doesn't trigger expensive cache rebuilds every frame.
     crate::render::bg_cache::map_render_hash(&mut h, layout, graph, theme, false);
     current_floor.hash(&mut h);
-    h.finish()
+    let options = RenderOptions { show_grid: true, show_labels: true, show_notes: false, show_secrets: false, show_decor: false, show_lighting: true };
+    CacheSpec { hash: h.finish(), options, label: "Decor" }
 }
 
 /// World position (pixels) of a point in a room's local frame (cells from its
@@ -146,34 +144,13 @@ pub fn decor_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut DecorVie
     };
 
     // Rebuild cached render commands if inputs changed
-    let hash = render_input_hash(layout, &dungeon.graph, &dungeon.theme, state.current_floor);
-    let options = RenderOptions {
-        show_grid: true,
-        show_labels: true,
-        show_notes: false,
-        show_secrets: false,
-        show_decor: false, // decor drawn as live overlay for smooth dragging
-        show_lighting: true,
-    };
-    let cache_ready = state.render_cache.ensure(
-        hash, &dungeon.graph, render_layout, &dungeon.theme, options, "Decor",
-    );
+    let spec = cache_spec(layout, &dungeon.graph, &dungeon.theme, state.current_floor);
+    let cache_ready = state.render_cache.ensure_spec(&spec, &dungeon.graph, render_layout, &dungeon.theme);
 
     if cache_ready {
         state.render_cache.paint(&painter, &transform);
     } else {
-        let msg = format!("Rendering {}...",
-            state.render_cache.pending_label().unwrap_or("map"));
-        let spinner_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(200.0, 40.0));
-        painter.rect_filled(spinner_rect, 8.0, egui::Color32::from_rgba_unmultiplied(0, 0, 0, 180));
-        painter.text(
-            spinner_rect.center(),
-            egui::Align2::CENTER_CENTER,
-            &msg,
-            egui::FontId::proportional(14.0),
-            egui::Color32::WHITE,
-        );
-        ui.ctx().request_repaint();
+        crate::ui::canvas_common::paint_render_pending(ui, &painter, rect, state.render_cache.pending_label().unwrap_or("map"));
     }
 
     // Live decor overlay (not cached, so dragging is smooth)
