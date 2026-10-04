@@ -36,6 +36,14 @@ impl FloorAssignment {
         a0 == b0 || a0 == b1 || a1 == b0 || a1 == b1
     }
 
+    /// The highest floor the room is on.
+    pub fn max_floor(&self) -> i32 {
+        match *self {
+            FloorAssignment::Single(f) => f,
+            FloorAssignment::Half(a, b) => a.max(b),
+        }
+    }
+
     pub fn floors(&self) -> Vec<i32> {
         match self {
             FloorAssignment::Single(f) => vec![*f],

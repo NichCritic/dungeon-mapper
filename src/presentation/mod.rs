@@ -195,10 +195,10 @@ impl PresentationState {
 
 impl VisibilityProvider for PresentationState {
     fn room_visibility(&self, room_id: &str) -> &Visibility {
-        self.room_visibility.get(room_id).unwrap_or(&Visibility::Hidden)
+        PresentationState::room_visibility(self, room_id)
     }
     fn is_door_open(&self, conn_id: &str) -> bool {
-        self.doors_open.contains(conn_id)
+        PresentationState::is_door_open(self, conn_id)
     }
 }
 

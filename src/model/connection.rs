@@ -111,6 +111,11 @@ pub enum ConnectionType {
 }
 
 impl ConnectionType {
+    /// An opening rather than a door: no door is drawn and sight passes freely.
+    pub fn is_passage(self) -> bool {
+        matches!(self, ConnectionType::Open | ConnectionType::Flush | ConnectionType::Merge)
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             ConnectionType::Open => "Open",

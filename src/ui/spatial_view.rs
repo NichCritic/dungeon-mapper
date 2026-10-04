@@ -497,7 +497,7 @@ fn handle_spatial_interactions(
                 for (ci, corridor) in layout.corridors.iter().enumerate() {
                     // Floor filtering: skip corridors not on the current floor
                     if let Some(floor) = state.current_floor {
-                        if let Some(edge) = dungeon.graph.connections.iter().find(|e| e.connection.id == corridor.connection_id) {
+                        if let Some(edge) = dungeon.graph.connection_by_id(&corridor.connection_id) {
                             let src_visible = dungeon.graph.room_by_id(&edge.source_room_id)
                                 .is_some_and(|r| r.floor.visible_on(floor));
                             let tgt_visible = dungeon.graph.room_by_id(&edge.target_room_id)
@@ -1094,7 +1094,7 @@ fn handle_spatial_interactions(
             DragTarget::Exit(conn_id, _) => {
                 // Re-route the corridor for this connection
                 let conn_id = conn_id.clone();
-                if let Some(edge) = dungeon.graph.connections.iter().find(|e| e.connection.id == conn_id) {
+                if let Some(edge) = dungeon.graph.connection_by_id(&conn_id) {
                     let affected = std::collections::HashSet::from([
                         edge.source_room_id.clone(),
                         edge.target_room_id.clone(),
@@ -1475,7 +1475,7 @@ fn draw_corridors(
     for (ci, corridor) in layout.corridors.iter().enumerate() {
         // Floor filtering: dim corridors to lower floors, hide higher
         let dim = if let Some(floor) = state.current_floor {
-            if let Some(edge) = graph.connections.iter().find(|e| e.connection.id == corridor.connection_id) {
+            if let Some(edge) = graph.connection_by_id(&corridor.connection_id) {
                 let src_visible = graph.room_by_id(&edge.source_room_id)
                     .is_some_and(|r| r.floor.visible_on(floor));
                 let tgt_visible = graph.room_by_id(&edge.target_room_id)
@@ -2124,13 +2124,11 @@ fn draw_doors(
         };
         let white = if dim < 1.0 { dim_color(egui::Color32::WHITE, dim) } else { egui::Color32::WHITE };
         let dark = if dim < 1.0 { dim_color(egui::Color32::from_rgb(30, 30, 30), dim) } else { egui::Color32::from_rgb(30, 30, 30) };
-        if matches!(edge.connection.connection_type,
-            ConnectionType::Open | ConnectionType::Flush | ConnectionType::Merge
-        ) {
+        if edge.connection.connection_type.is_passage() {
             continue;
         }
 
-        let corridor = layout.corridors.iter().find(|c| c.connection_id == edge.connection.id);
+        let corridor = layout.corridor_for(&edge.connection.id);
         let Some(corridor) = corridor else { continue };
         if corridor.waypoints.len() < 2 {
             continue;
@@ -2860,7 +2858,7 @@ fn duplicate_group(dungeon: &mut Dungeon, room_ids: &[String], group_idx: usize)
                     && id_map.get(&old_edge.target_room_id).is_some_and(|t| t == &e.target_room_id)
                 })
                 .map(|e| e.connection.id.clone())?;
-            let old_corridor = layout.corridors.iter().find(|c| c.connection_id == old_edge.connection.id)?;
+            let old_corridor = layout.corridor_for(&old_edge.connection.id)?;
             Some(CorridorSegment {
                 connection_id: new_conn_id,
                 waypoints: old_corridor.waypoints.iter().map(|wp| GridPos { x: wp.x + offset_x, y: wp.y }).collect(),

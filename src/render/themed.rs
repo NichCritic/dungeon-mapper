@@ -48,10 +48,10 @@ pub fn render_themed(
             .find(|e| e.connection.id == *conn_id)
             .map(|e| {
                 let sf = graph.room_by_id(&e.source_room_id)
-                    .map(|r| *r.floor.floors().iter().max().unwrap_or(&0))
+                    .map(|r| r.floor.max_floor())
                     .unwrap_or(0);
                 let tf = graph.room_by_id(&e.target_room_id)
-                    .map(|r| *r.floor.floors().iter().max().unwrap_or(&0))
+                    .map(|r| r.floor.max_floor())
                     .unwrap_or(0);
                 sf.max(tf)
             })
@@ -1260,12 +1260,10 @@ pub fn render_doors(
         if !options.show_secrets && edge.connection.connection_type == ConnectionType::Secret {
             continue;
         }
-        if matches!(edge.connection.connection_type,
-            ConnectionType::Open | ConnectionType::Flush | ConnectionType::Merge
-        ) {
+        if edge.connection.connection_type.is_passage() {
             continue;
         }
-        let corridor = layout.corridors.iter().find(|c| c.connection_id == edge.connection.id);
+        let corridor = layout.corridor_for(&edge.connection.id);
         let Some(corridor) = corridor else { continue };
         if corridor.waypoints.len() < 2 { continue; }
 

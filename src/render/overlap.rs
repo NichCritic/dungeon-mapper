@@ -234,7 +234,7 @@ pub fn attached_corridor_interiors(
         if (e.source_room_id != room_id && e.target_room_id != room_id) || !include(e) {
             continue;
         }
-        let Some(c) = layout.corridors.iter().find(|c| c.connection_id == e.connection.id) else { continue };
+        let Some(c) = layout.corridor_for(&e.connection.id) else { continue };
         if let Some(shape) = crate::model::geometry::corridor_shape(c, layout, graph) {
             out.push(Interior::Polygon(shape.polygon));
         }
@@ -291,8 +291,7 @@ pub fn freeform_corridor_walls(
 
 /// Connections drawn as an opening in the room wall rather than a door on it.
 pub fn is_open_passage(e: &crate::model::StoredEdge) -> bool {
-    use crate::model::ConnectionType;
-    matches!(e.connection.connection_type, ConnectionType::Open | ConnectionType::Flush | ConnectionType::Merge)
+    e.connection.connection_type.is_passage()
 }
 
 /// Whether two room footprints overlap with positive area (rotated rooms by their

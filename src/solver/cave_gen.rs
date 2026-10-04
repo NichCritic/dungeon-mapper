@@ -339,7 +339,7 @@ pub fn compute_exit_cells(
         }
 
         // Find the corridor for this connection
-        let corridor = layout.corridors.iter().find(|c| c.connection_id == edge.connection.id);
+        let corridor = layout.corridor_for(&edge.connection.id);
         let Some(corridor) = corridor else { continue };
         if corridor.waypoints.is_empty() {
             continue;

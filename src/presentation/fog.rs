@@ -6,38 +6,13 @@ use super::{PresentationState, Visibility, VisibilityProvider};
 /// is not Hidden. It takes the best visibility of the two endpoint rooms.
 pub fn corridor_visibility(
     connection_id: &str,
-    presentation: &PresentationState,
-    graph: &DungeonGraph,
-) -> Visibility {
-    if !presentation.is_door_open(connection_id) {
-        return Visibility::Hidden;
-    }
-
-    let edge = graph.connections.iter().find(|e| e.connection.id == connection_id);
-    let Some(edge) = edge else { return Visibility::Hidden };
-
-    let src_vis = presentation.room_visibility(&edge.source_room_id);
-    let tgt_vis = presentation.room_visibility(&edge.target_room_id);
-
-    if *src_vis == Visibility::Visible || *tgt_vis == Visibility::Visible {
-        Visibility::Visible
-    } else if *src_vis == Visibility::Explored || *tgt_vis == Visibility::Explored {
-        Visibility::Explored
-    } else {
-        Visibility::Hidden
-    }
-}
-
-/// Generic version that works with any VisibilityProvider.
-pub fn corridor_visibility_generic(
-    connection_id: &str,
     provider: &dyn VisibilityProvider,
     graph: &DungeonGraph,
 ) -> Visibility {
     if !provider.is_door_open(connection_id) {
         return Visibility::Hidden;
     }
-    let edge = graph.connections.iter().find(|e| e.connection.id == connection_id);
+    let edge = graph.connection_by_id(&connection_id);
     let Some(edge) = edge else { return Visibility::Hidden };
     let src_vis = provider.room_visibility(&edge.source_room_id);
     let tgt_vis = provider.room_visibility(&edge.target_room_id);

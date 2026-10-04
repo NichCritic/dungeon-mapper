@@ -15,7 +15,7 @@ use crate::util::CellSet;
 use std::sync::Arc;
 
 use crate::model::{
-    ConnectionType, CoverKind, CoverLevel, Dungeon, RoomShape, SpatialLayout, TokenKind,
+    CoverKind, CoverLevel, Dungeon, RoomShape, SpatialLayout, TokenKind,
 };
 use crate::presentation::tokens::TokenInfo;
 use crate::presentation::VisibilityProvider;
@@ -257,17 +257,17 @@ pub fn build_static_occluders(
     let mut apertures: Vec<(String, (f32, f32, f32, f32))> = Vec::new();
     for edge in &graph.connections {
         let ct = edge.connection.connection_type;
-        let open = matches!(ct, ConnectionType::Open | ConnectionType::Flush | ConnectionType::Merge)
+        let open = ct.is_passage()
             || presentation.is_door_open(&edge.connection.id);
         if !open {
             continue;
         }
-        let Some(corridor) = layout.corridors.iter().find(|c| c.connection_id == edge.connection.id) else { continue };
+        let Some(corridor) = layout.corridor_for(&edge.connection.id) else { continue };
         if corridor.waypoints.len() < 2 {
             continue;
         }
         // Open passages are as wide as the corridor; doors as wide as the door.
-        let dw = if matches!(ct, ConnectionType::Open | ConnectionType::Flush | ConnectionType::Merge) {
+        let dw = if ct.is_passage() {
             corridor.width as f32
         } else {
             edge.connection.door_width() as f32
@@ -638,27 +638,12 @@ fn segments_intersect(a: Pt, b: Pt, c: Pt, d: Pt) -> bool {
         || (d4.abs() < E && on_seg(a, b, d))
 }
 
-fn point_in_polygon(pt: Pt, poly: &[Pt]) -> bool {
-    let n = poly.len();
-    let mut inside = false;
-    let mut j = n - 1;
-    for i in 0..n {
-        let (pi, pj) = (poly[i], poly[j]);
-        if ((pi.1 > pt.1) != (pj.1 > pt.1))
-            && (pt.0 < (pj.0 - pi.0) * (pt.1 - pi.1) / (pj.1 - pi.1) + pi.0)
-        {
-            inside = !inside;
-        }
-        j = i;
-    }
-    inside
-}
 
 fn segment_hits_polygon(p1: Pt, p2: Pt, poly: &[Pt]) -> bool {
     if poly.len() < 3 {
         return false;
     }
-    if point_in_polygon(p1, poly) || point_in_polygon(p2, poly) {
+    if crate::model::geometry::point_in_polygon(p1, poly) || crate::model::geometry::point_in_polygon(p2, poly) {
         return true;
     }
     let n = poly.len();

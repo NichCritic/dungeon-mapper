@@ -125,7 +125,7 @@ pub fn door_quad(a: &Attach, width: f32, depth: f32) -> [Pt; 4] {
 /// Whether a corridor needs freeform geometry: an angle setting other than orthogonal,
 /// a non-orthogonal run, or an end on a rotated room.
 pub fn is_freeform(corridor: &CorridorSegment, layout: &SpatialLayout, graph: &DungeonGraph) -> bool {
-    let edge = graph.connections.iter().find(|e| e.connection.id == corridor.connection_id);
+    let edge = graph.connection_by_id(&corridor.connection_id);
     if edge.is_some_and(|e| e.connection.corridor_angle != CorridorAngle::Orthogonal) {
         return true;
     }
@@ -156,7 +156,7 @@ pub fn corridor_shape(corridor: &CorridorSegment, layout: &SpatialLayout, graph:
     }
 
     // The end rooms, nearest end first
-    let edge = graph.connections.iter().find(|e| e.connection.id == corridor.connection_id);
+    let edge = graph.connection_by_id(&corridor.connection_id);
     let end_rooms: Vec<&RoomLayout> = edge
         .map(|e| [&e.source_room_id, &e.target_room_id].iter().filter_map(|id| layout.room_by_id(id)).collect())
         .unwrap_or_default();

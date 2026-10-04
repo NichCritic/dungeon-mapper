@@ -161,6 +161,10 @@ impl DungeonGraph {
         self.rooms.iter_mut().find(|r| r.id == id)
     }
 
+    pub fn connection_by_id(&self, id: &str) -> Option<&StoredEdge> {
+        self.connections.iter().find(|e| e.connection.id == id)
+    }
+
     pub fn connection_by_id_mut(&mut self, id: &str) -> Option<&mut StoredEdge> {
         self.connections.iter_mut().find(|e| e.connection.id == id)
     }

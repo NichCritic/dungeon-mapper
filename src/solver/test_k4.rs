@@ -39,7 +39,7 @@ mod tests {
 
         println!("\nCorridors: {} / 6 expected", corridors.len());
         for c in &corridors {
-            let edge = graph.connections.iter().find(|e| e.connection.id == c.connection_id).unwrap();
+            let edge = graph.connection_by_id(&c.connection_id).unwrap();
             let src = graph.room_by_id(&edge.source_room_id).unwrap().label.clone();
             let tgt = graph.room_by_id(&edge.target_room_id).unwrap().label.clone();
             let wps: Vec<String> = c.waypoints.iter().map(|w| format!("({},{})", w.x, w.y)).collect();
@@ -58,7 +58,7 @@ mod tests {
             println!("\nDebugging blocked corridors...");
             for c in &corridors {
                 if !c.invalid { continue; }
-                let edge = graph.connections.iter().find(|e| e.connection.id == c.connection_id).unwrap();
+                let edge = graph.connection_by_id(&c.connection_id).unwrap();
                 let src = graph.room_by_id(&edge.source_room_id).unwrap().label.clone();
                 let tgt = graph.room_by_id(&edge.target_room_id).unwrap().label.clone();
                 println!("  BLOCKED: {} -> {}", src, tgt);
@@ -76,7 +76,7 @@ mod tests {
             if c.invalid {
                 continue; // Invalid corridors (can't route between adjacent rooms) are expected
             }
-            let edge = graph.connections.iter().find(|e| e.connection.id == c.connection_id).unwrap();
+            let edge = graph.connection_by_id(&c.connection_id).unwrap();
             let src = graph.room_by_id(&edge.source_room_id).unwrap().label.clone();
             let tgt = graph.room_by_id(&edge.target_room_id).unwrap().label.clone();
             // Re-check after recheck_corridor_overlaps — valid corridors shouldn't overlap

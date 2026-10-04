@@ -1,7 +1,7 @@
 use crate::util::CellSet;
 use crate::model::*;
 use crate::presentation::{PresentationState, PresentationSnapshot, Visibility, VisibilityProvider};
-use crate::presentation::fog::{corridor_visibility, corridor_visibility_generic};
+use crate::presentation::fog::corridor_visibility;
 use crate::presentation::lighting::compute_brightness_generic;
 use crate::render::themed::*;
 use crate::render::traits::MapRenderer;
@@ -37,7 +37,7 @@ fn build_visible_floor_set(
     rasterize_floor_filtered(
         layout, graph, coverage,
         |rl| *presentation.room_visibility(&rl.room_id) != Visibility::Hidden,
-        |c| corridor_visibility_generic(&c.connection_id, presentation, graph) != Visibility::Hidden,
+        |c| corridor_visibility(&c.connection_id, presentation, graph) != Visibility::Hidden,
     )
 }
 
@@ -79,7 +79,7 @@ fn render_player_view_generic(
         .collect();
     let freeform = shapes.iter().any(Option::is_some) || layout.rooms.iter().any(|rl| rl.is_rotated());
     let room_shown = |rl: &RoomLayout| *presentation.room_visibility(&rl.room_id) != Visibility::Hidden;
-    let corridor_shown = |c: &CorridorSegment| corridor_visibility_generic(&c.connection_id, presentation, graph) != Visibility::Hidden;
+    let corridor_shown = |c: &CorridorSegment| corridor_visibility(&c.connection_id, presentation, graph) != Visibility::Hidden;
     if theme.exterior_shading {
         use crate::render::hatching::{draw_exterior_shading, ShadingParams};
         let params = ShadingParams {
@@ -124,7 +124,7 @@ fn render_player_view_generic(
 
     // Corridor floors
     for (ci, corridor) in layout.corridors.iter().enumerate() {
-        let vis = corridor_visibility_generic(&corridor.connection_id, presentation, graph);
+        let vis = corridor_visibility(&corridor.connection_id, presentation, graph);
         let color = match vis {
             Visibility::Hidden => continue,
             Visibility::Explored => dimmed_floor,
@@ -139,7 +139,7 @@ fn render_player_view_generic(
     // Corridor chamfers
     if theme.corridor_chamfer != ChamferStyle::Sharp {
         for (ci, corridor) in layout.corridors.iter().enumerate() {
-            let vis = corridor_visibility_generic(&corridor.connection_id, presentation, graph);
+            let vis = corridor_visibility(&corridor.connection_id, presentation, graph);
             if vis == Visibility::Hidden || shapes[ci].is_some() { continue; }
             render_corridor_chamfers(renderer, corridor, theme);
         }
@@ -192,7 +192,7 @@ fn render_player_view_generic(
     // Corridor walls
     let cave_cells = build_cave_cell_set(layout, graph);
     for (ci, corridor) in layout.corridors.iter().enumerate() {
-        let vis = corridor_visibility_generic(&corridor.connection_id, presentation, graph);
+        let vis = corridor_visibility(&corridor.connection_id, presentation, graph);
         if vis == Visibility::Hidden { continue; }
         let wall_color = if vis == Visibility::Explored { dimmed_wall } else { theme.wall_color };
         if shapes[ci].is_some() {
@@ -246,7 +246,7 @@ fn render_doors_filtered_generic(
         let tgt_vis = presentation.room_visibility(&edge.target_room_id);
         if *src_vis == Visibility::Hidden && *tgt_vis == Visibility::Hidden { continue; }
 
-        let corridor = layout.corridors.iter().find(|c| c.connection_id == edge.connection.id);
+        let corridor = layout.corridor_for(&edge.connection.id);
         let Some(corridor) = corridor else { continue };
         if corridor.waypoints.len() < 2 { continue; }
 
@@ -254,7 +254,7 @@ fn render_doors_filtered_generic(
         let door_depth = 0.3;
         let room_ids = [&edge.source_room_id, &edge.target_room_id];
         let wp_ends = [&corridor.waypoints[0], corridor.waypoints.last().unwrap()];
-        let corr_vis = corridor_visibility_generic(&edge.connection.id, presentation, graph);
+        let corr_vis = corridor_visibility(&edge.connection.id, presentation, graph);
         let exits = [edge.source_exit.as_ref(), edge.target_exit.as_ref()];
 
         // For child-to-parent connections, only draw door on the child side

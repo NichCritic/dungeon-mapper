@@ -178,7 +178,7 @@ pub fn styled_view(ui: &mut egui::Ui, dungeon: &Dungeon, state: &mut StyledViewS
             }
             // Lower-floor corridors
             for corridor in &layout.corridors {
-                if let Some(edge) = dungeon.graph.connections.iter().find(|e| e.connection.id == corridor.connection_id) {
+                if let Some(edge) = dungeon.graph.connection_by_id(&corridor.connection_id) {
                     let src_on = dungeon.graph.room_by_id(&edge.source_room_id)
                         .is_some_and(|r| r.floor.visible_on(floor));
                     let tgt_on = dungeon.graph.room_by_id(&edge.target_room_id)
@@ -261,7 +261,7 @@ fn draw_text_overlay(
             if edge.connection.connection_type != ConnectionType::Secret {
                 continue;
             }
-            let corridor = layout.corridors.iter().find(|c| c.connection_id == edge.connection.id);
+            let corridor = layout.corridor_for(&edge.connection.id);
             let Some(corridor) = corridor else { continue };
             if corridor.waypoints.len() < 2 { continue; }
 

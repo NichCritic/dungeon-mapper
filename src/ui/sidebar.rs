@@ -736,7 +736,7 @@ fn room_properties(ui: &mut egui::Ui, room: &mut Room, focus_label: &mut bool) {
 
 /// (source label, target label) when the connection's two rooms overlap in the layout.
 pub fn overlapping_room_labels(dungeon: &Dungeon, conn_id: &str) -> Option<(String, String)> {
-    let edge = dungeon.graph.connections.iter().find(|e| e.connection.id == conn_id)?;
+    let edge = dungeon.graph.connection_by_id(&conn_id)?;
     let layout = dungeon.layout.as_ref()?;
     let (a, b) = (layout.room_by_id(&edge.source_room_id)?, layout.room_by_id(&edge.target_room_id)?);
     if !crate::render::overlap::rects_overlap(a, b) {

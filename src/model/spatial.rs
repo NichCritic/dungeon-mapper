@@ -169,6 +169,11 @@ impl SpatialLayout {
         self.rooms.iter().find(|r| r.room_id == room_id)
     }
 
+    /// The routed corridor of a connection.
+    pub fn corridor_for(&self, connection_id: &str) -> Option<&CorridorSegment> {
+        self.corridors.iter().find(|c| c.connection_id == connection_id)
+    }
+
     pub fn room_by_id_mut(&mut self, room_id: &str) -> Option<&mut RoomLayout> {
         self.rooms.iter_mut().find(|r| r.room_id == room_id)
     }
@@ -182,7 +187,7 @@ impl SpatialLayout {
         order.sort_by_cached_key(|&i| {
             let room_id = &self.rooms[i].room_id;
             let floor = graph.room_by_id(room_id)
-                .map(|r| *r.floor.floors().iter().max().unwrap_or(&0))
+                .map(|r| r.floor.max_floor())
                 .unwrap_or(0);
             (floor, graph.nesting_depth(room_id))
         });
