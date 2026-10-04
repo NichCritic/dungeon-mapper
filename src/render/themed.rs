@@ -3,6 +3,7 @@ use crate::render::overlap;
 use crate::render::rotate::RotatedRenderer;
 use crate::model::geometry::{self, CorridorShape};
 use crate::model::*;
+use crate::presentation::Visibility;
 use crate::render::hatching::{draw_exterior_shading, ShadingParams};
 use crate::render::decor::{draw_decor, DecorPalette, MapRendererSink};
 use crate::render::traits::MapRenderer;
@@ -29,12 +30,58 @@ pub fn render_themed(
     theme: &Theme,
     options: &RenderOptions,
 ) {
-    let floor = build_floor_set(layout, graph);
+    render_map(renderer, graph, layout, theme, options, &Audience::Dm);
+}
+
+/// Who a render is for. The DM sees the whole map. Players see only what the party
+/// has: hidden rooms and corridors are left out, explored ones dimmed, details and
+/// labels only where they can see now, secrets never, and lighting baked in.
+pub enum Audience<'a> {
+    Dm,
+    Players {
+        visibility: &'a dyn crate::presentation::VisibilityProvider,
+        lights: &'a [LightSource],
+        ambient: f32,
+    },
+}
+
+impl Audience<'_> {
+    fn room(&self, room_id: &str) -> Visibility {
+        match self {
+            Audience::Dm => Visibility::Visible,
+            Audience::Players { visibility, .. } => visibility.room_visibility(room_id).clone(),
+        }
+    }
+
+    fn corridor(&self, connection_id: &str, graph: &DungeonGraph) -> Visibility {
+        match self {
+            Audience::Dm => Visibility::Visible,
+            Audience::Players { visibility, .. } => crate::presentation::fog::corridor_visibility(connection_id, *visibility, graph),
+        }
+    }
+}
+
+/// Render the styled map for `audience` (the cached DM views, export, and the
+/// player window and web image).
+pub fn render_map(
+    renderer: &mut dyn MapRenderer,
+    graph: &DungeonGraph,
+    layout: &SpatialLayout,
+    theme: &Theme,
+    options: &RenderOptions,
+    audience: &Audience,
+) {
+    let room_shown = |rl: &RoomLayout| audience.room(&rl.room_id) != Visibility::Hidden;
+    let corridor_shown = |c: &CorridorSegment| audience.corridor(&c.connection_id, graph) != Visibility::Hidden;
+    let floor = rasterize_floor_filtered(layout, graph, Coverage::Center, room_shown, corridor_shown);
     // Freeform geometry: angled corridors and rotated rooms (none on an ordinary map)
     let shapes: Vec<Option<CorridorShape>> = layout.corridors.iter()
         .map(|c| geometry::corridor_shape(c, layout, graph))
         .collect();
     let freeform = shapes.iter().any(Option::is_some) || layout.rooms.iter().any(|rl| rl.is_rotated());
+    // Explored but not in sight: drawn faded toward the background
+    let dimmed_floor = blend_toward(theme.floor_color, theme.bg_color, 0.4);
+    let dimmed_theme = Theme { wall_color: blend_toward(theme.wall_color, theme.bg_color, 0.4), ..theme.clone() };
 
     render_background(renderer, layout, theme);
 
@@ -44,16 +91,10 @@ pub fn render_themed(
     // Sort corridors by floor (max floor of connected rooms)
     let mut corridor_order: Vec<usize> = (0..layout.corridors.len()).collect();
     corridor_order.sort_by_key(|&i| {
-        let conn_id = &layout.corridors[i].connection_id;
-        graph.connections.iter()
-            .find(|e| e.connection.id == *conn_id)
+        graph.connection_by_id(&layout.corridors[i].connection_id)
             .map(|e| {
-                let sf = graph.room_by_id(&e.source_room_id)
-                    .map(|r| r.floor.max_floor())
-                    .unwrap_or(0);
-                let tf = graph.room_by_id(&e.target_room_id)
-                    .map(|r| r.floor.max_floor())
-                    .unwrap_or(0);
+                let sf = graph.room_by_id(&e.source_room_id).map(|r| r.floor.max_floor()).unwrap_or(0);
+                let tf = graph.room_by_id(&e.target_room_id).map(|r| r.floor.max_floor()).unwrap_or(0);
                 sf.max(tf)
             })
             .unwrap_or(0)
@@ -61,14 +102,15 @@ pub fn render_themed(
 
     // Collect baked marching squares contour segments from cave rooms (used by shading)
     let mut contour_segments: Vec<(f32, f32, f32, f32)> = graph.rooms.iter()
+        .filter(|r| audience.room(&r.id) != Visibility::Hidden)
         .filter_map(|r| r.cave_data.as_ref())
         .flat_map(|c| c.contour_segments.iter().copied())
         .collect();
     if freeform {
         // Hatch out from the exact angled walls, over cells the floor fully covers, so
         // the hatching meets a diagonal wall without stair-step gaps
-        contour_segments.extend(freeform_wall_segments_px(&shapes, graph, layout));
-        let covered = rasterize_floor(layout, graph, Coverage::Full);
+        contour_segments.extend(freeform_wall_segments_px_filtered(&shapes, graph, layout, room_shown, corridor_shown));
+        let covered = rasterize_floor_filtered(layout, graph, Coverage::Full, room_shown, corridor_shown);
         render_exterior_shading(renderer, layout, &covered, theme, &contour_segments);
     } else {
         render_exterior_shading(renderer, layout, &floor, theme, &contour_segments);
@@ -76,31 +118,46 @@ pub fn render_themed(
 
     for &ri in &room_order {
         let rl = &layout.rooms[ri];
-        if rl.is_rotated() {
-            render_room_floor(&mut RotatedRenderer::for_room(renderer, rl), rl, graph, theme);
+        let mut turned;
+        let r: &mut dyn MapRenderer = if rl.is_rotated() {
+            turned = RotatedRenderer::for_room(renderer, rl);
+            &mut turned
         } else {
-            render_room_floor(renderer, rl, graph, theme);
+            renderer
+        };
+        match audience.room(&rl.room_id) {
+            Visibility::Hidden => {}
+            Visibility::Explored => render_room_floor_with_color(r, rl, graph, dimmed_floor),
+            Visibility::Visible => render_room_floor(r, rl, graph, theme),
         }
     }
     for &ci in &corridor_order {
+        let color = match audience.corridor(&layout.corridors[ci].connection_id, graph) {
+            Visibility::Hidden => continue,
+            Visibility::Explored => dimmed_floor,
+            Visibility::Visible => theme.floor_color,
+        };
         match &shapes[ci] {
-            Some(shape) => render_freeform_corridor_floor(renderer, shape, theme.floor_color),
-            None => render_corridor_floor(renderer, &layout.corridors[ci], theme),
+            Some(shape) => render_freeform_corridor_floor(renderer, shape, color),
+            None => render_corridor_floor_with_color(renderer, &layout.corridors[ci], color),
         }
     }
     if theme.corridor_chamfer != ChamferStyle::Sharp {
         for &ci in &corridor_order {
-            if shapes[ci].is_none() {
+            if shapes[ci].is_none() && corridor_shown(&layout.corridors[ci]) {
                 render_corridor_chamfers(renderer, &layout.corridors[ci], theme);
             }
         }
     }
     if options.show_grid {
-        render_map_grid(renderer, layout, graph, &floor, |_| true, |_| true);
+        render_map_grid(renderer, layout, graph, &floor, room_shown, corridor_shown);
     }
     // Render room decor and elevation sections (after floors/grid, before walls)
     for &ri in &room_order {
         let rl = &layout.rooms[ri];
+        if audience.room(&rl.room_id) != Visibility::Visible {
+            continue;
+        }
         let mut turned;
         let r: &mut dyn MapRenderer = if rl.is_rotated() {
             turned = RotatedRenderer::for_room(renderer, rl);
@@ -115,17 +172,22 @@ pub fn render_themed(
     }
     for &ri in &room_order {
         let rl = &layout.rooms[ri];
+        let wall_theme = match audience.room(&rl.room_id) {
+            Visibility::Hidden => continue,
+            Visibility::Explored => &dimmed_theme,
+            Visibility::Visible => theme,
+        };
         // Cave rooms use baked marching squares contour segments
         let room = graph.room_by_id(&rl.room_id);
         if let Some(cave) = room.and_then(|r| {
             if r.shape == RoomShape::Cave { r.cave_data.as_ref() } else { None }
         }) {
             if !cave.contour_segments.is_empty() {
-                render_cave_contours(renderer, &rl.room_id, &cave.contour_segments, graph, layout, theme.wall_color);
+                render_cave_contours(renderer, &rl.room_id, &cave.contour_segments, graph, layout, wall_theme.wall_color);
                 continue;
             }
         }
-        render_room_walls(renderer, rl, graph, layout, theme);
+        render_room_walls(renderer, rl, graph, layout, wall_theme);
     }
     // Redraw corridor floors at circular room junctions to punch through
     // the circle wall stroke that covers the corridor opening.
@@ -133,18 +195,39 @@ pub fn render_themed(
     // Build set of cells inside cave rooms (so corridor walls don't double-draw there)
     let cave_cells = build_cave_cell_set(layout, graph);
     for &ci in &corridor_order {
+        let wall_theme = match audience.corridor(&layout.corridors[ci].connection_id, graph) {
+            Visibility::Hidden => continue,
+            Visibility::Explored => &dimmed_theme,
+            Visibility::Visible => theme,
+        };
         if shapes[ci].is_some() {
             for ((ax, ay), (bx, by)) in overlap::freeform_corridor_walls(ci, &shapes, graph, layout) {
-                renderer.draw_line(ax * GRID_PX, ay * GRID_PX, bx * GRID_PX, by * GRID_PX, 2.0, theme.wall_color);
+                renderer.draw_line(ax * GRID_PX, ay * GRID_PX, bx * GRID_PX, by * GRID_PX, 2.0, wall_theme.wall_color);
             }
         } else {
-            render_corridor_walls(renderer, &layout.corridors[ci], &floor, theme, &cave_cells);
+            render_corridor_walls(renderer, &layout.corridors[ci], &floor, wall_theme, &cave_cells);
         }
     }
-    render_doors(renderer, graph, layout, theme, options);
+    render_doors(renderer, graph, layout, theme, options, audience);
     if options.show_labels {
-        render_labels(renderer, graph, layout, options);
+        render_labels(renderer, graph, layout, options, |rl| audience.room(&rl.room_id) == Visibility::Visible);
     }
+    // Players see the light the party has (the DM views overlay it live instead)
+    if let Audience::Players { lights, ambient, .. } = *audience {
+        if options.show_lighting && (!lights.is_empty() || ambient < 1.0) {
+            crate::render::presentation::render_lighting_overlay(renderer, layout, lights, ambient, &floor);
+        }
+    }
+}
+
+/// `color` moved `ratio` of the way toward `bg` (for areas only explored).
+fn blend_toward(color: [u8; 4], bg: [u8; 4], ratio: f32) -> [u8; 4] {
+    [
+        (color[0] as f32 + (bg[0] as f32 - color[0] as f32) * ratio) as u8,
+        (color[1] as f32 + (bg[1] as f32 - color[1] as f32) * ratio) as u8,
+        (color[2] as f32 + (bg[2] as f32 - color[2] as f32) * ratio) as u8,
+        color[3],
+    ]
 }
 
 /// Step 1+2: Background fill and exterior shading.
@@ -276,15 +359,6 @@ pub fn render_room_floor_with_color(
             renderer.fill_rect(rx, ry, rw, rh, color);
         }
     }
-}
-
-/// Render one corridor's floor.
-pub fn render_corridor_floor(
-    renderer: &mut dyn MapRenderer,
-    corridor: &CorridorSegment,
-    theme: &Theme,
-) {
-    render_corridor_floor_with_color(renderer, corridor, theme.floor_color);
 }
 
 /// Render one corridor's floor with a specific color.
@@ -514,11 +588,6 @@ pub fn render_freeform_corridor_floor(renderer: &mut dyn MapRenderer, shape: &Co
         let px: Vec<(f32, f32)> = piece.iter().map(|&(x, y)| (x * GRID_PX, y * GRID_PX)).collect();
         renderer.fill_polygon(&px, color);
     }
-}
-
-/// The exact walls of rotated rooms and freeform corridors, in pixels (for hatching).
-fn freeform_wall_segments_px(shapes: &[Option<CorridorShape>], graph: &DungeonGraph, layout: &SpatialLayout) -> Vec<(f32, f32, f32, f32)> {
-    freeform_wall_segments_px_filtered(shapes, graph, layout, |_| true, |_| true)
 }
 
 /// [`freeform_wall_segments_px`] for the rooms and corridors the filters accept.
@@ -1256,9 +1325,12 @@ pub fn render_doors(
     layout: &SpatialLayout,
     theme: &Theme,
     options: &RenderOptions,
+    audience: &Audience,
 ) {
+    let players = matches!(audience, Audience::Players { .. });
     for edge in &graph.connections {
-        if !options.show_secrets && edge.connection.connection_type == ConnectionType::Secret {
+        // Players never see secret doors
+        if (players || !options.show_secrets) && edge.connection.connection_type == ConnectionType::Secret {
             continue;
         }
         if edge.connection.connection_type.is_passage() {
@@ -1290,6 +1362,12 @@ pub fn render_doors(
             let is_cave = graph.room_by_id(room_id)
                 .is_some_and(|r| r.shape == RoomShape::Cave);
             if is_cave { continue; }
+            // Players see a door from either side they know: its room or its corridor
+            if audience.room(room_id) == Visibility::Hidden
+                && audience.corridor(&edge.connection.id, graph) == Visibility::Hidden
+            {
+                continue;
+            }
             let Some(rl) = layout.room_by_id(room_id) else { continue };
 
             if rl.is_rotated() {
@@ -1333,8 +1411,9 @@ pub fn render_labels(
     graph: &DungeonGraph,
     layout: &SpatialLayout,
     options: &RenderOptions,
+    labelled: impl Fn(&RoomLayout) -> bool,
 ) {
-    for rl in &layout.rooms {
+    for rl in layout.rooms.iter().filter(|rl| labelled(rl)) {
         if let Some(room) = graph.room_by_id(&rl.room_id) {
             let (cx, cy) = crate::util::room_center_px(rl);
             renderer.draw_text(&room.label, cx, cy, 10.0, [60, 60, 60, 255]);
