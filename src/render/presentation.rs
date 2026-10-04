@@ -220,8 +220,7 @@ fn render_player_view_generic(
                 continue;
             }
             if let Some(room) = graph.room_by_id(&rl.room_id) {
-                let cx = (rl.x as f32 + rl.width as f32 / 2.0) * GRID_PX;
-                let cy = (rl.y as f32 + rl.height as f32 / 2.0) * GRID_PX;
+                let (cx, cy) = crate::util::room_center_px(rl);
                 renderer.draw_text(&room.label, cx, cy, 10.0, [60, 60, 60, 255]);
             }
         }
@@ -364,8 +363,7 @@ pub fn render_dm_overlay(
         }
 
         // Visibility badge at room center
-        let cx = (rl.x as f32 + rl.width as f32 / 2.0) * GRID_PX;
-        let cy = (rl.y as f32 + rl.height as f32 / 2.0) * GRID_PX;
+        let (cx, cy) = crate::util::room_center_px(rl);
         let screen = transform.world_to_screen(egui::pos2(cx, cy));
         let badge = match vis {
             Visibility::Hidden => "H",
@@ -406,13 +404,7 @@ pub fn render_dm_overlay(
                 }
                 continue;
             }
-            let cw = corridor.width as i32;
-            let half = cw / 2;
-            for pair in corridor.waypoints.windows(2) {
-                let min_gx = pair[0].x.min(pair[1].x) - half;
-                let min_gy = pair[0].y.min(pair[1].y) - half;
-                let max_gx = pair[0].x.max(pair[1].x) - half + cw;
-                let max_gy = pair[0].y.max(pair[1].y) - half + cw;
+            for (min_gx, min_gy, max_gx, max_gy) in corridor.run_boxes() {
 
                 let min = transform.world_to_screen(egui::pos2(
                     min_gx as f32 * GRID_PX,
@@ -440,8 +432,7 @@ pub fn render_dm_overlay(
             .collect();
         if encounters.is_empty() { continue; }
 
-        let cx = (rl.x as f32 + rl.width as f32 / 2.0) * GRID_PX;
-        let cy = (rl.y as f32 + rl.height as f32 / 2.0) * GRID_PX;
+        let (cx, cy) = crate::util::room_center_px(rl);
         let screen = transform.world_to_screen(egui::pos2(cx, cy));
 
         for (j, enc) in encounters.iter().enumerate() {
@@ -489,8 +480,7 @@ pub fn render_dm_overlay(
     // Party token
     if let Some(party_room_id) = &presentation.party_room {
         if let Some(rl) = layout.room_by_id(party_room_id) {
-            let cx = (rl.x as f32 + rl.width as f32 / 2.0) * GRID_PX;
-            let cy = (rl.y as f32 + rl.height as f32 / 2.0) * GRID_PX;
+            let (cx, cy) = crate::util::room_center_px(rl);
             let screen = transform.world_to_screen(egui::pos2(cx, cy));
             // Offset above encounter markers
             let pos = screen + egui::vec2(0.0, -16.0 * transform.zoom);
@@ -521,8 +511,7 @@ pub fn render_dm_overlay(
     // Light source indicators
     for light in &dungeon.light_sources {
         let Some(rl) = layout.room_by_id(&light.room_id) else { continue };
-        let cx = (rl.x as f32 + rl.width as f32 / 2.0) * GRID_PX;
-        let cy = (rl.y as f32 + rl.height as f32 / 2.0) * GRID_PX;
+        let (cx, cy) = crate::util::room_center_px(rl);
         let screen = transform.world_to_screen(egui::pos2(cx, cy));
 
         // Draw light radius circle

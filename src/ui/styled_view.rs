@@ -161,8 +161,7 @@ pub fn styled_view(ui: &mut egui::Ui, dungeon: &Dungeon, state: &mut StyledViewS
                             }
                         }
                         // Ghost label
-                        let cx = (rl.x as f32 + rl.width as f32 / 2.0) * GRID_PX;
-                        let cy = (rl.y as f32 + rl.height as f32 / 2.0) * GRID_PX;
+                        let (cx, cy) = crate::util::room_center_px(rl);
                         let screen = transform.world_to_screen(egui::pos2(cx, cy));
                         let max_width = rl.width as f32 * GRID_PX * transform.zoom;
                         let font = egui::FontId::monospace(10.0 * transform.zoom);
@@ -191,17 +190,7 @@ pub fn styled_view(ui: &mut egui::Ui, dungeon: &Dungeon, state: &mut StyledViewS
                         .is_some_and(|r| r.floor.floors().iter().all(|f| *f < floor));
                     if !src_lower && !tgt_lower { continue; }
 
-                    let w = corridor.width as i32;
-                    let half = w / 2;
-                    for pair in corridor.waypoints.windows(2) {
-                        let x1 = pair[0].x;
-                        let y1 = pair[0].y;
-                        let x2 = pair[1].x;
-                        let y2 = pair[1].y;
-                        let min_x = x1.min(x2) - half;
-                        let min_y = y1.min(y2) - half;
-                        let max_x = x1.max(x2) - half + w;
-                        let max_y = y1.max(y2) - half + w;
+                    for (min_x, min_y, max_x, max_y) in corridor.run_boxes() {
                         let smin = transform.world_to_screen(egui::pos2(
                             grid_to_world(min_x), grid_to_world(min_y),
                         ));
@@ -327,8 +316,7 @@ fn draw_text_overlay(
     if state.show_labels {
         for rl in &layout.rooms {
             if let Some(room) = graph.room_by_id(&rl.room_id) {
-                let cx = (rl.x as f32 + rl.width as f32 / 2.0) * GRID_PX;
-                let cy = (rl.y as f32 + rl.height as f32 / 2.0) * GRID_PX;
+                let (cx, cy) = crate::util::room_center_px(rl);
                 let screen = transform.world_to_screen(egui::pos2(cx, cy));
                 let max_width = rl.width as f32 * GRID_PX * transform.zoom;
                 let font = egui::FontId::monospace(10.0 * transform.zoom);

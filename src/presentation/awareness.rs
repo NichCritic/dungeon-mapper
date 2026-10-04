@@ -173,10 +173,8 @@ pub fn encounter_distance_feet(
     let rl_a = layout.room_by_id(party_room)?;
     let rl_b = layout.room_by_id(encounter_room)?;
 
-    let ax = rl_a.x as f32 + rl_a.width as f32 / 2.0;
-    let ay = rl_a.y as f32 + rl_a.height as f32 / 2.0;
-    let bx = rl_b.x as f32 + rl_b.width as f32 / 2.0;
-    let by = rl_b.y as f32 + rl_b.height as f32 / 2.0;
+    let (ax, ay) = rl_a.center();
+    let (bx, by) = rl_b.center();
 
     let dx = bx - ax;
     let dy = by - ay;
@@ -197,8 +195,7 @@ pub fn room_light_level(
         return LightLevel::Dark;
     };
 
-    let cx = rl.x as f32 + rl.width as f32 / 2.0;
-    let cy = rl.y as f32 + rl.height as f32 / 2.0;
+    let (cx, cy) = rl.center();
 
     let brightness = compute_brightness_generic(cx, cy, light_sources, ambient_light, layout);
 

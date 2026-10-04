@@ -273,12 +273,8 @@ pub fn freeform_corridor_walls(
                 }
             }
             None => {
-                let (cw, half) = (other.width as i32, other.width as i32 / 2);
-                for w in other.waypoints.windows(2) {
-                    let x0 = (w[0].x.min(w[1].x) - half) as f32;
-                    let y0 = (w[0].y.min(w[1].y) - half) as f32;
-                    let x1 = (w[0].x.max(w[1].x) - half + cw) as f32;
-                    let y1 = (w[0].y.max(w[1].y) - half + cw) as f32;
+                for (x0, y0, x1, y1) in other.run_boxes() {
+                    let (x0, y0, x1, y1) = (x0 as f32, y0 as f32, x1 as f32, y1 as f32);
                     if near(x0, y0, x1, y1) {
                         hidden_by.push(Interior::Rect { x0, y0, x1, y1 });
                     }

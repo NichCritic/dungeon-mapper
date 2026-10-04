@@ -292,13 +292,7 @@ pub fn render_corridor_floor_with_color(
     corridor: &CorridorSegment,
     color: [u8; 4],
 ) {
-    let cw = corridor.width as i32;
-    let half = cw / 2;
-    for pair in corridor.waypoints.windows(2) {
-        let min_gx = pair[0].x.min(pair[1].x) - half;
-        let min_gy = pair[0].y.min(pair[1].y) - half;
-        let max_gx = pair[0].x.max(pair[1].x) - half + cw;
-        let max_gy = pair[0].y.max(pair[1].y) - half + cw;
+    for (min_gx, min_gy, max_gx, max_gy) in corridor.run_boxes() {
 
         let px = min_gx as f32 * GRID_PX;
         let py = min_gy as f32 * GRID_PX;
@@ -850,13 +844,7 @@ pub fn render_corridor_walls(
     cave_cells: &CellSet,
 ) {
     let wall_w = 2.0;
-    let cw = corridor.width as i32;
-    let half = cw / 2;
-    for pair in corridor.waypoints.windows(2) {
-        let min_gx = pair[0].x.min(pair[1].x) - half;
-        let min_gy = pair[0].y.min(pair[1].y) - half;
-        let max_gx = pair[0].x.max(pair[1].x) - half + cw;
-        let max_gy = pair[0].y.max(pair[1].y) - half + cw;
+    for (min_gx, min_gy, max_gx, max_gy) in corridor.run_boxes() {
 
         let px1 = min_gx as f32 * GRID_PX;
         let py1 = min_gy as f32 * GRID_PX;
@@ -922,13 +910,7 @@ pub fn repair_circle_junctions(
         if geometry::is_freeform(corridor, layout, graph) {
             continue;
         }
-        let cw = corridor.width as i32;
-        let half = cw / 2;
-        for pair in corridor.waypoints.windows(2) {
-            let min_gx = pair[0].x.min(pair[1].x) - half;
-            let min_gy = pair[0].y.min(pair[1].y) - half;
-            let max_gx = pair[0].x.max(pair[1].x) - half + cw;
-            let max_gy = pair[0].y.max(pair[1].y) - half + cw;
+        for (min_gx, min_gy, max_gx, max_gy) in corridor.run_boxes() {
 
             for rl in &circle_rooms {
                 let room_max_x = rl.x + rl.width as i32;
@@ -1355,8 +1337,7 @@ pub fn render_labels(
 ) {
     for rl in &layout.rooms {
         if let Some(room) = graph.room_by_id(&rl.room_id) {
-            let cx = (rl.x as f32 + rl.width as f32 / 2.0) * GRID_PX;
-            let cy = (rl.y as f32 + rl.height as f32 / 2.0) * GRID_PX;
+            let (cx, cy) = crate::util::room_center_px(rl);
             renderer.draw_text(&room.label, cx, cy, 10.0, [60, 60, 60, 255]);
 
             if options.show_notes && !room.note_excerpt.is_empty() {
@@ -1409,8 +1390,7 @@ pub fn rasterize_floor_filtered(
         }
         match shape {
             RoomShape::Circle => {
-                let cx = rl.x as f32 + rl.width as f32 / 2.0;
-                let cy = rl.y as f32 + rl.height as f32 / 2.0;
+                let (cx, cy) = rl.center();
                 let r = (rl.width.min(rl.height) as f32) / 2.0;
                 for y in rl.y..(rl.y + rl.height as i32) {
                     for x in rl.x..(rl.x + rl.width as i32) {
@@ -1475,13 +1455,7 @@ pub fn rasterize_floor_filtered(
             }
             continue;
         }
-        let cw = corridor.width as i32;
-        let half = cw / 2;
-        for pair in corridor.waypoints.windows(2) {
-            let min_x = pair[0].x.min(pair[1].x) - half;
-            let min_y = pair[0].y.min(pair[1].y) - half;
-            let max_x = pair[0].x.max(pair[1].x) - half + cw;
-            let max_y = pair[0].y.max(pair[1].y) - half + cw;
+        for (min_x, min_y, max_x, max_y) in corridor.run_boxes() {
             for y in min_y..max_y {
                 for x in min_x..max_x {
                     floor.insert((x, y));

@@ -111,6 +111,20 @@ pub struct CorridorSegment {
     pub floor: FloorAssignment,
 }
 
+impl CorridorSegment {
+    /// The cells each run covers, as (min_x, min_y, max_x, max_y) with max exclusive.
+    /// Waypoints mark a corridor's cells as `wp - width/2 .. wp - width/2 + width`.
+    pub fn run_boxes(&self) -> impl Iterator<Item = (i32, i32, i32, i32)> + '_ {
+        let (cw, half) = (self.width as i32, self.width as i32 / 2);
+        self.waypoints.windows(2).map(move |w| (
+            w[0].x.min(w[1].x) - half,
+            w[0].y.min(w[1].y) - half,
+            w[0].x.max(w[1].x) - half + cw,
+            w[0].y.max(w[1].y) - half + cw,
+        ))
+    }
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
 pub struct GridPos {
     pub x: i32,

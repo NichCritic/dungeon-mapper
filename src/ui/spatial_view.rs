@@ -1522,22 +1522,8 @@ fn draw_corridors(
             continue;
         }
 
-        let w = corridor.width as i32;
-        let half = w / 2; // integer: same offset used by solver
-
         // Draw each segment as a filled rectangle on the grid.
-        // Waypoints are center coords. The block covers cells
-        // from (center - half) to (center - half + w).
-        for pair in corridor.waypoints.windows(2) {
-            let x1 = pair[0].x;
-            let y1 = pair[0].y;
-            let x2 = pair[1].x;
-            let y2 = pair[1].y;
-
-            let min_x = x1.min(x2) - half;
-            let min_y = y1.min(y2) - half;
-            let max_x = x1.max(x2) - half + w;
-            let max_y = y1.max(y2) - half + w;
+        for (min_x, min_y, max_x, max_y) in corridor.run_boxes() {
 
             let screen_min = transform.world_to_screen(egui::pos2(
                 grid_to_world(min_x),
@@ -1620,10 +1606,8 @@ fn default_exit_pos(room_rl: &RoomLayout, other_rl: &RoomLayout, corridor_width:
         let (ox, oy) = other_rl.center();
         return snap_to_perimeter(egui::pos2(ox * GRID_PX, oy * GRID_PX), room_rl, corridor_width);
     }
-    let rcx = room_rl.x as f32 + room_rl.width as f32 / 2.0;
-    let rcy = room_rl.y as f32 + room_rl.height as f32 / 2.0;
-    let ocx = other_rl.x as f32 + other_rl.width as f32 / 2.0;
-    let ocy = other_rl.y as f32 + other_rl.height as f32 / 2.0;
+    let (rcx, rcy) = room_rl.center();
+    let (ocx, ocy) = other_rl.center();
     let dx = ocx - rcx;
     let dy = ocy - rcy;
 
@@ -2908,8 +2892,9 @@ fn rotate_group(dungeon: &mut Dungeon, room_ids: &[String]) {
     let mut count = 0;
     for rid in room_ids {
         if let Some(rl) = layout.room_by_id(rid) {
-            sum_cx += rl.x as f32 + rl.width as f32 / 2.0;
-            sum_cy += rl.y as f32 + rl.height as f32 / 2.0;
+            let (cx, cy) = rl.center();
+            sum_cx += cx;
+            sum_cy += cy;
             count += 1;
         }
     }
@@ -2920,8 +2905,7 @@ fn rotate_group(dungeon: &mut Dungeon, room_ids: &[String]) {
     // Rotate each room 90° CW around center: (x,y) -> (center_x + (y - center_y), center_y - (x - center_x))
     for rid in room_ids {
         if let Some(rl) = layout.room_by_id_mut(rid) {
-            let old_cx = rl.x as f32 + rl.width as f32 / 2.0;
-            let old_cy = rl.y as f32 + rl.height as f32 / 2.0;
+            let (old_cx, old_cy) = rl.center();
             let new_cx = center_x + (old_cy - center_y);
             let new_cy = center_y - (old_cx - center_x);
             std::mem::swap(&mut rl.width, &mut rl.height);
@@ -2961,8 +2945,9 @@ fn flip_group(dungeon: &mut Dungeon, room_ids: &[String], horizontal: bool) {
     let mut count = 0;
     for rid in room_ids {
         if let Some(rl) = layout.room_by_id(rid) {
-            sum_cx += rl.x as f32 + rl.width as f32 / 2.0;
-            sum_cy += rl.y as f32 + rl.height as f32 / 2.0;
+            let (cx, cy) = rl.center();
+            sum_cx += cx;
+            sum_cy += cy;
             count += 1;
         }
     }
@@ -2973,8 +2958,7 @@ fn flip_group(dungeon: &mut Dungeon, room_ids: &[String], horizontal: bool) {
     // Flip each room around center
     for rid in room_ids {
         if let Some(rl) = layout.room_by_id_mut(rid) {
-            let old_cx = rl.x as f32 + rl.width as f32 / 2.0;
-            let old_cy = rl.y as f32 + rl.height as f32 / 2.0;
+            let (old_cx, old_cy) = rl.center();
             if horizontal {
                 let new_cx = center_x - (old_cx - center_x);
                 rl.x = (new_cx - rl.width as f32 / 2.0).round() as i32;

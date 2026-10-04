@@ -295,8 +295,7 @@ pub fn player_viewport(
                 continue;
             }
             if let Some(room) = dungeon.graph.room_by_id(&rl.room_id) {
-                let cx = (rl.x as f32 + rl.width as f32 / 2.0) * GRID_PX;
-                let cy = (rl.y as f32 + rl.height as f32 / 2.0) * GRID_PX;
+                let (cx, cy) = crate::util::room_center_px(rl);
                 let screen = transform.world_to_screen(egui::pos2(cx, cy));
                 let max_width = rl.width as f32 * GRID_PX * transform.zoom;
                 let font = egui::FontId::monospace(10.0 * transform.zoom);

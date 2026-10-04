@@ -2035,8 +2035,7 @@ impl eframe::App for DungeonApp {
                 }
                 let mut best: Option<(f32, &str)> = None;
                 for rl in &layout_rooms {
-                    let cx = (rl.x as f32 + rl.width as f32 / 2.0) * crate::util::GRID_PX;
-                    let cy = (rl.y as f32 + rl.height as f32 / 2.0) * crate::util::GRID_PX;
+                    let (cx, cy) = crate::util::room_center_px(rl);
                     let dist = ((cx - world.x).powi(2) + (cy - world.y).powi(2)).sqrt();
                     if best.is_none() || dist < best.unwrap().0 {
                         best = Some((dist, &rl.room_id));

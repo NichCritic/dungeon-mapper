@@ -83,3 +83,9 @@ pub fn point_to_segment_dist(p: egui::Pos2, a: egui::Pos2, b: egui::Pos2) -> f32
     let closest = a + ab * t;
     p.distance(closest)
 }
+
+/// World-space pixel center of a room (its rotation pivot).
+pub fn room_center_px(rl: &crate::model::RoomLayout) -> (f32, f32) {
+    let (cx, cy) = rl.center();
+    (cx * GRID_PX, cy * GRID_PX)
+}

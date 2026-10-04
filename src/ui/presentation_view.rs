@@ -1056,13 +1056,6 @@ fn condition_popup(
     pick
 }
 
-/// World-space pixel center of a room's layout rectangle.
-fn room_center_px(rl: &crate::model::RoomLayout) -> (f32, f32) {
-    (
-        (rl.x as f32 + rl.width as f32 / 2.0) * GRID_PX,
-        (rl.y as f32 + rl.height as f32 / 2.0) * GRID_PX,
-    )
-}
 
 /// Find the corridor under a grid position, returning the connection_id.
 /// The corridor covering a grid cell. `shapes` is [`crate::model::geometry::corridor_shapes`]
@@ -1075,13 +1068,7 @@ pub fn corridor_at_grid(layout: &SpatialLayout, shapes: &[Option<crate::model::g
             }
             continue;
         }
-        let cw = corridor.width as i32;
-        let half = cw / 2;
-        for pair in corridor.waypoints.windows(2) {
-            let min_gx = pair[0].x.min(pair[1].x) - half;
-            let min_gy = pair[0].y.min(pair[1].y) - half;
-            let max_gx = pair[0].x.max(pair[1].x) - half + cw;
-            let max_gy = pair[0].y.max(pair[1].y) - half + cw;
+        for (min_gx, min_gy, max_gx, max_gy) in corridor.run_boxes() {
 
             if gx >= min_gx && gx < max_gx && gy >= min_gy && gy < max_gy {
                 return Some(corridor.connection_id.clone());
@@ -1163,7 +1150,7 @@ pub fn presentation_view(
     // Draw text overlay (labels/notes visible to DM)
     for rl in &layout.rooms {
         if let Some(room) = dungeon.graph.room_by_id(&rl.room_id) {
-            let (cx, cy) = room_center_px(rl);
+            let (cx, cy) = crate::util::room_center_px(rl);
             let screen = transform.world_to_screen(egui::pos2(cx, cy));
             painter.text(
                 screen,
@@ -1574,14 +1561,14 @@ pub fn presentation_view(
                 ui.separator();
                 if ui.button("Center Player Here").clicked() {
                     if let Some(rl) = layout.room_by_id(&room_id) {
-                        let (cx, cy) = room_center_px(rl);
+                        let (cx, cy) = crate::util::room_center_px(rl);
                         player_view_state.view.center_on(cx, cy, player_view_state.canvas_size);
                     }
                     ui.close_menu();
                 }
                 if ui.button("Center DM View Here").clicked() {
                     if let Some(rl) = layout.room_by_id(&room_id) {
-                        let (cx, cy) = room_center_px(rl);
+                        let (cx, cy) = crate::util::room_center_px(rl);
                         view_state.view.center_on(cx, cy, view_state.canvas_size);
                     }
                     ui.close_menu();
@@ -1620,7 +1607,7 @@ pub fn presentation_view(
 
             // Center the player view on the party, wherever it is
             if let Some(party_rl) = presentation.party_room.as_ref().and_then(|id| layout.room_by_id(id)) {
-                let (cx, cy) = room_center_px(party_rl);
+                let (cx, cy) = crate::util::room_center_px(party_rl);
                 ui.separator();
                 if ui.button("Center Player on Party").clicked() {
                     player_view_state.view.center_on(cx, cy, player_view_state.canvas_size);
@@ -2681,7 +2668,7 @@ pub fn presentation_sidebar(
         if ui.button("Center Camera").clicked() {
             if let Some(layout) = &dungeon.layout {
                 if let Some(rl) = layout.room_by_id(&sel_room_id) {
-                    let (cx, cy) = room_center_px(rl);
+                    let (cx, cy) = crate::util::room_center_px(rl);
                     view_state.view.center_on(cx, cy, view_state.canvas_size);
                 }
             }
@@ -2782,7 +2769,7 @@ pub fn presentation_sidebar(
                         if ui.small_button("\u{2316}").on_hover_text("Center on room").clicked() {
                             if let Some(layout) = &dungeon.layout {
                                 if let Some(rl) = layout.room_by_id(&room_id) {
-                                    let (cx, cy) = room_center_px(rl);
+                                    let (cx, cy) = crate::util::room_center_px(rl);
                                     view_state.view.center_on(cx, cy, view_state.canvas_size);
                                 }
                             }
@@ -3071,7 +3058,7 @@ pub fn presentation_sidebar(
                 .unwrap_or("room");
             if ui.button(format!("Center player on {}", room_label)).clicked() {
                 if let Some(rl) = layout.room_by_id(sel_id) {
-                    let (cx, cy) = room_center_px(rl);
+                    let (cx, cy) = crate::util::room_center_px(rl);
                     player_view_state.view.center_on(cx, cy, player_view_state.canvas_size);
                 }
             }
@@ -3087,7 +3074,7 @@ pub fn presentation_sidebar(
                         for (room_id, label) in &rooms {
                             if ui.selectable_label(false, label).clicked() {
                                 if let Some(rl) = layout.room_by_id(room_id) {
-                                    let (cx, cy) = room_center_px(rl);
+                                    let (cx, cy) = crate::util::room_center_px(rl);
                                     player_view_state.view.center_on(cx, cy, player_view_state.canvas_size);
                                 }
                             }

@@ -28,7 +28,7 @@ pub fn compute_brightness_generic(
             Some(p) => p,
             None => {
                 let Some(light_rl) = layout.room_by_id(&light.room_id) else { continue };
-                (light_rl.x as f32 + light_rl.width as f32 / 2.0, light_rl.y as f32 + light_rl.height as f32 / 2.0)
+                light_rl.center()
             }
         };
 
@@ -142,7 +142,7 @@ pub fn light_origin(light: &LightSource, dungeon: &Dungeon, layout: &SpatialLayo
         return Some(p);
     }
     let rl = layout.room_by_id(&light.room_id)?;
-    Some((rl.x as f32 + rl.width as f32 / 2.0, rl.y as f32 + rl.height as f32 / 2.0))
+    Some(rl.center())
 }
 
 /// Fingerprint of everything the light map depends on.

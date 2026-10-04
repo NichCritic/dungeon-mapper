@@ -170,8 +170,7 @@ pub fn encounters_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Enc
     // Draw room labels
     for rl in &layout.rooms {
         if let Some(room) = dungeon.graph.room_by_id(&rl.room_id) {
-            let cx = (rl.x as f32 + rl.width as f32 / 2.0) * GRID_PX;
-            let cy = (rl.y as f32 + rl.height as f32 / 2.0) * GRID_PX;
+            let (cx, cy) = crate::util::room_center_px(rl);
             let screen = transform.world_to_screen(egui::pos2(cx, cy));
             painter.text(
                 screen,
@@ -187,8 +186,7 @@ pub fn encounters_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Enc
     for enc in &dungeon.encounters {
         let Some(rl) = layout.room_by_id(&enc.home_room_id) else { continue };
 
-        let cx = (rl.x as f32 + rl.width as f32 / 2.0) * GRID_PX;
-        let cy = (rl.y as f32 + rl.height as f32 / 2.0) * GRID_PX;
+        let (cx, cy) = crate::util::room_center_px(rl);
         let screen = transform.world_to_screen(egui::pos2(cx, cy));
 
         let siblings: Vec<_> = dungeon.encounters.iter()
