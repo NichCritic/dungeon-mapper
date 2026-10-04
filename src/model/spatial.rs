@@ -123,6 +123,26 @@ impl CorridorSegment {
             w[0].y.max(w[1].y) - half + cw,
         ))
     }
+
+    /// Every cell the corridor covers: each straight run's box, and the cells an
+    /// angled run's block sweeps.
+    pub fn cells(&self) -> std::collections::HashSet<(i32, i32)> {
+        let (w, half) = (self.width as i32, self.width as i32 / 2);
+        let mut cells = std::collections::HashSet::new();
+        for (pair, (x0, y0, x1, y1)) in self.waypoints.windows(2).zip(self.run_boxes()) {
+            if pair[0].x != pair[1].x && pair[0].y != pair[1].y {
+                let tl = |p: GridPos| GridPos { x: p.x - half, y: p.y - half };
+                cells.extend(super::geometry::swept_cells(tl(pair[0]), tl(pair[1]), w, 0));
+                continue;
+            }
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    cells.insert((x, y));
+                }
+            }
+        }
+        cells
+    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
@@ -221,29 +241,8 @@ impl SpatialLayout {
     pub fn recheck_corridor_overlaps(&mut self) {
         use std::collections::HashSet;
 
-        // Compute the grid cells each corridor occupies
-        let corridor_cells: Vec<HashSet<(i32, i32)>> = self.corridors.iter()
-            .map(|c| {
-                let w = c.width as i32;
-                let mut cells = HashSet::new();
-                for pair in c.waypoints.windows(2) {
-                    if pair[0].x != pair[1].x && pair[0].y != pair[1].y {
-                        cells.extend(super::geometry::swept_cells(pair[0], pair[1], w, 0));
-                        continue;
-                    }
-                    let min_x = pair[0].x.min(pair[1].x);
-                    let max_x = pair[0].x.max(pair[1].x);
-                    let min_y = pair[0].y.min(pair[1].y);
-                    let max_y = pair[0].y.max(pair[1].y);
-                    for y in min_y..=(max_y + w - 1) {
-                        for x in min_x..=(max_x + w - 1) {
-                            cells.insert((x, y));
-                        }
-                    }
-                }
-                cells
-            })
-            .collect();
+        // The grid cells each corridor occupies (the same cells it is drawn on)
+        let corridor_cells: Vec<HashSet<(i32, i32)>> = self.corridors.iter().map(CorridorSegment::cells).collect();
 
         // Pre-compute floor sets for each corridor
         let corridor_floors: Vec<Vec<i32>> = self.corridors.iter()
@@ -317,6 +316,27 @@ impl Default for SpatialLayout {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn overlap_check_uses_drawn_cells() {
+        let corridor = |id: &str, y: i32, width: u32| CorridorSegment {
+            connection_id: id.into(),
+            waypoints: vec![GridPos { x: 0, y }, GridPos { x: 10, y }],
+            width,
+            invalid: false,
+            pinned_waypoints: Vec::new(),
+            floor: FloorAssignment::default(),
+        };
+        // A 2-wide corridor centered on y=0 covers rows -1 and 0; a 1-wide one at y=1 covers row 1
+        let mut layout = SpatialLayout::new();
+        layout.corridors = vec![corridor("a", 0, 2), corridor("b", 1, 1)];
+        layout.recheck_corridor_overlaps();
+        assert!(layout.corridors.iter().all(|c| !c.invalid), "side by side, not overlapping");
+        layout.corridors[1].waypoints = vec![GridPos { x: 0, y: 0 }, GridPos { x: 10, y: 0 }];
+        layout.recheck_corridor_overlaps();
+        assert!(layout.corridors.iter().all(|c| c.invalid));
+    }
+
     use super::*;
 
     fn rl(id: &str, x: i32, y: i32, w: u32, h: u32) -> RoomLayout {

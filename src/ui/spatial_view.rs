@@ -2882,112 +2882,71 @@ fn duplicate_group(dungeon: &mut Dungeon, room_ids: &[String], group_idx: usize)
 }
 
 fn rotate_group(dungeon: &mut Dungeon, room_ids: &[String]) {
+    // 90° about the group's center; room footprints swap width and height
+    transform_group(dungeon, room_ids, true, |(cx, cy), (x, y)| (cx + (y - cy), cy - (x - cx)));
+}
+
+fn flip_group(dungeon: &mut Dungeon, room_ids: &[String], horizontal: bool) {
+    transform_group(dungeon, room_ids, false, move |(cx, cy), (x, y)| {
+        if horizontal { (2.0 * cx - x, y) } else { (x, 2.0 * cy - y) }
+    });
+}
+
+/// Move a group of rooms by `xf` (given the group's center and a point): rooms by
+/// their centers, plus the waypoints and pins of corridors inside the group and the
+/// exits of every connection touching it. `quarter_turn` swaps room footprints;
+/// otherwise `xf` is a mirror, which reverses each room's rotation.
+fn transform_group(
+    dungeon: &mut Dungeon,
+    room_ids: &[String],
+    quarter_turn: bool,
+    xf: impl Fn((f32, f32), (f32, f32)) -> (f32, f32),
+) {
     let Some(layout) = &mut dungeon.layout else { return };
-
-    // Find group center
-    let mut sum_cx = 0.0_f32;
-    let mut sum_cy = 0.0_f32;
-    let mut count = 0;
-    for rid in room_ids {
-        if let Some(rl) = layout.room_by_id(rid) {
-            let (cx, cy) = rl.center();
-            sum_cx += cx;
-            sum_cy += cy;
-            count += 1;
-        }
+    let centers: Vec<(f32, f32)> = room_ids.iter().filter_map(|rid| layout.room_by_id(rid)).map(|rl| rl.center()).collect();
+    if centers.is_empty() {
+        return;
     }
-    if count == 0 { return; }
-    let center_x = sum_cx / count as f32;
-    let center_y = sum_cy / count as f32;
+    let n = centers.len() as f32;
+    let center = (centers.iter().map(|c| c.0).sum::<f32>() / n, centers.iter().map(|c| c.1).sum::<f32>() / n);
 
-    // Rotate each room 90° CW around center: (x,y) -> (center_x + (y - center_y), center_y - (x - center_x))
     for rid in room_ids {
         if let Some(rl) = layout.room_by_id_mut(rid) {
-            let (old_cx, old_cy) = rl.center();
-            let new_cx = center_x + (old_cy - center_y);
-            let new_cy = center_y - (old_cx - center_x);
-            std::mem::swap(&mut rl.width, &mut rl.height);
+            let (new_cx, new_cy) = xf(center, rl.center());
+            if quarter_turn {
+                std::mem::swap(&mut rl.width, &mut rl.height);
+            } else {
+                // A mirror turns the other way
+                rl.rotation = -rl.rotation;
+            }
             rl.x = (new_cx - rl.width as f32 / 2.0).round() as i32;
             rl.y = (new_cy - rl.height as f32 / 2.0).round() as i32;
         }
     }
 
-    // Rotate corridor waypoints
-    let room_id_set: std::collections::HashSet<&String> = room_ids.iter().collect();
-    let conn_ids: Vec<String> = dungeon.graph.connections.iter()
-        .filter(|e| room_id_set.contains(&e.source_room_id) && room_id_set.contains(&e.target_room_id))
-        .map(|e| e.connection.id.clone())
-        .collect();
-
+    let in_group: std::collections::HashSet<&String> = room_ids.iter().collect();
+    let move_grid = |p: &mut GridPos| {
+        let (x, y) = xf(center, (p.x as f32, p.y as f32));
+        (p.x, p.y) = (x.round() as i32, y.round() as i32);
+    };
     for corridor in &mut layout.corridors {
-        if conn_ids.contains(&corridor.connection_id) {
-            for wp in &mut corridor.waypoints {
-                let old_x = wp.x as f32;
-                let old_y = wp.y as f32;
-                wp.x = (center_x + (old_y - center_y)).round() as i32;
-                wp.y = (center_y - (old_x - center_x)).round() as i32;
-            }
-            if is_orthogonal(&dungeon.graph, corridor) {
-                resolve_diagonal_segments_clean(&mut corridor.waypoints);
-            }
+        let Some(edge) = dungeon.graph.connection_by_id(&corridor.connection_id) else { continue };
+        if !(in_group.contains(&edge.source_room_id) && in_group.contains(&edge.target_room_id)) {
+            continue;
+        }
+        corridor.waypoints.iter_mut().for_each(move_grid);
+        corridor.pinned_waypoints.iter_mut().for_each(move_grid);
+        if edge.connection.corridor_angle == CorridorAngle::Orthogonal {
+            resolve_diagonal_segments_clean(&mut corridor.waypoints);
         }
     }
-}
-
-fn flip_group(dungeon: &mut Dungeon, room_ids: &[String], horizontal: bool) {
-    let Some(layout) = &mut dungeon.layout else { return };
-
-    // Find group center
-    let mut sum_cx = 0.0_f32;
-    let mut sum_cy = 0.0_f32;
-    let mut count = 0;
-    for rid in room_ids {
-        if let Some(rl) = layout.room_by_id(rid) {
-            let (cx, cy) = rl.center();
-            sum_cx += cx;
-            sum_cy += cy;
-            count += 1;
-        }
-    }
-    if count == 0 { return; }
-    let center_x = sum_cx / count as f32;
-    let center_y = sum_cy / count as f32;
-
-    // Flip each room around center
-    for rid in room_ids {
-        if let Some(rl) = layout.room_by_id_mut(rid) {
-            let (old_cx, old_cy) = rl.center();
-            if horizontal {
-                let new_cx = center_x - (old_cx - center_x);
-                rl.x = (new_cx - rl.width as f32 / 2.0).round() as i32;
-            } else {
-                let new_cy = center_y - (old_cy - center_y);
-                rl.y = (new_cy - rl.height as f32 / 2.0).round() as i32;
-            }
-            // A mirror turns the other way
-            rl.rotation = -rl.rotation;
-        }
-    }
-
-    // Flip corridor waypoints
-    let room_id_set: std::collections::HashSet<&String> = room_ids.iter().collect();
-    let conn_ids: Vec<String> = dungeon.graph.connections.iter()
-        .filter(|e| room_id_set.contains(&e.source_room_id) && room_id_set.contains(&e.target_room_id))
-        .map(|e| e.connection.id.clone())
-        .collect();
-
-    for corridor in &mut layout.corridors {
-        if conn_ids.contains(&corridor.connection_id) {
-            for wp in &mut corridor.waypoints {
-                if horizontal {
-                    wp.x = (2.0 * center_x - wp.x as f32).round() as i32;
-                } else {
-                    wp.y = (2.0 * center_y - wp.y as f32).round() as i32;
-                }
-            }
-            if is_orthogonal(&dungeon.graph, corridor) {
-                resolve_diagonal_segments_clean(&mut corridor.waypoints);
-            }
+    // Exits sit on a room's wall: move them with the room, then snap back onto the wall
+    for edge in &mut dungeon.graph.connections {
+        let cw = edge.connection.corridor_width;
+        for (room_id, exit) in [(&edge.source_room_id, &mut edge.source_exit), (&edge.target_room_id, &mut edge.target_exit)] {
+            let (Some(e), Some(rl)) = (exit.as_mut(), layout.room_by_id(room_id).filter(|_| in_group.contains(room_id))) else { continue };
+            let (x, y) = xf(center, (e.x, e.y));
+            *e = snap_to_perimeter(egui::pos2(x * GRID_PX, y * GRID_PX), rl, cw);
         }
     }
 }
@@ -2995,6 +2954,35 @@ fn flip_group(dungeon: &mut Dungeon, room_ids: &[String], horizontal: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn flipping_a_group_moves_pins_and_exits_with_it() {
+        let mut d = Dungeon::new("t".into());
+        let (a, b) = (Room::new("A".into()), Room::new("B".into()));
+        let (aid, bid) = (a.id.clone(), b.id.clone());
+        d.graph.add_room(a);
+        d.graph.add_room(b);
+        d.graph.add_connection(aid.clone(), bid.clone(), Connection::new(ConnectionType::Door));
+        d.graph.connections[0].source_exit = Some(ExitPos { x: 4.0, y: 2.0 });
+        let rl = |id: &str, x: i32| RoomLayout { room_id: id.into(), x, y: 0, width: 4, height: 4, violations: Vec::new(), wall_openings: Vec::new(), rotation: 0.0 };
+        let mut layout = SpatialLayout::new();
+        layout.rooms = vec![rl(&aid, 0), rl(&bid, 10)];
+        let pins = vec![GridPos { x: 4, y: 2 }, GridPos { x: 7, y: 2 }, GridPos { x: 10, y: 2 }];
+        layout.corridors = vec![CorridorSegment {
+            connection_id: d.graph.connections[0].connection.id.clone(),
+            waypoints: pins.clone(), width: 2, invalid: false, pinned_waypoints: pins, floor: FloorAssignment::default(),
+        }];
+        d.layout = Some(layout);
+        flip_group(&mut d, &[aid.clone(), bid.clone()], true);
+        let layout = d.layout.as_ref().unwrap();
+        // Mirrored about x = 7: A lands on the right, and the pins run the other way
+        assert_eq!(layout.room_by_id(&aid).unwrap().x, 10);
+        let xs: Vec<i32> = layout.corridors[0].pinned_waypoints.iter().map(|p| p.x).collect();
+        assert_eq!(xs, vec![10, 7, 4]);
+        // A's exit was on its east wall; it is now on the moved room's west wall
+        let e = d.graph.connections[0].source_exit.unwrap();
+        assert_eq!((e.x, e.y), (10.0, 2.0));
+    }
 
     #[test]
     fn grid_line_is_gapless_and_inclusive() {
