@@ -180,6 +180,7 @@ pub fn player_viewport(
         {
             let infos = tokens::resolve_tokens(dungeon, monster_db, presentation.combat_tracker.as_ref());
             let order = layout.render_order(&dungeon.graph);
+            let shapes = crate::model::geometry::corridor_shapes(layout, &dungeon.graph);
             let mut vis_tokens = Vec::new();
             let mut vis_infos = Vec::new();
             for (tok, info) in dungeon.tokens.iter().zip(&infos) {
@@ -190,7 +191,7 @@ pub fn player_viewport(
                         let gy = tok.y.floor() as i32;
                         let fog_ok = if let Some(rl) = layout.room_at_grid_ordered(&order, gx, gy) {
                             *presentation.room_visibility(&rl.room_id) == Visibility::Visible
-                        } else if let Some(cid) = crate::ui::presentation_view::corridor_at_grid(layout, gx, gy) {
+                        } else if let Some(cid) = crate::ui::presentation_view::corridor_at_grid(layout, &shapes, gx, gy) {
                             crate::presentation::fog::corridor_visibility(&cid, presentation, &dungeon.graph) == Visibility::Visible
                         } else {
                             false

@@ -12,6 +12,7 @@ pub mod spatial;
 pub mod theme;
 pub mod token;
 pub mod dungeon;
+pub mod geometry;
 
 pub use annotation::*;
 pub use campaign::Campaign;

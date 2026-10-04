@@ -261,10 +261,11 @@ pub fn compute_light_map(
     if pc_tokens.is_empty() {
         // No party tokens: what players see is governed by fog alone
         let order = layout.render_order(&dungeon.graph);
+        let shapes = crate::model::geometry::corridor_shapes(layout, &dungeon.graph);
         for &c in &floor {
             let visible = if let Some(rl) = layout.room_at_grid_ordered(&order, c.0, c.1) {
                 *visibility.room_visibility(&rl.room_id) == Visibility::Visible
-            } else if let Some(cid) = crate::ui::presentation_view::corridor_at_grid(layout, c.0, c.1) {
+            } else if let Some(cid) = crate::ui::presentation_view::corridor_at_grid(layout, &shapes, c.0, c.1) {
                 super::fog::corridor_visibility_generic(&cid, visibility, &dungeon.graph) == Visibility::Visible
             } else {
                 false
@@ -422,6 +423,7 @@ mod tests {
                 x, y, width: w, height: h,
                 violations: Vec::new(),
                 wall_openings: Vec::new(),
+                rotation: 0.0,
             }],
             corridors: Vec::new(),
             bounds: Vec::new(),

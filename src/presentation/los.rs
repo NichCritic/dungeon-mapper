@@ -146,6 +146,7 @@ pub fn geometry_key(dungeon: &Dungeon, layout: &SpatialLayout, presentation: &dy
     for rl in &layout.rooms {
         rl.room_id.hash(&mut h);
         (rl.x, rl.y, rl.width, rl.height).hash(&mut h);
+        rl.rotation.to_bits().hash(&mut h);
         for wp in &rl.wall_openings { (wp.x, wp.y).hash(&mut h); }
         if let Some(room) = dungeon.graph.room_by_id(&rl.room_id) {
             (room.shape as u8).hash(&mut h);
@@ -170,6 +171,8 @@ pub fn geometry_key(dungeon: &Dungeon, layout: &SpatialLayout, presentation: &dy
         (e.connection.connection_type as u8).hash(&mut h);
         e.connection.door_width().hash(&mut h);
         e.connection.keep_walls.hash(&mut h);
+        e.connection.overlap_walls.hash(&mut h);
+        e.connection.corridor_angle.hash(&mut h);
         presentation.is_door_open(&e.connection.id).hash(&mut h);
         if let Some(x) = &e.source_exit { x.x.to_bits().hash(&mut h); x.y.to_bits().hash(&mut h); }
         if let Some(x) = &e.target_exit { x.x.to_bits().hash(&mut h); x.y.to_bits().hash(&mut h); }
@@ -220,17 +223,35 @@ pub fn build_static_occluders(
 ) -> Occluders {
     let graph = &dungeon.graph;
     let floor = build_floor_set(layout, graph);
+    let shapes: Vec<Option<crate::model::geometry::CorridorShape>> = layout.corridors.iter()
+        .map(|c| crate::model::geometry::corridor_shape(c, layout, graph))
+        .collect();
+    let freeform = shapes.iter().any(Option::is_some) || layout.rooms.iter().any(|rl| rl.is_rotated());
+    // Rotated rooms and angled corridors don't sit on the grid: only cells they don't
+    // touch at all are rock, and their exact walls (added below) do the blocking.
+    let open_cells;
+    let open: &CellSet = if freeform {
+        open_cells = crate::render::themed::rasterize_floor(layout, graph, crate::render::themed::Coverage::Touched);
+        &open_cells
+    } else {
+        &floor
+    };
 
     // Solid cells: everything inside the layout extents (plus a 1-cell rim) that is not floor.
     let (min_x, min_y, max_x, max_y) = layout.extents();
     let mut solid = CellSet::default();
     for y in (min_y - 1)..=(max_y + 1) {
         for x in (min_x - 1)..=(max_x + 1) {
-            if !floor.contains(&(x, y)) {
+            if !open.contains(&(x, y)) {
                 solid.insert((x, y));
             }
         }
     }
+    // Freeform corridors that let sight through where they meet a room: open passages,
+    // and doors that are open
+    let passable = |e: &crate::model::StoredEdge| {
+        crate::render::overlap::is_open_passage(e) || presentation.is_door_open(&e.connection.id)
+    };
 
     // Door apertures: (room_id, span rect) for every open doorway.
     let mut apertures: Vec<(String, (f32, f32, f32, f32))> = Vec::new();
@@ -261,69 +282,111 @@ pub fn build_static_occluders(
         }
     }
 
-    let mut walls = Vec::new();
+    let mut walls_all = Vec::new();
     for rl in &layout.rooms {
         let room = graph.room_by_id(&rl.room_id);
         let shape = room.map(|r| r.shape).unwrap_or_default();
+        // This room's walls, before removing the parts hidden inside overlapping rooms
+        let mut room_walls: Vec<Segment> = Vec::new();
+        let walls = &mut room_walls;
         let x0 = rl.x as f32;
         let y0 = rl.y as f32;
         let x1 = x0 + rl.width as f32;
         let y1 = y0 + rl.height as f32;
-        match shape {
-            RoomShape::Rectangle => {
+        if rl.is_rotated() && shape != RoomShape::Circle {
+            let cave = room.and_then(|r| r.cave_data.as_ref()).filter(|c| shape == RoomShape::Cave && !c.contour_segments.is_empty());
+            if let Some(cave) = cave {
+                // Turned cave cells don't line up with the grid's rock cells: use the contour
+                let g = crate::util::GRID_PX;
+                for &(ax, ay, bx, by) in &cave.contour_segments {
+                    walls.push(Segment { a: (ax / g, ay / g), b: (bx / g, by / g) });
+                }
+            } else {
                 let open = room.map(|r| r.open_walls).unwrap_or_default();
-                let flush = flush_walls_with_layout(&rl.room_id, rl, graph, layout);
-                // Gaps along each wall: wall openings (corridor crossings) and open doors.
-                let mut gaps_h_top = Vec::new();
-                let mut gaps_h_bot = Vec::new();
-                let mut gaps_v_left = Vec::new();
-                let mut gaps_v_right = Vec::new();
-                for wp in &rl.wall_openings {
-                    let cw = layout.corridors.iter()
-                        .find(|c| c.waypoints.iter().any(|p| *p == *wp))
-                        .map(|c| c.width as f32)
-                        .unwrap_or(2.0);
-                    let (wx, wy) = (wp.x as f32, wp.y as f32);
-                    if (wy - y0).abs() < 1.0 { gaps_h_top.push((wx - cw / 2.0, wx + cw / 2.0)); }
-                    if (wy - y1).abs() < 1.0 { gaps_h_bot.push((wx - cw / 2.0, wx + cw / 2.0)); }
-                    if (wx - x0).abs() < 1.0 { gaps_v_left.push((wy - cw / 2.0, wy + cw / 2.0)); }
-                    if (wx - x1).abs() < 1.0 { gaps_v_right.push((wy - cw / 2.0, wy + cw / 2.0)); }
-                }
-                for (room_id, (dx0, dy0, dx1, dy1)) in &apertures {
-                    if *room_id != rl.room_id { continue; }
-                    let (mx, my) = ((dx0 + dx1) / 2.0, (dy0 + dy1) / 2.0);
-                    if (my - y0).abs() < 0.5 { gaps_h_top.push((*dx0, *dx1)); }
-                    else if (my - y1).abs() < 0.5 { gaps_h_bot.push((*dx0, *dx1)); }
-                    else if (mx - x0).abs() < 0.5 { gaps_v_left.push((*dy0, *dy1)); }
-                    else if (mx - x1).abs() < 0.5 { gaps_v_right.push((*dy0, *dy1)); }
-                }
-                if !open.north && !flush.north { push_wall_with_gaps(&mut walls, (x0, y0), (x1, y0), &gaps_h_top); }
-                if !open.south && !flush.south { push_wall_with_gaps(&mut walls, (x0, y1), (x1, y1), &gaps_h_bot); }
-                if !open.west && !flush.west { push_wall_with_gaps(&mut walls, (x0, y0), (x0, y1), &gaps_v_left); }
-                if !open.east && !flush.east { push_wall_with_gaps(&mut walls, (x1, y0), (x1, y1), &gaps_v_right); }
-            }
-            RoomShape::Circle => {
-                // Rim as a polygon; door gaps are handled by the corridor floor cells touching it.
-                let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
-                let r = (rl.width.min(rl.height) as f32) / 2.0;
-                let n = 24;
-                let mut prev = (cx + r, cy);
-                for i in 1..=n {
-                    let a = i as f32 / n as f32 * std::f32::consts::TAU;
-                    let p = (cx + r * a.cos(), cy + r * a.sin());
-                    // Skip rim pieces that sit on an aperture of this room
-                    let mid = ((prev.0 + p.0) / 2.0, (prev.1 + p.1) / 2.0);
-                    let in_aperture = apertures.iter().any(|(rid, (ax0, ay0, ax1, ay1))| {
-                        *rid == rl.room_id && mid.0 >= ax0 - 0.5 && mid.0 <= ax1 + 0.5 && mid.1 >= ay0 - 0.5 && mid.1 <= ay1 + 0.5
-                    });
-                    if !in_aperture {
-                        walls.push(Segment { a: prev, b: p });
+                let c = rl.corners();
+                for (i, is_open) in [open.north, open.east, open.south, open.west].into_iter().enumerate() {
+                    if !is_open {
+                        walls.push(Segment { a: c[i], b: c[(i + 1) % 4] });
                     }
-                    prev = p;
                 }
             }
-            RoomShape::Cave => {
-                // Cave walls are solid cells already (non-floor inside the rect).
+        } else {
+            match shape {
+                RoomShape::Rectangle => {
+                    let open = room.map(|r| r.open_walls).unwrap_or_default();
+                    let flush = flush_walls_with_layout(&rl.room_id, rl, graph, layout);
+                    // Gaps along each wall: wall openings (corridor crossings) and open doors.
+                    let mut gaps_h_top = Vec::new();
+                    let mut gaps_h_bot = Vec::new();
+                    let mut gaps_v_left = Vec::new();
+                    let mut gaps_v_right = Vec::new();
+                    for wp in &rl.wall_openings {
+                        let cw = layout.corridors.iter()
+                            .find(|c| c.waypoints.iter().any(|p| *p == *wp))
+                            .map(|c| c.width as f32)
+                            .unwrap_or(2.0);
+                        let (wx, wy) = (wp.x as f32, wp.y as f32);
+                        if (wy - y0).abs() < 1.0 { gaps_h_top.push((wx - cw / 2.0, wx + cw / 2.0)); }
+                        if (wy - y1).abs() < 1.0 { gaps_h_bot.push((wx - cw / 2.0, wx + cw / 2.0)); }
+                        if (wx - x0).abs() < 1.0 { gaps_v_left.push((wy - cw / 2.0, wy + cw / 2.0)); }
+                        if (wx - x1).abs() < 1.0 { gaps_v_right.push((wy - cw / 2.0, wy + cw / 2.0)); }
+                    }
+                    for (room_id, (dx0, dy0, dx1, dy1)) in &apertures {
+                        if *room_id != rl.room_id { continue; }
+                        let (mx, my) = ((dx0 + dx1) / 2.0, (dy0 + dy1) / 2.0);
+                        if (my - y0).abs() < 0.5 { gaps_h_top.push((*dx0, *dx1)); }
+                        else if (my - y1).abs() < 0.5 { gaps_h_bot.push((*dx0, *dx1)); }
+                        else if (mx - x0).abs() < 0.5 { gaps_v_left.push((*dy0, *dy1)); }
+                        else if (mx - x1).abs() < 0.5 { gaps_v_right.push((*dy0, *dy1)); }
+                    }
+                    if !open.north && !flush.north { push_wall_with_gaps(walls, (x0, y0), (x1, y0), &gaps_h_top); }
+                    if !open.south && !flush.south { push_wall_with_gaps(walls, (x0, y1), (x1, y1), &gaps_h_bot); }
+                    if !open.west && !flush.west { push_wall_with_gaps(walls, (x0, y0), (x0, y1), &gaps_v_left); }
+                    if !open.east && !flush.east { push_wall_with_gaps(walls, (x1, y0), (x1, y1), &gaps_v_right); }
+                }
+                RoomShape::Circle => {
+                    // Rim as a polygon; door gaps are handled by the corridor floor cells touching it.
+                    let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+                    let r = (rl.width.min(rl.height) as f32) / 2.0;
+                    let n = 24;
+                    let mut prev = (cx + r, cy);
+                    for i in 1..=n {
+                        let a = i as f32 / n as f32 * std::f32::consts::TAU;
+                        let p = (cx + r * a.cos(), cy + r * a.sin());
+                        // Skip rim pieces that sit on an aperture of this room
+                        let mid = ((prev.0 + p.0) / 2.0, (prev.1 + p.1) / 2.0);
+                        let in_aperture = apertures.iter().any(|(rid, (ax0, ay0, ax1, ay1))| {
+                            *rid == rl.room_id && mid.0 >= ax0 - 0.5 && mid.0 <= ax1 + 0.5 && mid.1 >= ay0 - 0.5 && mid.1 <= ay1 + 0.5
+                        });
+                        if !in_aperture {
+                            walls.push(Segment { a: prev, b: p });
+                        }
+                        prev = p;
+                    }
+                }
+                RoomShape::Cave => {
+                    // Cave walls are solid cells already (non-floor inside the rect), except
+                    // where the cave overlaps another room's floor: there its contour stands
+                    // on open floor, so it becomes a wall segment wherever it stays visible.
+                    let partners = crate::render::overlap::overlap_partners(&rl.room_id, graph, layout, false);
+                    if let Some(cave) = room.and_then(|r| r.cave_data.as_ref()).filter(|_| !partners.is_empty()) {
+                        let g = crate::util::GRID_PX;
+                        for &(ax, ay, bx, by) in &cave.contour_segments {
+                            let (a, b) = ((ax / g, ay / g), (bx / g, by / g));
+                            let mid = ((a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0);
+                            if crate::render::overlap::point_inside_any(mid, &partners) {
+                                walls.push(Segment { a, b });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let mut hidden_by = crate::render::overlap::wall_suppressors(&rl.room_id, graph, layout);
+        hidden_by.extend(crate::render::overlap::attached_corridor_interiors(&rl.room_id, graph, layout, passable));
+        for w in room_walls {
+            for (a, b) in crate::render::overlap::visible_parts(w.a, w.b, &hidden_by) {
+                walls_all.push(Segment { a, b });
             }
         }
     }
@@ -341,8 +404,9 @@ pub fn build_static_occluders(
             let unit = DECOR_HALF_SIZE / GRID_PX; // 0.4 cell
             let hx = ex * d.scale_x * unit;
             let hy = ey * d.scale_y * unit;
-            let (cx, cy) = (rl.x as f32 + d.x, rl.y as f32 + d.y);
-            let (s, c) = d.rotation.to_radians().sin_cos();
+            // Decor sits in the room's local frame and turns with the room
+            let (cx, cy) = rl.to_world(d.x, d.y);
+            let (s, c) = (d.rotation + rl.rotation).to_radians().sin_cos();
             let rot = |lx: f32, ly: f32| (cx + lx * c - ly * s, cy + lx * s + ly * c);
             objects.push(Obstacle {
                 poly: vec![rot(-hx, -hy), rot(hx, -hy), rot(hx, hy), rot(-hx, hy)],
@@ -351,7 +415,12 @@ pub fn build_static_occluders(
         }
     }
 
-    let walls = merge_collinear_walls(walls);
+    for ci in 0..shapes.len() {
+        for (a, b) in crate::render::overlap::freeform_corridor_walls(ci, &shapes, graph, layout) {
+            walls_all.push(Segment { a, b });
+        }
+    }
+    let walls = merge_collinear_walls(walls_all);
     let mut occ = Occluders {
         floor: Arc::new(floor),
         solid: Arc::new(solid),

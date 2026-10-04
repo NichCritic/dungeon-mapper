@@ -262,8 +262,7 @@ pub fn encounters_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Enc
             let gy = (world.y / GRID_PX).floor() as i32;
             let mut hit = None;
             for rl in &layout.rooms {
-                if gx >= rl.x && gx < rl.x + rl.width as i32
-                    && gy >= rl.y && gy < rl.y + rl.height as i32
+                if rl.contains_point(gx as f32 + 0.5, gy as f32 + 0.5)
                 {
                     hit = Some(rl.room_id.clone());
                     break;
@@ -276,19 +275,7 @@ pub fn encounters_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Enc
     // Highlight selected room
     if let Some(ref sel_id) = state.selected_room {
         if let Some(rl) = layout.room_by_id(sel_id) {
-            let min = transform.world_to_screen(egui::pos2(
-                rl.x as f32 * GRID_PX, rl.y as f32 * GRID_PX,
-            ));
-            let max = transform.world_to_screen(egui::pos2(
-                (rl.x as f32 + rl.width as f32) * GRID_PX,
-                (rl.y as f32 + rl.height as f32) * GRID_PX,
-            ));
-            painter.rect_stroke(
-                egui::Rect::from_min_max(min, max),
-                0.0,
-                egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(100, 180, 255)),
-                egui::StrokeKind::Middle,
-            );
+            painter.add(egui::Shape::closed_line(crate::ui::canvas_common::room_screen_outline(rl, &transform), egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(100, 180, 255))));
         }
     }
 }

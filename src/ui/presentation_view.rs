@@ -1065,8 +1065,16 @@ fn room_center_px(rl: &crate::model::RoomLayout) -> (f32, f32) {
 }
 
 /// Find the corridor under a grid position, returning the connection_id.
-pub fn corridor_at_grid(layout: &SpatialLayout, gx: i32, gy: i32) -> Option<String> {
-    for corridor in &layout.corridors {
+/// The corridor covering a grid cell. `shapes` is [`crate::model::geometry::corridor_shapes`]
+/// for the layout (computed once by the caller, as this runs per cell).
+pub fn corridor_at_grid(layout: &SpatialLayout, shapes: &[Option<crate::model::geometry::CorridorShape>], gx: i32, gy: i32) -> Option<String> {
+    for (ci, corridor) in layout.corridors.iter().enumerate() {
+        if let Some(shape) = shapes.get(ci).and_then(Option::as_ref) {
+            if shape.contains((gx as f32 + 0.5, gy as f32 + 0.5)) {
+                return Some(corridor.connection_id.clone());
+            }
+            continue;
+        }
         let cw = corridor.width as i32;
         let half = cw / 2;
         for pair in corridor.waypoints.windows(2) {
@@ -1441,17 +1449,10 @@ pub fn presentation_view(
     // Draw selection highlight
     if let Some(ref sel_id) = view_state.selected_room {
         if let Some(rl) = layout.room_by_id(sel_id) {
-            let min = transform.world_to_screen(egui::pos2(rl.x as f32 * GRID_PX, rl.y as f32 * GRID_PX));
-            let max = transform.world_to_screen(egui::pos2(
-                (rl.x as f32 + rl.width as f32) * GRID_PX,
-                (rl.y as f32 + rl.height as f32) * GRID_PX,
-            ));
-            let sel_rect = egui::Rect::from_min_max(min, max);
-            painter.rect_stroke(
-                sel_rect, 0.0,
+            painter.add(egui::Shape::closed_line(
+                crate::ui::canvas_common::room_screen_outline(rl, &transform),
                 egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(100, 200, 255)),
-                egui::StrokeKind::Outside,
-            );
+            ));
         }
     }
 
@@ -1500,7 +1501,8 @@ pub fn presentation_view(
             let gy = (world.y / GRID_PX).floor() as i32;
 
             // Check corridor first
-            if let Some(conn_id) = corridor_at_grid(layout, gx, gy) {
+            let shapes = crate::model::geometry::corridor_shapes(layout, &dungeon.graph);
+            if let Some(conn_id) = corridor_at_grid(layout, &shapes, gx, gy) {
                 let edge = dungeon.graph.connections.iter()
                     .find(|e| e.connection.id == conn_id);
                 let label = edge.map(|e| {

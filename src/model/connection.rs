@@ -21,6 +21,75 @@ pub struct Connection {
     /// Use per-room Open Walls to selectively open individual walls.
     #[serde(default)]
     pub keep_walls: bool,
+    /// Whose walls show where the two rooms overlap (they are drawn on top of each
+    /// other by default).
+    #[serde(default)]
+    pub overlap_walls: OverlapWalls,
+    /// Which directions the corridor's runs may take.
+    #[serde(default)]
+    pub corridor_angle: CorridorAngle,
+}
+
+/// Directions a corridor's runs may take.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CorridorAngle {
+    /// Horizontal and vertical runs only.
+    #[default]
+    Orthogonal,
+    /// Horizontal, vertical and 45° diagonal runs.
+    Diagonal,
+    /// Straight runs at any angle.
+    Any,
+}
+
+impl CorridorAngle {
+    pub const ALL: [CorridorAngle; 3] = [CorridorAngle::Orthogonal, CorridorAngle::Diagonal, CorridorAngle::Any];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            CorridorAngle::Orthogonal => "Orthogonal",
+            CorridorAngle::Diagonal => "45°",
+            CorridorAngle::Any => "Any angle",
+        }
+    }
+}
+
+/// Walls inside the overlap of two connected rooms, Venn-diagram style.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum OverlapWalls {
+    /// Both rooms keep their full outlines (walls cross inside the overlap).
+    #[default]
+    Both,
+    /// The source room keeps its outline; the target's walls inside it are removed.
+    Source,
+    /// The target room keeps its outline; the source's walls inside it are removed.
+    Target,
+    /// True merge: each room's walls inside the other are removed, leaving the union.
+    Neither,
+}
+
+impl OverlapWalls {
+    pub const ALL: [OverlapWalls; 4] = [OverlapWalls::Source, OverlapWalls::Target, OverlapWalls::Neither, OverlapWalls::Both];
+
+    /// UI label, naming the two rooms.
+    pub fn label(self, source: &str, target: &str) -> String {
+        match self {
+            OverlapWalls::Both => "Both rooms' walls".to_string(),
+            OverlapWalls::Source => format!("{source}'s walls"),
+            OverlapWalls::Target => format!("{target}'s walls"),
+            OverlapWalls::Neither => "Neither (merge)".to_string(),
+        }
+    }
+
+    /// Whether the given end's walls are hidden inside the other room.
+    pub fn hides(self, is_source: bool) -> bool {
+        match self {
+            OverlapWalls::Both => false,
+            OverlapWalls::Neither => true,
+            OverlapWalls::Source => !is_source,
+            OverlapWalls::Target => is_source,
+        }
+    }
 }
 
 fn default_corridor_width() -> u32 {
@@ -76,6 +145,8 @@ impl Connection {
             min_length: None,
             max_length: None,
             keep_walls: false,
+            overlap_walls: OverlapWalls::Both,
+            corridor_angle: CorridorAngle::Orthogonal,
         }
     }
 

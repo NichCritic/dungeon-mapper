@@ -1,4 +1,7 @@
 use crate::util::CellSet;
+use crate::render::overlap;
+use crate::render::rotate::RotatedRenderer;
+use crate::model::geometry::{self, CorridorShape};
 use crate::model::*;
 use crate::render::hatching::{draw_exterior_shading, ShadingParams};
 use crate::render::decor::{draw_decor, DecorPalette, MapRendererSink};
@@ -26,6 +29,11 @@ pub fn render_themed(
     options: &RenderOptions,
 ) {
     let floor = build_floor_set(layout, graph);
+    // Freeform geometry: angled corridors and rotated rooms (none on an ordinary map)
+    let shapes: Vec<Option<CorridorShape>> = layout.corridors.iter()
+        .map(|c| geometry::corridor_shape(c, layout, graph))
+        .collect();
+    let freeform = shapes.iter().any(Option::is_some) || layout.rooms.iter().any(|rl| rl.is_rotated());
 
     render_background(renderer, layout, theme);
 
@@ -51,33 +59,58 @@ pub fn render_themed(
     });
 
     // Collect baked marching squares contour segments from cave rooms (used by shading)
-    let contour_segments: Vec<(f32, f32, f32, f32)> = graph.rooms.iter()
+    let mut contour_segments: Vec<(f32, f32, f32, f32)> = graph.rooms.iter()
         .filter_map(|r| r.cave_data.as_ref())
         .flat_map(|c| c.contour_segments.iter().copied())
         .collect();
-    render_exterior_shading(renderer, layout, &floor, theme, &contour_segments);
+    if freeform {
+        // Hatch out from the exact angled walls, over cells the floor fully covers, so
+        // the hatching meets a diagonal wall without stair-step gaps
+        contour_segments.extend(freeform_wall_segments_px(&shapes, graph, layout));
+        let covered = rasterize_floor(layout, graph, Coverage::Full);
+        render_exterior_shading(renderer, layout, &covered, theme, &contour_segments);
+    } else {
+        render_exterior_shading(renderer, layout, &floor, theme, &contour_segments);
+    }
 
     for &ri in &room_order {
-        render_room_floor(renderer, &layout.rooms[ri], graph, theme);
+        let rl = &layout.rooms[ri];
+        if rl.is_rotated() {
+            render_room_floor(&mut RotatedRenderer::for_room(renderer, rl), rl, graph, theme);
+        } else {
+            render_room_floor(renderer, rl, graph, theme);
+        }
     }
     for &ci in &corridor_order {
-        render_corridor_floor(renderer, &layout.corridors[ci], theme);
+        match &shapes[ci] {
+            Some(shape) => render_freeform_corridor_floor(renderer, shape, theme.floor_color),
+            None => render_corridor_floor(renderer, &layout.corridors[ci], theme),
+        }
     }
     if theme.corridor_chamfer != ChamferStyle::Sharp {
         for &ci in &corridor_order {
-            render_corridor_chamfers(renderer, &layout.corridors[ci], theme);
+            if shapes[ci].is_none() {
+                render_corridor_chamfers(renderer, &layout.corridors[ci], theme);
+            }
         }
     }
     if options.show_grid {
-        render_grid(renderer, &floor);
+        render_map_grid(renderer, layout, graph, &floor, |_| true, |_| true);
     }
     // Render room decor and elevation sections (after floors/grid, before walls)
     for &ri in &room_order {
         let rl = &layout.rooms[ri];
+        let mut turned;
+        let r: &mut dyn MapRenderer = if rl.is_rotated() {
+            turned = RotatedRenderer::for_room(renderer, rl);
+            &mut turned
+        } else {
+            renderer
+        };
         if options.show_decor {
-            render_decor(renderer, rl, graph, theme);
+            render_decor(r, rl, graph, theme);
         }
-        render_elevation_sections(renderer, rl, graph, theme);
+        render_elevation_sections(r, rl, graph, theme);
     }
     for &ri in &room_order {
         let rl = &layout.rooms[ri];
@@ -87,9 +120,7 @@ pub fn render_themed(
             if r.shape == RoomShape::Cave { r.cave_data.as_ref() } else { None }
         }) {
             if !cave.contour_segments.is_empty() {
-                for &(x1, y1, x2, y2) in &cave.contour_segments {
-                    renderer.draw_line(x1, y1, x2, y2, 2.0, theme.wall_color);
-                }
+                render_cave_contours(renderer, &rl.room_id, &cave.contour_segments, graph, layout, theme.wall_color);
                 continue;
             }
         }
@@ -101,7 +132,13 @@ pub fn render_themed(
     // Build set of cells inside cave rooms (so corridor walls don't double-draw there)
     let cave_cells = build_cave_cell_set(layout, graph);
     for &ci in &corridor_order {
-        render_corridor_walls(renderer, &layout.corridors[ci], &floor, theme, &cave_cells);
+        if shapes[ci].is_some() {
+            for ((ax, ay), (bx, by)) in overlap::freeform_corridor_walls(ci, &shapes, graph, layout) {
+                renderer.draw_line(ax * GRID_PX, ay * GRID_PX, bx * GRID_PX, by * GRID_PX, 2.0, theme.wall_color);
+            }
+        } else {
+            render_corridor_walls(renderer, &layout.corridors[ci], &floor, theme, &cave_cells);
+        }
     }
     render_doors(renderer, graph, layout, theme, options);
     if options.show_labels {
@@ -373,6 +410,51 @@ pub fn render_corridor_chamfers(
 ///
 /// Each interior grid edge shared by two adjacent floor cells is drawn once.
 /// Edges on the boundary of the floor set are skipped (walls handle those).
+/// Rotated rectangles and caves (a circle looks the same turned).
+fn is_turned_room(rl: &RoomLayout, graph: &DungeonGraph) -> bool {
+    rl.is_rotated() && graph.room_by_id(&rl.room_id).is_none_or(|r| r.shape != RoomShape::Circle)
+}
+
+/// The map grid over `floor` (the cells of the shown rooms and corridors). A rotated
+/// room gets its own grid turned with it, so the world grid leaves its cells out.
+pub fn render_map_grid(
+    renderer: &mut dyn MapRenderer,
+    layout: &SpatialLayout,
+    graph: &DungeonGraph,
+    floor: &CellSet,
+    room_shown: impl Fn(&RoomLayout) -> bool,
+    corridor_shown: impl Fn(&CorridorSegment) -> bool,
+) {
+    if !layout.rooms.iter().any(|rl| is_turned_room(rl, graph)) {
+        render_grid(renderer, floor);
+        return;
+    }
+    let turned: Vec<&RoomLayout> = layout.rooms.iter().filter(|rl| is_turned_room(rl, graph)).collect();
+    let mut world = rasterize_floor_filtered(
+        layout, graph, Coverage::Center,
+        |rl| room_shown(rl) && !is_turned_room(rl, graph),
+        &corridor_shown,
+    );
+    // Corridor ends reach into rooms; inside a turned room only its own grid shows
+    world.retain(|&(x, y)| !turned.iter().any(|rl| rl.contains_point(x as f32 + 0.5, y as f32 + 0.5)));
+    render_grid(renderer, &world);
+    for rl in layout.rooms.iter().filter(|rl| is_turned_room(rl, graph) && room_shown(rl)) {
+        // The room's cells in its unrotated frame, drawn through the turn
+        let (w, h) = (rl.width as i32, rl.height as i32);
+        let cells = graph.room_by_id(&rl.room_id).and_then(|r| r.cave_data.as_ref())
+            .filter(|c| c.cells.len() == (w * h) as usize);
+        let mut local = CellSet::default();
+        for ly in 0..h {
+            for lx in 0..w {
+                if cells.is_none_or(|c| c.cells[(ly * w + lx) as usize]) {
+                    local.insert((rl.x + lx, rl.y + ly));
+                }
+            }
+        }
+        render_grid(&mut RotatedRenderer::for_room(renderer, rl), &local);
+    }
+}
+
 pub fn render_grid(
     renderer: &mut dyn MapRenderer,
     floor: &CellSet,
@@ -397,6 +479,119 @@ pub fn render_grid(
 }
 
 /// Render one room's walls.
+/// Draw a wall line (pixels), leaving out the parts hidden by overlapping rooms
+/// (see [`crate::render::overlap`]).
+fn draw_wall_clipped(
+    renderer: &mut dyn MapRenderer,
+    hidden_by: &[overlap::Interior<'_>],
+    (x1, y1, x2, y2): (f32, f32, f32, f32),
+    width: f32,
+    color: [u8; 4],
+) {
+    if hidden_by.is_empty() {
+        renderer.draw_line(x1, y1, x2, y2, width, color);
+        return;
+    }
+    let g = GRID_PX;
+    for ((ax, ay), (bx, by)) in overlap::visible_parts((x1 / g, y1 / g), (x2 / g, y2 / g), hidden_by) {
+        renderer.draw_line(ax * g, ay * g, bx * g, by * g, width, color);
+    }
+}
+
+/// Draw a cave's baked contour segments, minus the parts hidden by overlapping rooms.
+pub fn render_cave_contours(
+    renderer: &mut dyn MapRenderer,
+    room_id: &str,
+    segments: &[(f32, f32, f32, f32)],
+    graph: &DungeonGraph,
+    layout: &SpatialLayout,
+    color: [u8; 4],
+) {
+    let hidden_by = overlap::wall_suppressors(room_id, graph, layout);
+    for &seg in segments {
+        draw_wall_clipped(renderer, &hidden_by, seg, 2.0, color);
+    }
+}
+
+/// Fill a freeform corridor's floor.
+pub fn render_freeform_corridor_floor(renderer: &mut dyn MapRenderer, shape: &CorridorShape, color: [u8; 4]) {
+    for piece in shape.floor_pieces() {
+        let px: Vec<(f32, f32)> = piece.iter().map(|&(x, y)| (x * GRID_PX, y * GRID_PX)).collect();
+        renderer.fill_polygon(&px, color);
+    }
+}
+
+/// The exact walls of rotated rooms and freeform corridors, in pixels (for hatching).
+fn freeform_wall_segments_px(shapes: &[Option<CorridorShape>], graph: &DungeonGraph, layout: &SpatialLayout) -> Vec<(f32, f32, f32, f32)> {
+    freeform_wall_segments_px_filtered(shapes, graph, layout, |_| true, |_| true)
+}
+
+/// [`freeform_wall_segments_px`] for the rooms and corridors the filters accept.
+pub fn freeform_wall_segments_px_filtered(
+    shapes: &[Option<CorridorShape>],
+    graph: &DungeonGraph,
+    layout: &SpatialLayout,
+    room_ok: impl Fn(&RoomLayout) -> bool,
+    corridor_ok: impl Fn(&CorridorSegment) -> bool,
+) -> Vec<(f32, f32, f32, f32)> {
+    let g = GRID_PX;
+    let mut out = Vec::new();
+    for rl in layout.rooms.iter().filter(|rl| rl.is_rotated() && room_ok(rl)) {
+        let c = rl.corners();
+        for i in 0..4 {
+            let (a, b) = (c[i], c[(i + 1) % 4]);
+            out.push((a.0 * g, a.1 * g, b.0 * g, b.1 * g));
+        }
+    }
+    for ci in 0..shapes.len() {
+        if !corridor_ok(&layout.corridors[ci]) {
+            continue;
+        }
+        for ((ax, ay), (bx, by)) in overlap::freeform_corridor_walls(ci, shapes, graph, layout) {
+            out.push((ax * g, ay * g, bx * g, by * g));
+        }
+    }
+    out
+}
+
+/// Walls of a rotated room: its four turned edges (or the circle rim), minus open walls
+/// and the parts hidden by overlapping rooms or opened by attached corridors.
+fn render_rotated_room_walls(
+    renderer: &mut dyn MapRenderer,
+    rl: &RoomLayout,
+    graph: &DungeonGraph,
+    layout: &SpatialLayout,
+    theme: &Theme,
+) {
+    let room = graph.room_by_id(&rl.room_id);
+    let mut hidden_by = overlap::wall_suppressors(&rl.room_id, graph, layout);
+    hidden_by.extend(overlap::attached_corridor_interiors(&rl.room_id, graph, layout, overlap::is_open_passage));
+    let g = GRID_PX;
+    let wall = |renderer: &mut dyn MapRenderer, a: (f32, f32), b: (f32, f32)| {
+        draw_wall_clipped(renderer, &hidden_by, (a.0 * g, a.1 * g, b.0 * g, b.1 * g), 2.0, theme.wall_color);
+    };
+    match room.map(|r| r.shape).unwrap_or_default() {
+        RoomShape::Circle => {
+            let (cx, cy) = rl.center();
+            for (a, b) in overlap::circle_rim(cx, cy, rl.width.min(rl.height) as f32 / 2.0) {
+                wall(renderer, a, b);
+            }
+        }
+        // Generated caves draw their (already turned) contours; this is the outline
+        // before generation
+        RoomShape::Cave | RoomShape::Rectangle => {
+            let open = room.map(|r| r.open_walls).unwrap_or_default();
+            let c = rl.corners();
+            // Edges in local order: north (top), east, south, west
+            for (i, is_open) in [open.north, open.east, open.south, open.west].into_iter().enumerate() {
+                if !is_open {
+                    wall(renderer, c[i], c[(i + 1) % 4]);
+                }
+            }
+        }
+    }
+}
+
 pub fn render_room_walls(
     renderer: &mut dyn MapRenderer,
     rl: &RoomLayout,
@@ -404,6 +599,10 @@ pub fn render_room_walls(
     layout: &SpatialLayout,
     theme: &Theme,
 ) {
+    if rl.is_rotated() {
+        render_rotated_room_walls(renderer, rl, graph, layout, theme);
+        return;
+    }
     let wall_w = 2.0;
     let rx = rl.x as f32 * GRID_PX;
     let ry = rl.y as f32 * GRID_PX;
@@ -415,13 +614,27 @@ pub fn render_room_walls(
 
     // Compute which walls are suppressed by flush connections
     let flush = flush_walls_with_layout(&rl.room_id, rl, graph, layout);
+    // ...and which parts are hidden inside overlapping connected rooms, or opened by
+    // freeform corridors ending here
+    let mut hidden_by = overlap::wall_suppressors(&rl.room_id, graph, layout);
+    hidden_by.extend(overlap::attached_corridor_interiors(&rl.room_id, graph, layout, overlap::is_open_passage));
+    let wall = |renderer: &mut dyn MapRenderer, x1: f32, y1: f32, x2: f32, y2: f32| {
+        draw_wall_clipped(renderer, &hidden_by, (x1, y1, x2, y2), wall_w, theme.wall_color);
+    };
 
     match shape {
         RoomShape::Circle => {
             let cx = rx + rw / 2.0;
             let cy = ry + rh / 2.0;
             let r = rw.min(rh) / 2.0;
-            renderer.stroke_circle(cx, cy, r, wall_w, theme.wall_color);
+            if hidden_by.is_empty() {
+                renderer.stroke_circle(cx, cy, r, wall_w, theme.wall_color);
+            } else {
+                let g = GRID_PX;
+                for ((ax, ay), (bx, by)) in overlap::circle_rim(cx / g, cy / g, r / g) {
+                    wall(renderer, ax * g, ay * g, bx * g, by * g);
+                }
+            }
         }
         RoomShape::Cave => {
             // Cave walls are drawn per-cell-edge, similar to corridor walls.
@@ -441,19 +654,19 @@ pub fn render_room_walls(
                             let py = (rl.y + ly) as f32 * GRID_PX;
                             // Top edge
                             if !is_floor(lx, ly - 1) {
-                                renderer.draw_line(px, py, px + GRID_PX, py, wall_w, theme.wall_color);
+                                wall(renderer, px, py, px + GRID_PX, py);
                             }
                             // Bottom edge
                             if !is_floor(lx, ly + 1) {
-                                renderer.draw_line(px, py + GRID_PX, px + GRID_PX, py + GRID_PX, wall_w, theme.wall_color);
+                                wall(renderer, px, py + GRID_PX, px + GRID_PX, py + GRID_PX);
                             }
                             // Left edge
                             if !is_floor(lx - 1, ly) {
-                                renderer.draw_line(px, py, px, py + GRID_PX, wall_w, theme.wall_color);
+                                wall(renderer, px, py, px, py + GRID_PX);
                             }
                             // Right edge
                             if !is_floor(lx + 1, ly) {
-                                renderer.draw_line(px + GRID_PX, py, px + GRID_PX, py + GRID_PX, wall_w, theme.wall_color);
+                                wall(renderer, px + GRID_PX, py, px + GRID_PX, py + GRID_PX);
                             }
                         }
                     }
@@ -461,7 +674,10 @@ pub fn render_room_walls(
                 }
             }
             // No cells yet — draw as rectangle
-            renderer.stroke_rect(rx, ry, rw, rh, wall_w, theme.wall_color);
+            wall(renderer, rx, ry, rx + rw, ry);
+            wall(renderer, rx, ry + rh, rx + rw, ry + rh);
+            wall(renderer, rx, ry, rx, ry + rh);
+            wall(renderer, rx + rw, ry, rx + rw, ry + rh);
         }
         RoomShape::Rectangle => {
             // Draw each wall individually, skipping open walls, flush edges, and wall openings
@@ -471,7 +687,7 @@ pub fn render_room_walls(
             // Helper: draw a wall line with gaps cut for wall openings
             let draw_wall_with_gaps = |renderer: &mut dyn MapRenderer, x1: f32, y1: f32, x2: f32, y2: f32, is_horizontal: bool| {
                 if openings.is_empty() {
-                    renderer.draw_line(x1, y1, x2, y2, wall_w, theme.wall_color);
+                    wall(renderer, x1, y1, x2, y2);
                     return;
                 }
 
@@ -503,7 +719,7 @@ pub fn render_room_walls(
                 }
 
                 if gaps.is_empty() {
-                    renderer.draw_line(x1, y1, x2, y2, wall_w, theme.wall_color);
+                    wall(renderer, x1, y1, x2, y2);
                     return;
                 }
 
@@ -513,23 +729,23 @@ pub fn render_room_walls(
                     let mut cur_x = x1;
                     for (gap_start, gap_end) in &gaps {
                         if *gap_start > cur_x {
-                            renderer.draw_line(cur_x, y1, *gap_start, y2, wall_w, theme.wall_color);
+                            wall(renderer, cur_x, y1, *gap_start, y2);
                         }
                         cur_x = *gap_end;
                     }
                     if cur_x < x2 {
-                        renderer.draw_line(cur_x, y1, x2, y2, wall_w, theme.wall_color);
+                        wall(renderer, cur_x, y1, x2, y2);
                     }
                 } else {
                     let mut cur_y = y1;
                     for (gap_start, gap_end) in &gaps {
                         if *gap_start > cur_y {
-                            renderer.draw_line(x1, cur_y, x2, *gap_start, wall_w, theme.wall_color);
+                            wall(renderer, x1, cur_y, x2, *gap_start);
                         }
                         cur_y = *gap_end;
                     }
                     if cur_y < y2 {
-                        renderer.draw_line(x1, cur_y, x2, y2, wall_w, theme.wall_color);
+                        wall(renderer, x1, cur_y, x2, y2);
                     }
                 }
             };
@@ -604,6 +820,17 @@ pub fn build_cave_cell_set(layout: &SpatialLayout, graph: &DungeonGraph) -> Cell
         let is_cave = graph.room_by_id(&rl.room_id)
             .is_some_and(|r| r.shape == RoomShape::Cave && r.cave_data.as_ref().is_some_and(|c| !c.cells.is_empty()));
         if !is_cave { continue; }
+        if rl.is_rotated() {
+            let (x0, y0, x1, y1) = rl.cell_bounds();
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    if rl.contains_point(x as f32 + 0.5, y as f32 + 0.5) {
+                        cells.insert((x, y));
+                    }
+                }
+            }
+            continue;
+        }
         for y in rl.y..(rl.y + rl.height as i32) {
             for x in rl.x..(rl.x + rl.width as i32) {
                 cells.insert((x, y));
@@ -691,6 +918,10 @@ pub fn repair_circle_junctions(
     }
 
     for corridor in &layout.corridors {
+        // Freeform corridors open the rim by clipping it instead
+        if geometry::is_freeform(corridor, layout, graph) {
+            continue;
+        }
         let cw = corridor.width as i32;
         let half = cw / 2;
         for pair in corridor.waypoints.windows(2) {
@@ -995,6 +1226,47 @@ pub fn door_rect(
 }
 
 /// Render door symbols on corridors.
+/// A door on a rotated room, drawn along its turned wall where the corridor attaches.
+pub fn render_rotated_door(
+    renderer: &mut dyn MapRenderer,
+    corridor: &CorridorSegment,
+    rl: &RoomLayout,
+    graph: &DungeonGraph,
+    layout: &SpatialLayout,
+    theme: &Theme,
+    kind: ConnectionType,
+    dw: f32,
+    door_depth: f32,
+) {
+    let Some(shape) = geometry::corridor_shape(corridor, layout, graph) else { return };
+    let Some(attach) = shape.ends.iter().flatten().find(|a| a.room_id == rl.room_id) else { return };
+    let quad = geometry::door_quad(attach, dw, door_depth);
+    let px: Vec<(f32, f32)> = quad.iter().map(|&(x, y)| (x * GRID_PX, y * GRID_PX)).collect();
+    let (cx, cy) = (attach.point.0 * GRID_PX, attach.point.1 * GRID_PX);
+    let outline = |renderer: &mut dyn MapRenderer| {
+        for i in 0..4 {
+            let (a, b) = (px[i], px[(i + 1) % 4]);
+            renderer.draw_line(a.0, a.1, b.0, b.1, 1.0, theme.wall_color);
+        }
+    };
+    match kind {
+        ConnectionType::Open | ConnectionType::Flush | ConnectionType::Merge => {}
+        ConnectionType::Door | ConnectionType::OneWay => {
+            renderer.fill_polygon(&px, [255, 255, 255, 255]);
+            outline(renderer);
+        }
+        ConnectionType::Locked => {
+            renderer.fill_polygon(&px, [255, 255, 255, 255]);
+            outline(renderer);
+            let r = dw.min(door_depth) * GRID_PX * 0.15;
+            renderer.fill_rect(cx - r, cy - r, r * 2.0, r * 2.0, theme.wall_color);
+        }
+        ConnectionType::Secret => {
+            renderer.draw_text("S", cx, cy, 6.0, theme.wall_color);
+        }
+    }
+}
+
 pub fn render_doors(
     renderer: &mut dyn MapRenderer,
     graph: &DungeonGraph,
@@ -1039,6 +1311,10 @@ pub fn render_doors(
             if is_cave { continue; }
             let Some(rl) = layout.room_by_id(room_id) else { continue };
 
+            if rl.is_rotated() {
+                render_rotated_door(renderer, corridor, rl, graph, layout, theme, edge.connection.connection_type, dw, door_depth);
+                continue;
+            }
             let (dx1, dy1, dx2, dy2) = door_rect(rl, wp, *exit, dw, door_depth);
 
             let px = dx1 * GRID_PX;
@@ -1091,11 +1367,46 @@ pub fn render_labels(
 }
 
 /// Build the set of all floor cells from room and corridor geometry.
+/// How a rotated room or freeform corridor, which doesn't sit on the grid, maps to cells.
+/// Ordinary rooms and corridors give the same cells in every mode.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Coverage {
+    /// The cell's center is inside (the map grid, lighting, fog, tokens).
+    Center,
+    /// Any part of the cell is inside (line of sight: only untouched cells are rock).
+    Touched,
+    /// The whole cell is inside (hatching, which then hugs the exact walls).
+    Full,
+}
+
 pub fn build_floor_set(layout: &SpatialLayout, graph: &DungeonGraph) -> CellSet {
+    rasterize_floor(layout, graph, Coverage::Center)
+}
+
+pub fn rasterize_floor(layout: &SpatialLayout, graph: &DungeonGraph, coverage: Coverage) -> CellSet {
+    rasterize_floor_filtered(layout, graph, coverage, |_| true, |_| true)
+}
+
+/// Floor cells of the rooms and corridors the filters accept (the player view shows
+/// only what the party has seen).
+pub fn rasterize_floor_filtered(
+    layout: &SpatialLayout,
+    graph: &DungeonGraph,
+    coverage: Coverage,
+    room_ok: impl Fn(&RoomLayout) -> bool,
+    corridor_ok: impl Fn(&CorridorSegment) -> bool,
+) -> CellSet {
     let mut floor: CellSet = CellSet::default();
     for rl in &layout.rooms {
+        if !room_ok(rl) {
+            continue;
+        }
         let room = graph.room_by_id(&rl.room_id);
         let shape = room.map(|r| r.shape).unwrap_or_default();
+        if rl.is_rotated() && shape != RoomShape::Circle {
+            rasterize_rotated_room(&mut floor, rl, room, coverage);
+            continue;
+        }
         match shape {
             RoomShape::Circle => {
                 let cx = rl.x as f32 + rl.width as f32 / 2.0;
@@ -1144,6 +1455,26 @@ pub fn build_floor_set(layout: &SpatialLayout, graph: &DungeonGraph) -> CellSet 
         }
     }
     for corridor in &layout.corridors {
+        if !corridor_ok(corridor) {
+            continue;
+        }
+        if let Some(shape) = geometry::corridor_shape(corridor, layout, graph) {
+            match coverage {
+                Coverage::Center => floor.extend(geometry::polygon_cells(&shape.polygon)),
+                Coverage::Touched => floor.extend(geometry::polygon_touched_cells(&shape.polygon)),
+                Coverage::Full => {
+                    let (x0, y0, x1, y1) = geometry::bounds(&shape.polygon);
+                    for gy in (y0.floor() as i32)..(y1.ceil() as i32) {
+                        for gx in (x0.floor() as i32)..(x1.ceil() as i32) {
+                            if shape.covers_cell(gx, gy) {
+                                floor.insert((gx, gy));
+                            }
+                        }
+                    }
+                }
+            }
+            continue;
+        }
         let cw = corridor.width as i32;
         let half = cw / 2;
         for pair in corridor.waypoints.windows(2) {
@@ -1159,4 +1490,37 @@ pub fn build_floor_set(layout: &SpatialLayout, graph: &DungeonGraph) -> CellSet 
         }
     }
     floor
+}
+
+/// Cells of a rotated rectangle or cave under `coverage`, sampling the cell's center
+/// and corners in the room's local frame.
+fn rasterize_rotated_room(floor: &mut CellSet, rl: &RoomLayout, room: Option<&Room>, coverage: Coverage) {
+    let (w, h) = (rl.width as i32, rl.height as i32);
+    let cells = room.and_then(|r| r.cave_data.as_ref())
+        .filter(|c| room.is_some_and(|r| r.shape == RoomShape::Cave) && c.cells.len() == (w * h) as usize)
+        .map(|c| c.cells.as_slice());
+    let is_floor = |x: f32, y: f32| {
+        let (lx, ly) = rl.to_local(x, y);
+        if lx < 0.0 || ly < 0.0 || lx >= w as f32 || ly >= h as f32 {
+            return false;
+        }
+        cells.is_none_or(|c| c[(ly as i32 * w + lx as i32) as usize])
+    };
+    let (x0, y0, x1, y1) = rl.cell_bounds();
+    for gy in y0..y1 {
+        for gx in x0..x1 {
+            let (x, y) = (gx as f32, gy as f32);
+            let center = is_floor(x + 0.5, y + 0.5);
+            let corners = [(x + 0.01, y + 0.01), (x + 0.99, y + 0.01), (x + 0.99, y + 0.99), (x + 0.01, y + 0.99)];
+            let take = match coverage {
+                Coverage::Center => center,
+                Coverage::Touched => center || corners.iter().any(|&(px, py)| is_floor(px, py))
+                    || geometry::polygons_overlap(&[(x, y), (x + 1.0, y), (x + 1.0, y + 1.0), (x, y + 1.0)], &rl.corners()) && cells.is_none(),
+                Coverage::Full => center && corners.iter().all(|&(px, py)| is_floor(px, py)),
+            };
+            if take {
+                floor.insert((gx, gy));
+            }
+        }
+    }
 }

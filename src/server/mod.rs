@@ -46,8 +46,10 @@ impl PresentationServer {
         }
     }
 
-    pub fn push_update(&self, png_bytes: Vec<u8>) {
-        let _ = self.update_tx.send(png_bytes);
+    /// Channel for pushing PNG updates to connected clients. Cloneable, so a
+    /// background render can deliver its result directly.
+    pub fn update_sender(&self) -> mpsc::Sender<Vec<u8>> {
+        self.update_tx.clone()
     }
 
     pub fn client_count(&self) -> usize {

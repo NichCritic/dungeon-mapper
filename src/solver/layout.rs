@@ -48,6 +48,7 @@ impl PlacementState {
             height: rect.h,
             violations: Vec::new(),
             wall_openings: Vec::new(),
+            rotation: 0.0,
         });
         self.placed.insert(room_id.to_string());
         self.placed_rects.push(PlacedRect { rect, floor });
@@ -1403,6 +1404,7 @@ pub fn solve_incremental(
                             height: th,
                             violations: Vec::new(),
                             wall_openings: Vec::new(),
+                            rotation: 0.0,
                         });
                         placed.insert(room_id.clone());
                         placed_rects.push(PlacedRect { rect, floor: room.floor });
@@ -1434,6 +1436,7 @@ pub fn solve_incremental(
                                 height: th,
                                 violations: Vec::new(),
                                 wall_openings: Vec::new(),
+                                rotation: 0.0,
                             });
                             placed.insert(room_id.clone());
                             placed_rects.push(PlacedRect { rect, floor: room.floor });
@@ -1480,6 +1483,7 @@ pub fn solve_incremental(
                         width: cw, height: ch,
                         violations: Vec::new(),
                         wall_openings: Vec::new(),
+                        rotation: 0.0,
                     });
                     placed.insert(child_id.to_string());
                     placed_rects.push(PlacedRect {

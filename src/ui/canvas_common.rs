@@ -87,6 +87,13 @@ pub fn draw_dashed_line(
     }
 }
 
+/// A room's outline on screen (turned with the room when rotated).
+pub fn room_screen_outline(rl: &crate::model::RoomLayout, transform: &crate::util::ViewTransform) -> Vec<egui::Pos2> {
+    rl.corners().iter()
+        .map(|&(x, y)| transform.world_to_screen(egui::pos2(x * crate::util::GRID_PX, y * crate::util::GRID_PX)))
+        .collect()
+}
+
 /// Truncate text with "..." if it exceeds `max_width` pixels.
 pub fn truncate_to_fit(
     painter: &egui::Painter,

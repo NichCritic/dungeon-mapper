@@ -33,8 +33,9 @@ pub fn sidebar(
     } else if !selection.connections.is_empty() && selection.rooms.is_empty() && selection.groups.is_empty() {
         let ids: Vec<String> = selection.connections.iter().cloned().collect();
         if ids.len() == 1 {
+            let overlap = overlapping_room_labels(dungeon, &ids[0]);
             if let Some(edge) = dungeon.graph.connection_by_id_mut(&ids[0]) {
-                connection_properties(ui, edge);
+                connection_properties(ui, edge, overlap);
             }
         } else {
             ui.label(format!("{} connections selected", ids.len()));
@@ -553,36 +554,9 @@ fn room_properties(ui: &mut egui::Ui, room: &mut Room, focus_label: &mut bool) {
     }
 
     ui.add_space(8.0);
-    ui.label("Size Preset:");
-    egui::ComboBox::from_id_salt("size_hint")
-        .selected_text(room.size_hint.label())
-        .show_ui(ui, |ui| {
-            for hint in SizeHint::ALL {
-                if ui.selectable_value(&mut room.size_hint, hint, hint.label()).changed() {
-                    // Clear overrides when selecting a preset
-                    room.grid_width = None;
-                    room.grid_height = None;
-                }
-            }
-        });
-
-    ui.add_space(8.0);
-    let (effective_w, effective_h) = room.grid_size();
-    let mut w = room.grid_width.unwrap_or(effective_w);
-    let mut h = room.grid_height.unwrap_or(effective_h);
-
-    ui.label("Dimensions (grid squares):");
-    ui.horizontal(|ui| {
-        ui.label("W:");
-        if crate::ui::canvas_common::num_input_u32(ui, &mut w, 40.0) {
-            room.grid_width = Some(w);
-        }
-        ui.label("L:");
-        if crate::ui::canvas_common::num_input_u32(ui, &mut h, 40.0) {
-            room.grid_height = Some(h);
-        }
-    });
-    ui.label(format!("{}x{} ft", w * 5, h * 5));
+    let (w, h) = room.grid_size();
+    ui.label(format!("Size: {}x{} ({}x{} ft)", w, h, w * 5, h * 5));
+    ui.weak("Edit size in the Spatial tab.");
 
     ui.add_space(8.0);
     ui.label("Shape:");
@@ -760,7 +734,47 @@ fn room_properties(ui: &mut egui::Ui, room: &mut Room, focus_label: &mut bool) {
     });
 }
 
-fn connection_properties(ui: &mut egui::Ui, edge: &mut StoredEdge) {
+/// (source label, target label) when the connection's two rooms overlap in the layout.
+pub fn overlapping_room_labels(dungeon: &Dungeon, conn_id: &str) -> Option<(String, String)> {
+    let edge = dungeon.graph.connections.iter().find(|e| e.connection.id == conn_id)?;
+    let layout = dungeon.layout.as_ref()?;
+    let (a, b) = (layout.room_by_id(&edge.source_room_id)?, layout.room_by_id(&edge.target_room_id)?);
+    if !crate::render::overlap::rects_overlap(a, b) {
+        return None;
+    }
+    let label = |id: &str| dungeon.graph.room_by_id(id).map(|r| r.label.clone()).unwrap_or_else(|| "?".into());
+    Some((label(&edge.source_room_id), label(&edge.target_room_id)))
+}
+
+/// Picker for the directions a connection's corridor may run.
+pub fn corridor_angle_picker(ui: &mut egui::Ui, id_salt: &str, angle: &mut crate::model::CorridorAngle) {
+    ui.horizontal(|ui| {
+        ui.label("Corridor angle:");
+        egui::ComboBox::from_id_salt(id_salt)
+            .selected_text(angle.label())
+            .show_ui(ui, |ui| {
+                for a in crate::model::CorridorAngle::ALL {
+                    ui.selectable_value(angle, a, a.label());
+                }
+            });
+    });
+}
+
+/// Picker for whose walls show where a connection's two rooms overlap.
+pub fn overlap_walls_picker(ui: &mut egui::Ui, id_salt: &str, walls: &mut crate::model::OverlapWalls, source: &str, target: &str) {
+    ui.horizontal(|ui| {
+        ui.label("Overlap walls:");
+        egui::ComboBox::from_id_salt(id_salt)
+            .selected_text(walls.label(source, target))
+            .show_ui(ui, |ui| {
+                for w in crate::model::OverlapWalls::ALL {
+                    ui.selectable_value(walls, w, w.label(source, target));
+                }
+            });
+    });
+}
+
+fn connection_properties(ui: &mut egui::Ui, edge: &mut StoredEdge, overlap: Option<(String, String)>) {
     ui.label("Connection Type:");
     egui::ComboBox::from_id_salt("conn_type")
         .selected_text(edge.connection.connection_type.label())
@@ -774,6 +788,14 @@ fn connection_properties(ui: &mut egui::Ui, edge: &mut StoredEdge) {
         ui.add_space(8.0);
         ui.checkbox(&mut edge.connection.keep_walls, "Keep shared walls");
     }
+
+    if let Some((source, target)) = overlap {
+        ui.add_space(8.0);
+        overlap_walls_picker(ui, "conn_overlap_walls", &mut edge.connection.overlap_walls, &source, &target);
+    }
+
+    ui.add_space(8.0);
+    corridor_angle_picker(ui, "conn_corridor_angle", &mut edge.connection.corridor_angle);
 
     ui.add_space(8.0);
     ui.horizontal(|ui| {

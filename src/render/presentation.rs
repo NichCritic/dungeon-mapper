@@ -32,94 +32,13 @@ fn build_visible_floor_set(
     layout: &SpatialLayout,
     graph: &DungeonGraph,
     presentation: &dyn VisibilityProvider,
+    coverage: Coverage,
 ) -> CellSet {
-    let mut floor: CellSet = CellSet::default();
-
-    for rl in &layout.rooms {
-        let vis = presentation.room_visibility(&rl.room_id);
-        if *vis == Visibility::Hidden { continue; }
-        let room = graph.room_by_id(&rl.room_id);
-        let shape = room.map(|r| r.shape).unwrap_or_default();
-        match shape {
-            RoomShape::Circle => {
-                let cx = rl.x as f32 + rl.width as f32 / 2.0;
-                let cy = rl.y as f32 + rl.height as f32 / 2.0;
-                let r = (rl.width.min(rl.height) as f32) / 2.0;
-                for y in rl.y..(rl.y + rl.height as i32) {
-                    for x in rl.x..(rl.x + rl.width as i32) {
-                        let cell_cx = x as f32 + 0.5;
-                        let cell_cy = y as f32 + 0.5;
-                        let dx = cell_cx - cx;
-                        let dy = cell_cy - cy;
-                        if dx * dx + dy * dy <= r * r {
-                            floor.insert((x, y));
-                        }
-                    }
-                }
-            }
-            RoomShape::Cave => {
-                if let Some(cave) = room.and_then(|r| r.cave_data.as_ref()) {
-                    if !cave.cells.is_empty() {
-                        let w = rl.width as usize;
-                        for ly in 0..rl.height as usize {
-                            for lx in 0..w {
-                                if cave.cells.get(ly * w + lx).copied().unwrap_or(false) {
-                                    floor.insert((rl.x + lx as i32, rl.y + ly as i32));
-                                }
-                            }
-                        }
-                    } else {
-                        for y in rl.y..(rl.y + rl.height as i32) {
-                            for x in rl.x..(rl.x + rl.width as i32) {
-                                floor.insert((x, y));
-                            }
-                        }
-                    }
-                }
-            }
-            RoomShape::Rectangle => {
-                for y in rl.y..(rl.y + rl.height as i32) {
-                    for x in rl.x..(rl.x + rl.width as i32) {
-                        floor.insert((x, y));
-                    }
-                }
-            }
-        }
-    }
-
-    for corridor in &layout.corridors {
-        let vis = corridor_visibility_generic(&corridor.connection_id, presentation, graph);
-        if vis == Visibility::Hidden { continue; }
-        let cw = corridor.width as i32;
-        let half = cw / 2;
-        for pair in corridor.waypoints.windows(2) {
-            let min_x = pair[0].x.min(pair[1].x) - half;
-            let min_y = pair[0].y.min(pair[1].y) - half;
-            let max_x = pair[0].x.max(pair[1].x) - half + cw;
-            let max_y = pair[0].y.max(pair[1].y) - half + cw;
-            for y in min_y..max_y {
-                for x in min_x..max_x {
-                    floor.insert((x, y));
-                }
-            }
-        }
-    }
-
-    floor
-}
-
-/// Render the player-facing view that respects visibility state.
-pub fn render_player_view(
-    renderer: &mut dyn MapRenderer,
-    graph: &DungeonGraph,
-    layout: &SpatialLayout,
-    theme: &Theme,
-    presentation: &PresentationState,
-    light_sources: &[crate::model::LightSource],
-    ambient_light: f32,
-    options: &RenderOptions,
-) {
-    render_player_view_generic(renderer, graph, layout, theme, presentation, light_sources, ambient_light, options);
+    rasterize_floor_filtered(
+        layout, graph, coverage,
+        |rl| *presentation.room_visibility(&rl.room_id) != Visibility::Hidden,
+        |c| corridor_visibility_generic(&c.connection_id, presentation, graph) != Visibility::Hidden,
+    )
 }
 
 /// Render the player-facing view from a snapshot (for background threads).
@@ -154,7 +73,13 @@ fn render_player_view_generic(
     render_background(renderer, layout, theme);
 
     // Exterior shading (build floor set from visible rooms only)
-    let visible_floor = build_visible_floor_set(layout, graph, presentation);
+    let visible_floor = build_visible_floor_set(layout, graph, presentation, Coverage::Center);
+    let shapes: Vec<Option<crate::model::geometry::CorridorShape>> = layout.corridors.iter()
+        .map(|c| crate::model::geometry::corridor_shape(c, layout, graph))
+        .collect();
+    let freeform = shapes.iter().any(Option::is_some) || layout.rooms.iter().any(|rl| rl.is_rotated());
+    let room_shown = |rl: &RoomLayout| *presentation.room_visibility(&rl.room_id) != Visibility::Hidden;
+    let corridor_shown = |c: &CorridorSegment| corridor_visibility_generic(&c.connection_id, presentation, graph) != Visibility::Hidden;
     if theme.exterior_shading {
         use crate::render::hatching::{draw_exterior_shading, ShadingParams};
         let params = ShadingParams {
@@ -163,61 +88,81 @@ fn render_player_view_generic(
             density: theme.hatching_density,
             color: theme.wall_color,
         };
-        let contour: Vec<(f32, f32, f32, f32)> = graph.rooms.iter()
+        let mut contour: Vec<(f32, f32, f32, f32)> = graph.rooms.iter()
             .filter_map(|r| r.cave_data.as_ref())
             .flat_map(|c| c.contour_segments.iter().copied())
             .collect();
-        draw_exterior_shading(renderer, layout, &visible_floor, &params, &contour);
+        if freeform {
+            contour.extend(freeform_wall_segments_px_filtered(&shapes, graph, layout, room_shown, corridor_shown));
+            let covered = build_visible_floor_set(layout, graph, presentation, Coverage::Full);
+            draw_exterior_shading(renderer, layout, &covered, &params, &contour);
+        } else {
+            draw_exterior_shading(renderer, layout, &visible_floor, &params, &contour);
+        }
     }
 
     // Room floors
     for rl in &layout.rooms {
         let vis = presentation.room_visibility(&rl.room_id);
+        let mut turned;
+        let r: &mut dyn MapRenderer = if rl.is_rotated() {
+            turned = crate::render::rotate::RotatedRenderer::for_room(renderer, rl);
+            &mut turned
+        } else {
+            renderer
+        };
         match vis {
             Visibility::Hidden => continue,
             Visibility::Explored => {
-                render_room_floor_with_color(renderer, rl, graph, dimmed_floor);
+                render_room_floor_with_color(r, rl, graph, dimmed_floor);
             }
             Visibility::Visible => {
-                render_room_floor(renderer, rl, graph, theme);
+                render_room_floor(r, rl, graph, theme);
             }
         }
     }
 
     // Corridor floors
-    for corridor in &layout.corridors {
+    for (ci, corridor) in layout.corridors.iter().enumerate() {
         let vis = corridor_visibility_generic(&corridor.connection_id, presentation, graph);
-        match vis {
+        let color = match vis {
             Visibility::Hidden => continue,
-            Visibility::Explored => {
-                render_corridor_floor_with_color(renderer, corridor, dimmed_floor);
-            }
-            Visibility::Visible => {
-                render_corridor_floor(renderer, corridor, theme);
-            }
+            Visibility::Explored => dimmed_floor,
+            Visibility::Visible => theme.floor_color,
+        };
+        match &shapes[ci] {
+            Some(shape) => render_freeform_corridor_floor(renderer, shape, color),
+            None => render_corridor_floor_with_color(renderer, corridor, color),
         }
     }
 
     // Corridor chamfers
     if theme.corridor_chamfer != ChamferStyle::Sharp {
-        for corridor in &layout.corridors {
+        for (ci, corridor) in layout.corridors.iter().enumerate() {
             let vis = corridor_visibility_generic(&corridor.connection_id, presentation, graph);
-            if vis == Visibility::Hidden { continue; }
+            if vis == Visibility::Hidden || shapes[ci].is_some() { continue; }
             render_corridor_chamfers(renderer, corridor, theme);
         }
     }
 
     // Grid lines (only over visible/explored floor)
     if options.show_grid {
-        render_grid(renderer, &visible_floor);
+        render_map_grid(renderer, layout, graph, &visible_floor, room_shown, corridor_shown);
     }
 
     // Room decor and elevation sections (visible rooms only)
     for rl in &layout.rooms {
         let vis = presentation.room_visibility(&rl.room_id);
         if *vis != Visibility::Visible { continue; }
-        crate::render::themed::render_elevation_sections(renderer, rl, graph, theme);
-        render_decor(renderer, rl, graph, theme);
+        let mut turned;
+        let r: &mut dyn MapRenderer = if rl.is_rotated() {
+            turned = crate::render::rotate::RotatedRenderer::for_room(renderer, rl);
+            &mut turned
+        } else {
+            renderer
+        };
+        crate::render::themed::render_elevation_sections(r, rl, graph, theme);
+        render_decor(r, rl, graph, theme);
     }
 
     // Room walls
@@ -231,9 +176,7 @@ fn render_player_view_generic(
             if r.shape == RoomShape::Cave { r.cave_data.as_ref() } else { None }
         }) {
             if !cave.contour_segments.is_empty() {
-                for &(x1, y1, x2, y2) in &cave.contour_segments {
-                    renderer.draw_line(x1, y1, x2, y2, 2.0, wall_color);
-                }
+                crate::render::themed::render_cave_contours(renderer, &rl.room_id, &cave.contour_segments, graph, layout, wall_color);
                 continue;
             }
         }
@@ -248,10 +191,15 @@ fn render_player_view_generic(
 
     // Corridor walls
     let cave_cells = build_cave_cell_set(layout, graph);
-    for corridor in &layout.corridors {
+    for (ci, corridor) in layout.corridors.iter().enumerate() {
         let vis = corridor_visibility_generic(&corridor.connection_id, presentation, graph);
         if vis == Visibility::Hidden { continue; }
-        if vis == Visibility::Explored {
+        let wall_color = if vis == Visibility::Explored { dimmed_wall } else { theme.wall_color };
+        if shapes[ci].is_some() {
+            for ((ax, ay), (bx, by)) in crate::render::overlap::freeform_corridor_walls(ci, &shapes, graph, layout) {
+                renderer.draw_line(ax * GRID_PX, ay * GRID_PX, bx * GRID_PX, by * GRID_PX, 2.0, wall_color);
+            }
+        } else if vis == Visibility::Explored {
             let dimmed_theme = Theme {
                 wall_color: dimmed_wall,
                 ..theme.clone()
@@ -326,6 +274,10 @@ fn render_doors_filtered_generic(
             if !room_shown && !corridor_shown { continue; }
             let Some(rl) = layout.room_by_id(room_id) else { continue };
 
+            if rl.is_rotated() {
+                render_rotated_door(renderer, corridor, rl, graph, layout, theme, edge.connection.connection_type, dw, door_depth);
+                continue;
+            }
             let (dx1, dy1, dx2, dy2) = crate::render::themed::door_rect(rl, wp, *exit, dw, door_depth);
             let px = dx1 * GRID_PX;
             let py = dy1 * GRID_PX;
@@ -389,6 +341,12 @@ pub fn render_dm_overlay(
             Visibility::Visible => 0,
         };
 
+        if alpha > 0 && rl.is_rotated() {
+            let pts: Vec<egui::Pos2> = rl.corners().iter()
+                .map(|&(x, y)| transform.world_to_screen(egui::pos2(x * GRID_PX, y * GRID_PX)))
+                .collect();
+            painter.add(egui::Shape::convex_polygon(pts, egui::Color32::from_rgba_unmultiplied(0, 0, 0, alpha), egui::Stroke::NONE));
+        }
         let min = transform.world_to_screen(egui::pos2(
             rl.x as f32 * GRID_PX,
             rl.y as f32 * GRID_PX,
@@ -397,7 +355,7 @@ pub fn render_dm_overlay(
             (rl.x + rl.width as i32) as f32 * GRID_PX,
             (rl.y + rl.height as i32) as f32 * GRID_PX,
         ));
-        if alpha > 0 {
+        if alpha > 0 && !rl.is_rotated() {
             painter.rect_filled(
                 egui::Rect::from_min_max(min, max),
                 0.0,
@@ -429,7 +387,8 @@ pub fn render_dm_overlay(
     }
 
     // Corridor visibility overlays
-    for corridor in &layout.corridors {
+    let shapes = crate::model::geometry::corridor_shapes(layout, graph);
+    for (ci, corridor) in layout.corridors.iter().enumerate() {
         let vis = corridor_visibility(&corridor.connection_id, presentation, graph);
         let alpha = match vis {
             Visibility::Hidden => 178,
@@ -438,6 +397,15 @@ pub fn render_dm_overlay(
         };
 
         if alpha > 0 {
+            if let Some(shape) = &shapes[ci] {
+                for piece in shape.floor_pieces() {
+                    let pts: Vec<egui::Pos2> = piece.iter()
+                        .map(|&(x, y)| transform.world_to_screen(egui::pos2(x * GRID_PX, y * GRID_PX)))
+                        .collect();
+                    painter.add(egui::Shape::convex_polygon(pts, egui::Color32::from_rgba_unmultiplied(0, 0, 0, alpha), egui::Stroke::NONE));
+                }
+                continue;
+            }
             let cw = corridor.width as i32;
             let half = cw / 2;
             for pair in corridor.waypoints.windows(2) {

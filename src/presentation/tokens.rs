@@ -234,6 +234,12 @@ pub fn snap(token: &mut MapToken, size: f32) {
     token.y = snap_axis(token.y);
 }
 
+/// A point given in the room's unrotated grid position, turned into place when the
+/// room is rotated (packing runs in the room's own frame).
+fn in_room(room: &RoomLayout, x: f32, y: f32) -> (f32, f32) {
+    room.to_world(x - room.x as f32, y - room.y as f32)
+}
+
 /// Row-pack `items` (id, size) into a room, top-left first, one-cell margin when
 /// the room is big enough. Returns tokens in the same order.
 fn pack_into_room(items: Vec<(TokenKind, f32)>, room: &RoomLayout) -> Vec<MapToken> {
@@ -251,7 +257,8 @@ fn pack_into_room(items: Vec<(TokenKind, f32)>, room: &RoomLayout) -> Vec<MapTok
             cy += row_h;
             row_h = 0;
         }
-        out.push(MapToken { kind, x: cx as f32 + s as f32 / 2.0, y: cy as f32 + s as f32 / 2.0 });
+        let (x, y) = in_room(room, cx as f32 + s as f32 / 2.0, cy as f32 + s as f32 / 2.0);
+        out.push(MapToken { kind, x, y });
         cx += s;
         row_h = row_h.max(s);
     }
@@ -293,7 +300,10 @@ pub fn ensure_player_token(tokens: &mut Vec<MapToken>, pc_id: &str, room: &RoomL
         return false;
     }
     let margin = if room.width > 2 && room.height > 2 { 1 } else { 0 };
-    let occupied = |gx: i32, gy: i32| tokens.iter().any(|t| t.x.floor() as i32 == gx && t.y.floor() as i32 == gy);
+    let occupied = |gx: i32, gy: i32| {
+        let (x, y) = in_room(room, gx as f32 + 0.5, gy as f32 + 0.5);
+        tokens.iter().any(|t| t.x.floor() == x.floor() && t.y.floor() == y.floor())
+    };
     let mut spot = None;
     'scan: for gy in (room.y + margin)..(room.y + room.height as i32 - margin).max(room.y + margin + 1) {
         for gx in (room.x + margin)..(room.x + room.width as i32 - margin).max(room.x + margin + 1) {
@@ -304,7 +314,8 @@ pub fn ensure_player_token(tokens: &mut Vec<MapToken>, pc_id: &str, room: &RoomL
         }
     }
     let (gx, gy) = spot.unwrap_or((room.x + margin, room.y + margin));
-    tokens.push(MapToken { kind, x: gx as f32 + 0.5, y: gy as f32 + 0.5 });
+    let (x, y) = in_room(room, gx as f32 + 0.5, gy as f32 + 0.5);
+    tokens.push(MapToken { kind, x, y });
     true
 }
 
@@ -322,11 +333,10 @@ pub fn encounter_has_tokens(tokens: &[MapToken], enc_id: &str) -> bool {
 
 /// Tokens inside a room's footprint (by center cell).
 pub fn tokens_in_room(tokens: &[MapToken], room: &RoomLayout) -> Vec<usize> {
-    tokens.iter().enumerate().filter(|(_, t)| {
-        let gx = t.x.floor() as i32;
-        let gy = t.y.floor() as i32;
-        gx >= room.x && gx < room.x + room.width as i32 && gy >= room.y && gy < room.y + room.height as i32
-    }).map(|(i, _)| i).collect()
+    tokens.iter().enumerate()
+        .filter(|(_, t)| room.contains_point(t.x.floor() + 0.5, t.y.floor() + 0.5))
+        .map(|(i, _)| i)
+        .collect()
 }
 
 /// Drop tokens whose creature no longer exists: removed encounters/monster entries,
@@ -428,7 +438,7 @@ mod tests {
     use crate::model::{EncounterMonster, EncounterType, MonsterRef};
 
     fn room(x: i32, y: i32, w: u32, h: u32) -> RoomLayout {
-        RoomLayout { room_id: "r".into(), x, y, width: w, height: h, violations: Vec::new(), wall_openings: Vec::new() }
+        RoomLayout { room_id: "r".into(), x, y, width: w, height: h, violations: Vec::new(), wall_openings: Vec::new(), rotation: 0.0 }
     }
 
     fn encounter(counts: &[u32]) -> Encounter {

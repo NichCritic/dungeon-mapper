@@ -83,10 +83,11 @@ impl RoomGroup {
 
         for rl in &layout.rooms {
             if self.room_ids.contains(&rl.room_id) {
-                min_x = min_x.min(rl.x);
-                min_y = min_y.min(rl.y);
-                max_x = max_x.max(rl.x + rl.width as i32);
-                max_y = max_y.max(rl.y + rl.height as i32);
+                let (x0, y0, x1, y1) = rl.cell_bounds();
+                min_x = min_x.min(x0);
+                min_y = min_y.min(y0);
+                max_x = max_x.max(x1);
+                max_y = max_y.max(y1);
                 found = true;
             }
         }

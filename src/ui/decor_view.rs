@@ -104,6 +104,13 @@ fn render_input_hash(layout: &SpatialLayout, graph: &DungeonGraph, theme: &Theme
     h.finish()
 }
 
+/// World position (pixels) of a point in a room's local frame (cells from its
+/// unrotated top-left), so decor sits and turns with a rotated room.
+fn decor_world(rl: &RoomLayout, x: f32, y: f32) -> (f32, f32) {
+    let (wx, wy) = rl.to_world(x, y);
+    (wx * GRID_PX, wy * GRID_PX)
+}
+
 pub fn decor_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut DecorViewState) {
     let (response, painter) = ui.allocate_painter(
         ui.available_size(),
@@ -195,14 +202,12 @@ pub fn decor_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut DecorVie
     );
     for rl in &render_layout.rooms {
         if let Some(room) = dungeon.graph.room_by_id(&rl.room_id) {
-            let room_px_x = rl.x as f32 * GRID_PX;
-            let room_px_y = rl.y as f32 * GRID_PX;
             for decor in &room.decor {
-                let wx = room_px_x + decor.x * GRID_PX;
-                let wy = room_px_y + decor.y * GRID_PX;
+                let (wx, wy) = decor_world(rl, decor.x, decor.y);
                 let screen_center = transform.world_to_screen(egui::pos2(wx, wy));
                 let s = DECOR_HALF_SIZE * transform.zoom;
-                let deg = decor.rotation;
+                // Decor turns with its room
+                let deg = decor.rotation + rl.rotation;
 
                 draw_decor_symbol(&painter, screen_center, s, decor.scale_x, decor.scale_y, deg, decor.decor_type, decor_color);
             }
@@ -211,7 +216,12 @@ pub fn decor_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut DecorVie
 
     // Highlight selected room
     if let Some(ref sel_id) = state.selected_room {
-        if let Some(rl) = render_layout.room_by_id(sel_id) {
+        if let Some(rl) = render_layout.room_by_id(sel_id).filter(|rl| rl.is_rotated()) {
+            let pts: Vec<egui::Pos2> = rl.corners().iter()
+                .map(|&(x, y)| transform.world_to_screen(egui::pos2(x * GRID_PX, y * GRID_PX)))
+                .collect();
+            painter.add(egui::Shape::closed_line(pts, egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(100, 180, 255))));
+        } else if let Some(rl) = render_layout.room_by_id(sel_id) {
             let min = transform.world_to_screen(egui::pos2(
                 rl.x as f32 * GRID_PX, rl.y as f32 * GRID_PX,
             ));
@@ -232,13 +242,10 @@ pub fn decor_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut DecorVie
     // (larger, more visible handles than the base render for interaction)
     for rl in &render_layout.rooms {
         if let Some(room) = dungeon.graph.room_by_id(&rl.room_id) {
-            let room_px_x = rl.x as f32 * GRID_PX;
-            let room_px_y = rl.y as f32 * GRID_PX;
             let is_selected_room = state.selected_room.as_deref() == Some(&rl.room_id);
 
             for (di, decor) in room.decor.iter().enumerate() {
-                let wx = room_px_x + decor.x * GRID_PX;
-                let wy = room_px_y + decor.y * GRID_PX;
+                let (wx, wy) = decor_world(rl, decor.x, decor.y);
                 let screen = transform.world_to_screen(egui::pos2(wx, wy));
                 let handle_r = (6.0 * transform.zoom).max(4.0);
 
@@ -256,7 +263,7 @@ pub fn decor_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut DecorVie
                         let (ex, ey) = decor.decor_type.local_extent();
                         let hx = ex * decor.scale_x * crate::util::DECOR_HALF_SIZE;
                         let hy = ey * decor.scale_y * crate::util::DECOR_HALF_SIZE;
-                        let (s, c) = decor.rotation.to_radians().sin_cos();
+                        let (s, c) = (decor.rotation + rl.rotation).to_radians().sin_cos();
                         let corner = |lx: f32, ly: f32| transform.world_to_screen(egui::pos2(wx + lx * c - ly * s, wy + lx * s + ly * c));
                         let pts = [corner(-hx, -hy), corner(hx, -hy), corner(hx, hy), corner(-hx, hy)];
                         let hb_color = egui::Color32::from_rgba_unmultiplied(255, 120, 60, 160);
@@ -289,10 +296,7 @@ pub fn decor_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut DecorVie
                 let world = transform.screen_to_world(pos);
                 // Find the room layout to get room origin
                 if let Some(rl) = render_layout.room_by_id(drag_room_id) {
-                    let room_px_x = rl.x as f32 * GRID_PX;
-                    let room_px_y = rl.y as f32 * GRID_PX;
-                    let new_x = (world.x - room_px_x) / GRID_PX;
-                    let new_y = (world.y - room_px_y) / GRID_PX;
+                    let (new_x, new_y) = rl.to_local(world.x / GRID_PX, world.y / GRID_PX);
                     // Clamp to room bounds
                     let new_x = new_x.clamp(0.0, rl.width as f32);
                     let new_y = new_y.clamp(0.0, rl.height as f32);
@@ -332,12 +336,10 @@ pub fn decor_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut DecorVie
                 if let Some(ref sel_id) = state.selected_room {
                     if let Some(rl) = render_layout.room_by_id(sel_id) {
                         if let Some(room) = dungeon.graph.room_by_id(sel_id) {
-                            let room_px_x = rl.x as f32 * GRID_PX;
-                            let room_px_y = rl.y as f32 * GRID_PX;
                             let hit_radius = GRID_PX * 0.5;
                             for (di, decor) in room.decor.iter().enumerate() {
-                                let dx = world.x - (room_px_x + decor.x * GRID_PX);
-                                let dy = world.y - (room_px_y + decor.y * GRID_PX);
+                                let (wx, wy) = decor_world(rl, decor.x, decor.y);
+                                let (dx, dy) = (world.x - wx, world.y - wy);
                                 if (dx * dx + dy * dy).sqrt() < hit_radius {
                                     clicked_decor = Some(di);
                                     break;
@@ -353,10 +355,8 @@ pub fn decor_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut DecorVie
                 let sel_id = state.selected_room.clone().unwrap();
                 let di = state.selected_decor.unwrap();
                 if let Some(rl) = render_layout.room_by_id(&sel_id) {
-                    let room_px_x = rl.x as f32 * GRID_PX;
-                    let room_px_y = rl.y as f32 * GRID_PX;
-                    let new_x = ((world.x - room_px_x) / GRID_PX).clamp(0.0, rl.width as f32);
-                    let new_y = ((world.y - room_px_y) / GRID_PX).clamp(0.0, rl.height as f32);
+                    let (new_x, new_y) = rl.to_local(world.x / GRID_PX, world.y / GRID_PX);
+                    let (new_x, new_y) = (new_x.clamp(0.0, rl.width as f32), new_y.clamp(0.0, rl.height as f32));
                     if let Some(room) = dungeon.graph.room_by_id_mut(&sel_id) {
                         if di < room.decor.len() {
                             let mut cloned = room.decor[di].clone();
@@ -382,15 +382,8 @@ pub fn decor_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut DecorVie
                 });
                 if let Some(sel_id) = target_room {
                     if let Some(rl) = render_layout.room_by_id(&sel_id) {
-                        let room_px_x = rl.x as f32 * GRID_PX;
-                        let room_px_y = rl.y as f32 * GRID_PX;
-                        let room_w = rl.width as f32 * GRID_PX;
-                        let room_h = rl.height as f32 * GRID_PX;
-                        if world.x >= room_px_x && world.x <= room_px_x + room_w
-                            && world.y >= room_px_y && world.y <= room_px_y + room_h
-                        {
-                            let dx = (world.x - room_px_x) / GRID_PX;
-                            let dy = (world.y - room_px_y) / GRID_PX;
+                        let (dx, dy) = rl.to_local(world.x / GRID_PX, world.y / GRID_PX);
+                        if dx >= 0.0 && dx <= rl.width as f32 && dy >= 0.0 && dy <= rl.height as f32 {
                             let new_decor = RoomDecor::new(state.place_type, dx, dy);
                             if let Some(room) = dungeon.graph.room_by_id_mut(&sel_id) {
                                 room.decor.push(new_decor);
@@ -406,9 +399,7 @@ pub fn decor_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut DecorVie
                 state.clear_decor_selection();
                 let mut hit = None;
                 for rl in &render_layout.rooms {
-                    if gx >= rl.x && gx < rl.x + rl.width as i32
-                        && gy >= rl.y && gy < rl.y + rl.height as i32
-                    {
+                    if rl.contains_point(gx as f32 + 0.5, gy as f32 + 0.5) {
                         hit = Some(rl.room_id.clone());
                         break;
                     }
@@ -446,12 +437,10 @@ pub fn decor_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut DecorVie
             if let Some(ref sel_id) = state.selected_room {
                 if let Some(rl) = render_layout.room_by_id(sel_id) {
                     if let Some(room) = dungeon.graph.room_by_id(sel_id) {
-                        let room_px_x = rl.x as f32 * GRID_PX;
-                        let room_px_y = rl.y as f32 * GRID_PX;
                         let hit_radius = GRID_PX * 0.5;
                         for (di, decor) in room.decor.iter().enumerate() {
-                            let dx = world.x - (room_px_x + decor.x * GRID_PX);
-                            let dy = world.y - (room_px_y + decor.y * GRID_PX);
+                            let (wx, wy) = decor_world(rl, decor.x, decor.y);
+                            let (dx, dy) = (world.x - wx, world.y - wy);
                             if (dx * dx + dy * dy).sqrt() < hit_radius {
                                 state.dragging_decor = Some((sel_id.clone(), di));
                                 if !state.decor_selection().contains(&di) {
@@ -513,11 +502,8 @@ pub fn decor_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut DecorVie
                     if let Some(ref sel_id) = state.selected_room {
                         if let Some(rl) = render_layout.room_by_id(sel_id) {
                             if let Some(room) = dungeon.graph.room_by_id(sel_id) {
-                                let room_px_x = rl.x as f32 * GRID_PX;
-                                let room_px_y = rl.y as f32 * GRID_PX;
                                 for (di, decor) in room.decor.iter().enumerate() {
-                                    let wx = room_px_x + decor.x * GRID_PX;
-                                    let wy = room_px_y + decor.y * GRID_PX;
+                                    let (wx, wy) = decor_world(rl, decor.x, decor.y);
                                     if wx >= min_x && wx <= max_x && wy >= min_y && wy <= max_y {
                                         state.selected_decor_set.insert(di);
                                     }

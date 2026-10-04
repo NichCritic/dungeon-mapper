@@ -17,6 +17,8 @@ use crate::ui::player_view::{self, PlayerViewState};
 /// Restart the application by spawning a new process and exiting.
 /// How often the status bar and render pre-warming re-check the render caches.
 const CACHE_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+/// How long the map must go unedited before other views' renders are pre-warmed.
+const PREWARM_SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
 
 fn restart_app() -> ! {
     let exe = std::env::current_exe().expect("Failed to get current exe path");
@@ -76,6 +78,8 @@ pub struct DungeonApp {
     pub server_port: u16,
     /// Hash of the last PNG pushed to the server, to avoid redundant updates.
     last_server_push_hash: u64,
+    /// In-flight background render of the server PNG; signals when it finishes.
+    pending_server_png: Option<std::sync::mpsc::Receiver<()>>,
     /// Which map the player view shows. None = same as DM's active map.
     player_map_index: Option<usize>,
     /// Dungeon snapshot for the player view when it differs from DM view.
@@ -197,6 +201,7 @@ impl Default for DungeonApp {
             server: None,
             server_port: 8080,
             last_server_push_hash: 0,
+            pending_server_png: None,
             player_map_index: None,
             player_dungeon: None,
             player_presentation: None,
@@ -357,6 +362,8 @@ impl DungeonApp {
             e.connection.corridor_width.hash(&mut h);
             e.connection.min_length.hash(&mut h);
             e.connection.max_length.hash(&mut h);
+            // A new angle setting re-routes the corridor
+            e.connection.corridor_angle.hash(&mut h);
         }
         // Include group constraints so changes trigger re-solve
         self.dungeon.graph.groups.len().hash(&mut h);
@@ -393,12 +400,27 @@ impl DungeonApp {
         let old_bounds = self.dungeon.layout.as_ref()
             .map(|l| l.bounds.clone())
             .unwrap_or_default();
+        // Rotation is set by hand, so a re-solve keeps each room's angle
+        let old_rotations: std::collections::HashMap<String, f32> = self.dungeon.layout.iter()
+            .flat_map(|l| l.rooms.iter())
+            .filter(|rl| rl.is_rotated())
+            .map(|rl| (rl.room_id.clone(), rl.rotation))
+            .collect();
         match crate::solver::layout::solve_layout(
             &self.dungeon.graph,
             self.spatial_state.density_gap,
         ) {
             Ok(mut layout) => {
                 layout.bounds = old_bounds;
+                if !old_rotations.is_empty() {
+                    for rl in &mut layout.rooms {
+                        if let Some(&r) = old_rotations.get(&rl.room_id) {
+                            rl.rotation = r;
+                        }
+                    }
+                    layout.corridors = crate::solver::corridor::route_corridors(&self.dungeon.graph, &layout);
+                    crate::solver::corridor::compute_wall_openings(&self.dungeon.graph, &mut layout);
+                }
                 self.dungeon.layout = Some(layout);
             }
             Err(e) => eprintln!("Layout solver error: {}", e),
@@ -534,13 +556,29 @@ impl DungeonApp {
         for (idx, rl) in cave_rooms {
             let room = &self.dungeon.graph.rooms[idx];
             let cave = room.cave_data.as_ref().unwrap();
-            let segments = crate::solver::cave_gen::compute_contour_segments(&rl, cave, &floor);
+            let segments = if rl.is_rotated() {
+                // Trace in the room's own frame (neighbours don't line up with turned
+                // cells), then turn the contour into place
+                let local = crate::model::RoomLayout { x: 0, y: 0, rotation: 0.0, ..rl.clone() };
+                let g = crate::util::GRID_PX;
+                crate::solver::cave_gen::compute_contour_segments(&local, cave, &crate::util::CellSet::default())
+                    .into_iter()
+                    .map(|(x1, y1, x2, y2)| {
+                        let (a, b) = (rl.to_world(x1 / g, y1 / g), rl.to_world(x2 / g, y2 / g));
+                        (a.0 * g, a.1 * g, b.0 * g, b.1 * g)
+                    })
+                    .collect()
+            } else {
+                crate::solver::cave_gen::compute_contour_segments(&rl, cave, &floor)
+            };
             self.dungeon.graph.rooms[idx].cave_data.as_mut().unwrap().contour_segments = segments;
         }
     }
 
-    /// Render a player-view PNG for the web server.
-    fn render_player_png(&self) -> Option<Vec<u8>> {
+    /// Snapshot what the web server's player PNG needs and return the job that renders
+    /// and encodes it. On a large map that takes a second or more, so it runs on a
+    /// background thread rather than stalling the session.
+    fn player_png_job(&self) -> Option<impl FnOnce() -> Option<Vec<u8>> + Send + 'static> {
         // Use player-specific map if it differs from DM view
         let (dungeon, pres) = if self.player_map_index.is_some()
             && self.player_map_index != Some(self.campaign.active_map)
@@ -549,62 +587,70 @@ impl DungeonApp {
         } else {
             (&self.dungeon, self.presentation.as_ref()?)
         };
-        let layout = dungeon.layout.as_ref()?;
-        let presentation = pres;
-
-        let (min_x, min_y, max_x, max_y) = layout.extents();
-        let margin = 2;
-        let grid_w = (max_x - min_x + margin * 2) as u32;
-        let grid_h = (max_y - min_y + margin * 2) as u32;
-
-        let scale_multiplier = 2u32;
-        let grid_px = crate::util::GRID_PX;
-        let scale = grid_px * scale_multiplier as f32;
-        let width = (grid_w as f32 * scale) as u32;
-        let height = (grid_h as f32 * scale) as u32;
-
-        let mut renderer = crate::render::ImageRenderer::new(width, height, scale / grid_px);
-        renderer.offset_x = (min_x - margin) as f32 * grid_px;
-        renderer.offset_y = (min_y - margin) as f32 * grid_px;
-
+        let layout = dungeon.layout.clone()?;
         // The radial renderer has no notion of carriers, so pin each light to where it
         // actually is (carried token, explicit position, or room center).
         let resolved_lights: Vec<crate::model::LightSource> = dungeon.light_sources.iter().map(|l| {
             let mut l = l.clone();
-            l.pos = crate::presentation::lighting::light_origin(&l, dungeon, layout);
+            l.pos = crate::presentation::lighting::light_origin(&l, dungeon, &layout);
             l
         }).collect();
-        let options = crate::render::themed::RenderOptions {
-            show_grid: true,
-            show_labels: true,
-            show_notes: false,
-            show_secrets: false,
-            show_decor: true,
-            show_lighting: true,
+        let snapshot = crate::presentation::PresentationSnapshot {
+            room_visibility: pres.room_visibility.clone(),
+            doors_open: pres.doors_open.clone(),
         };
-        crate::render::presentation::render_player_view(
-            &mut renderer,
-            &dungeon.graph,
-            layout,
-            &dungeon.theme,
-            presentation,
-            &resolved_lights,
-            dungeon.ambient_light,
-            &options,
-        );
+        let graph = dungeon.graph.clone();
+        let theme = dungeon.theme.clone();
+        let ambient_light = dungeon.ambient_light;
 
-        // Encode to PNG in memory
-        let mut png_bytes = Vec::new();
-        let encoder = image::codecs::png::PngEncoder::new(std::io::Cursor::new(&mut png_bytes));
-        image::ImageEncoder::write_image(
-            encoder,
-            renderer.image.as_raw(),
-            width,
-            height,
-            image::ExtendedColorType::Rgba8,
-        ).ok()?;
+        Some(move || {
+            let (min_x, min_y, max_x, max_y) = layout.extents();
+            let margin = 2;
+            let grid_w = (max_x - min_x + margin * 2) as u32;
+            let grid_h = (max_y - min_y + margin * 2) as u32;
 
-        Some(png_bytes)
+            let scale_multiplier = 2u32;
+            let grid_px = crate::util::GRID_PX;
+            let scale = grid_px * scale_multiplier as f32;
+            let width = (grid_w as f32 * scale) as u32;
+            let height = (grid_h as f32 * scale) as u32;
+
+            let mut renderer = crate::render::ImageRenderer::new(width, height, scale / grid_px);
+            renderer.offset_x = (min_x - margin) as f32 * grid_px;
+            renderer.offset_y = (min_y - margin) as f32 * grid_px;
+
+            let options = crate::render::themed::RenderOptions {
+                show_grid: true,
+                show_labels: true,
+                show_notes: false,
+                show_secrets: false,
+                show_decor: true,
+                show_lighting: true,
+            };
+            crate::render::presentation::render_player_view_snapshot(
+                &mut renderer,
+                &graph,
+                &layout,
+                &theme,
+                &snapshot,
+                &resolved_lights,
+                ambient_light,
+                &options,
+            );
+
+            // Encode to PNG in memory
+            let mut png_bytes = Vec::new();
+            let encoder = image::codecs::png::PngEncoder::new(std::io::Cursor::new(&mut png_bytes));
+            image::ImageEncoder::write_image(
+                encoder,
+                renderer.image.as_raw(),
+                width,
+                height,
+                image::ExtendedColorType::Rgba8,
+            ).ok()?;
+
+            Some(png_bytes)
+        })
     }
 
     /// Compute a hash of the presentation state to detect changes for server pushes.
@@ -689,17 +735,31 @@ impl DungeonApp {
         ctx.request_repaint();
     }
 
-    fn push_server_update_if_changed(&mut self) {
+    fn push_server_update_if_changed(&mut self, ctx: &egui::Context) {
+        // One render at a time; changes made meanwhile are picked up once it finishes.
+        if let Some(rx) = &self.pending_server_png {
+            if matches!(rx.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)) {
+                ctx.request_repaint_after(std::time::Duration::from_millis(100));
+                return;
+            }
+            self.pending_server_png = None;
+        }
         let hash = self.presentation_hash();
         if hash == self.last_server_push_hash {
             return;
         }
-        if let Some(server) = &self.server {
-            if let Some(png) = self.render_player_png() {
-                server.push_update(png);
-                self.last_server_push_hash = hash;
+        let Some(server) = &self.server else { return };
+        let Some(job) = self.player_png_job() else { return };
+        let sender = server.update_sender();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            if let Some(png) = job() {
+                let _ = sender.send(png);
             }
-        }
+            let _ = done_tx.send(());
+        });
+        self.pending_server_png = Some(done_rx);
+        self.last_server_push_hash = hash;
     }
 
     /// Draw every managed standalone window (edit-mode and presentation) and act on any
@@ -1968,8 +2028,7 @@ impl eframe::App for DungeonApp {
                 let gx = (world.x / crate::util::GRID_PX).floor() as i32;
                 let gy = (world.y / crate::util::GRID_PX).floor() as i32;
                 for rl in &layout_rooms {
-                    if gx >= rl.x && gx < rl.x + rl.width as i32
-                        && gy >= rl.y && gy < rl.y + rl.height as i32
+                    if rl.contains_point(gx as f32 + 0.5, gy as f32 + 0.5)
                     {
                         return Some(rl.room_id.clone());
                     }
@@ -2048,7 +2107,7 @@ impl eframe::App for DungeonApp {
 
         // Push server update only when presentation state has changed
         if self.presenting && self.server.is_some() {
-            self.push_server_update_if_changed();
+            self.push_server_update_if_changed(ctx);
         }
 
         // Player viewport (second window)
@@ -2100,34 +2159,30 @@ impl DungeonApp {
         }
         self.prewarm_checked_at = std::time::Instant::now();
 
-        // Compute a simple hash of things that affect renders
+        // Debounce on the real render inputs (cave cells, decor, layout, theme), so a
+        // stream of edits such as painting a cave doesn't kick off a background
+        // re-render of every other view on each check.
         let prewarm_hash = {
-            use std::hash::{Hash, Hasher};
-            use std::collections::hash_map::DefaultHasher;
-            let mut h = DefaultHasher::new();
-            layout.rooms.len().hash(&mut h);
-            self.dungeon.theme.wall_color.hash(&mut h);
-            self.dungeon.theme.floor_color.hash(&mut h);
-            self.dungeon.theme.bg_color.hash(&mut h);
-            self.dungeon.graph.rooms.len().hash(&mut h);
-            for r in &self.dungeon.graph.rooms {
-                r.decor.len().hash(&mut h);
-            }
+            use std::hash::Hasher;
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            crate::render::bg_cache::map_render_hash(&mut h, layout, &self.dungeon.graph, &self.dungeon.theme, true);
             h.finish()
         };
-
-        // Debounce: track when the hash last changed
         let immediate = self.prewarm_immediate;
-        if prewarm_hash != self.last_prewarm_hash {
+        // Mid-stroke (painting, dragging) the map is still changing: hold off entirely.
+        let editing = ctx.input(|i| i.pointer.any_down());
+        if prewarm_hash != self.last_prewarm_hash || editing {
             self.last_prewarm_hash = prewarm_hash;
             self.prewarm_hash_changed_at = std::time::Instant::now();
             if !immediate {
-                return; // Don't trigger builds yet (unless immediate flag is set)
+                ctx.request_repaint_after(PREWARM_SETTLE);
+                return;
             }
         }
 
-        // Wait 500ms after last change (unless immediate)
-        if !immediate && self.prewarm_hash_changed_at.elapsed() < std::time::Duration::from_millis(500) {
+        // Wait until the map has settled (unless immediate)
+        if !immediate && self.prewarm_hash_changed_at.elapsed() < PREWARM_SETTLE {
+            ctx.request_repaint_after(PREWARM_SETTLE);
             return;
         }
         self.prewarm_immediate = false;

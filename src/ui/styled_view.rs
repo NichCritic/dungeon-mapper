@@ -155,8 +155,9 @@ pub fn styled_view(ui: &mut egui::Ui, dungeon: &Dungeon, state: &mut StyledViewS
                                 painter.circle_stroke(center, radius, ghost_stroke);
                             }
                             _ => {
-                                painter.rect_filled(r, 0.0, ghost_fill);
-                                painter.rect_stroke(r, 0.0, ghost_stroke, egui::StrokeKind::Middle);
+                                let outline = crate::ui::canvas_common::room_screen_outline(rl, &transform);
+                                painter.add(egui::Shape::convex_polygon(outline.clone(), ghost_fill, egui::Stroke::NONE));
+                                painter.add(egui::Shape::closed_line(outline, ghost_stroke));
                             }
                         }
                         // Ghost label
@@ -228,8 +229,7 @@ pub fn styled_view(ui: &mut egui::Ui, dungeon: &Dungeon, state: &mut StyledViewS
                 let gy = (world.y / GRID_PX).floor() as i32;
                 let mut hit = None;
                 for rl in &render_layout.rooms {
-                    if gx >= rl.x && gx < rl.x + rl.width as i32
-                        && gy >= rl.y && gy < rl.y + rl.height as i32
+                    if rl.contains_point(gx as f32 + 0.5, gy as f32 + 0.5)
                     {
                         hit = Some(rl.room_id.clone());
                         break;
@@ -242,19 +242,7 @@ pub fn styled_view(ui: &mut egui::Ui, dungeon: &Dungeon, state: &mut StyledViewS
         // Highlight selected room
         if let Some(ref sel_id) = state.selected_room {
             if let Some(rl) = render_layout.room_by_id(sel_id) {
-                let min = transform.world_to_screen(egui::pos2(
-                    rl.x as f32 * GRID_PX, rl.y as f32 * GRID_PX,
-                ));
-                let max = transform.world_to_screen(egui::pos2(
-                    (rl.x as f32 + rl.width as f32) * GRID_PX,
-                    (rl.y as f32 + rl.height as f32) * GRID_PX,
-                ));
-                painter.rect_stroke(
-                    egui::Rect::from_min_max(min, max),
-                    0.0,
-                    egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(100, 180, 255)),
-                    egui::StrokeKind::Middle,
-                );
+                painter.add(egui::Shape::closed_line(crate::ui::canvas_common::room_screen_outline(rl, &transform), egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(100, 180, 255))));
             }
         }
     } else {
@@ -295,6 +283,15 @@ fn draw_text_overlay(
                 let Some(rl) = layout.room_by_id(room_id) else { continue };
                 let wp_cx = wp.x as f32;
                 let wp_cy = wp.y as f32;
+                let wc = theme.wall_color;
+                if rl.is_rotated() {
+                    // On the turned wall nearest the corridor's end
+                    let a = crate::model::geometry::attach_to_room(rl, graph, (wp_cx, wp_cy));
+                    let screen = transform.world_to_screen(egui::pos2(a.point.0 * GRID_PX, a.point.1 * GRID_PX));
+                    painter.text(screen, egui::Align2::CENTER_CENTER, "S", egui::FontId::monospace((6.0 * transform.zoom).max(4.0)),
+                        egui::Color32::from_rgba_unmultiplied(wc[0], wc[1], wc[2], wc[3]));
+                    continue;
+                }
                 let dist_right = (wp_cx - (rl.x + rl.width as i32) as f32).abs();
                 let dist_left = (wp_cx - rl.x as f32).abs();
                 let dist_bottom = (wp_cy - (rl.y + rl.height as i32) as f32).abs();

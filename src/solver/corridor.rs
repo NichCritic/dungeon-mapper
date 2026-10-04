@@ -53,6 +53,11 @@ fn stamp_corridor_floors(
     // Collect the cells once, then insert into each floor
     let mut cells = Vec::new();
     for pair in waypoints.windows(2) {
+        if pair[0].x != pair[1].x && pair[0].y != pair[1].y {
+            // An angled run: stamp the cells its block sweeps (plus the 1-cell border)
+            cells.extend(crate::model::geometry::swept_cells(pair[0], pair[1], w, 1));
+            continue;
+        }
         let min_x = pair[0].x.min(pair[1].x);
         let max_x = pair[0].x.max(pair[1].x);
         let min_y = pair[0].y.min(pair[1].y);
@@ -88,9 +93,14 @@ fn init_per_floor_forbidden_with_exclusions(
             .map(|r| r.floor.floors())
             .unwrap_or_else(|| vec![0]);
         let mut cells = Vec::new();
-        for y in rl.y..(rl.y + rl.height as i32) {
-            for x in rl.x..(rl.x + rl.width as i32) {
-                cells.push((x, y));
+        if rl.is_rotated() {
+            // Every cell the turned footprint touches
+            cells = crate::model::geometry::polygon_touched_cells(&rl.corners());
+        } else {
+            for y in rl.y..(rl.y + rl.height as i32) {
+                for x in rl.x..(rl.x + rl.width as i32) {
+                    cells.push((x, y));
+                }
             }
         }
         for f in room_floors {
@@ -163,120 +173,132 @@ pub fn route_corridors(
         };
 
         let pinned = pinned_map.get(&edge.connection.id).cloned().unwrap_or_default();
-        let cw = edge.connection.corridor_width;
-        let w = cw as i32;
-        let half = w / 2;
-
-        let floor = corridor_floor(graph, edge);
-        let c_floors = floor.floors();
-        let forbidden = merged_forbidden(&c_floors, &per_floor);
-
-        let has_src_exit = edge.source_exit.is_some();
-        let has_tgt_exit = edge.target_exit.is_some();
-
-        // Detect child-to-parent connections: create a short stub exit
-        let src_is_child_of_tgt = graph.parent_of(&edge.source_room_id)
-            .map(|p| p == edge.target_room_id).unwrap_or(false);
-        let tgt_is_child_of_src = graph.parent_of(&edge.target_room_id)
-            .map(|p| p == edge.source_room_id).unwrap_or(false);
-
-        let result = if pinned.len() >= 2 {
-            let pinned_tl: Vec<GridPos> = pinned.iter()
-                .map(|p| GridPos { x: p.x - half, y: p.y - half })
-                .collect();
-            route_through_pinned(&pinned_tl, w, &forbidden)
-        } else if has_src_exit || has_tgt_exit {
-            // User-specified exits: use fixed positions
-            let src_exits = if let Some(exit) = edge.source_exit {
-                vec![exit_to_tl(exit, src_rl, w)]
-            } else {
-                edge_exits(src_rl, tgt_rl, w)
-            };
-            let tgt_exits = if let Some(exit) = edge.target_exit {
-                vec![exit_to_tl(exit, tgt_rl, w)]
-            } else {
-                edge_exits(tgt_rl, src_rl, w)
-            };
-            find_best_route(&src_exits, &tgt_exits, w, &forbidden)
-        } else if src_is_child_of_tgt {
-            // Source is a child room inside target (parent) — create stub exit
-            try_child_parent_exit(src_rl, tgt_rl, w)
-        } else if tgt_is_child_of_src {
-            // Target is a child room inside source (parent) — create stub exit (reversed)
-            try_child_parent_exit(tgt_rl, src_rl, w)
-                .map(|mut wps| { wps.reverse(); wps })
-        } else if let Some(wall_path) = try_shared_wall(src_rl, tgt_rl, w) {
-            Some(wall_path)
-        } else if let Some(close_path) = try_close_rooms(src_rl, tgt_rl, w) {
-            // Rooms are close enough that normal exits overlap — span the gap directly
-            Some(close_path)
-        } else {
-            let src_exits = edge_exits(src_rl, tgt_rl, w);
-            let tgt_exits = edge_exits(tgt_rl, src_rl, w);
-            find_best_route(&src_exits, &tgt_exits, w, &forbidden)
-        };
-
-        let to_center = |wps: Vec<GridPos>| -> Vec<GridPos> {
-            wps.iter().map(|p| GridPos { x: p.x + half, y: p.y + half }).collect()
-        };
-
-        let mk = |waypoints: Vec<GridPos>, invalid: bool| CorridorSegment {
-            pinned_waypoints: pinned.clone(),
-            connection_id: edge.connection.id.clone(),
-            waypoints,
-            width: cw,
-            invalid,
-            floor,
-        };
-
-        // Helper to fix up corridor endpoints to match user-set exits exactly
-        let fix_endpoints = |wps: &mut Vec<GridPos>| {
-            if let Some(exit) = edge.source_exit {
-                if let Some(first) = wps.first_mut() {
-                    *first = exit_to_center(exit, src_rl, w);
-                }
-            }
-            if let Some(exit) = edge.target_exit {
-                if let Some(last) = wps.last_mut() {
-                    *last = exit_to_center(exit, tgt_rl, w);
-                }
-            }
-        };
-
-        if let Some(waypoints) = result {
-            stamp_corridor_floors(&waypoints, w, &c_floors, &mut per_floor);
-            let mut centered = to_center(waypoints);
-            fix_endpoints(&mut centered);
-            corridors.push(mk(centered, false));
-        } else {
-            // Fallback: L-shaped corridor
-            let src_exits = if let Some(exit) = edge.source_exit {
-                vec![exit_to_tl(exit, src_rl, w)]
-            } else {
-                edge_exits(src_rl, tgt_rl, w)
-            };
-            let tgt_exits = if let Some(exit) = edge.target_exit {
-                vec![exit_to_tl(exit, tgt_rl, w)]
-            } else {
-                edge_exits(tgt_rl, src_rl, w)
-            };
-            if let (Some(&(sx, sy)), Some(&(tx, ty))) =
-                (src_exits.first(), tgt_exits.first())
-            {
-                let waypoints = vec![
-                    GridPos { x: sx, y: sy },
-                    GridPos { x: tx, y: sy },
-                    GridPos { x: tx, y: ty },
-                ];
-                stamp_corridor_floors(&waypoints, w, &c_floors, &mut per_floor);
-                let mut centered = to_center(waypoints);
-                fix_endpoints(&mut centered);
-                corridors.push(mk(centered, true));
-            }
-        }
+        corridors.extend(route_edge(graph, edge, src_rl, tgt_rl, pinned, &mut per_floor));
     }
 
     corridors
+}
+
+/// Route one connection around the current forbidden cells, and stamp the result
+/// into them so later corridors keep clear. Waypoints come back in center coordinates.
+fn route_edge(
+    graph: &DungeonGraph,
+    edge: &StoredEdge,
+    src_rl: &RoomLayout,
+    tgt_rl: &RoomLayout,
+    pinned: Vec<GridPos>,
+    per_floor: &mut HashMap<i32, CellSet>,
+) -> Option<CorridorSegment> {
+    let cw = edge.connection.corridor_width;
+    let w = cw as i32;
+    let half = w / 2;
+
+    let floor = corridor_floor(graph, edge);
+    let c_floors = floor.floors();
+    let forbidden = merged_forbidden(&c_floors, per_floor);
+
+    let has_src_exit = edge.source_exit.is_some();
+    let has_tgt_exit = edge.target_exit.is_some();
+
+    // Detect child-to-parent connections: create a short stub exit
+    let src_is_child_of_tgt = graph.parent_of(&edge.source_room_id)
+        .map(|p| p == edge.target_room_id).unwrap_or(false);
+    let tgt_is_child_of_src = graph.parent_of(&edge.target_room_id)
+        .map(|p| p == edge.source_room_id).unwrap_or(false);
+
+    let angle = edge.connection.corridor_angle;
+    // Rotated rooms are reached through exits on their turned walls; the renderer joins
+    // the corridor to the wall with a short stub
+    let rotated = src_rl.is_rotated() || tgt_rl.is_rotated();
+    let exits_for = |rl: &RoomLayout, other: &RoomLayout, exit: Option<ExitPos>| -> Vec<(i32, i32)> {
+        if rl.is_rotated() {
+            rotated_exits(rl, other, exit, w, &forbidden)
+        } else if let Some(exit) = exit {
+            vec![exit_to_tl(exit, rl, w)]
+        } else {
+            edge_exits(rl, other, w)
+        }
+    };
+
+    let result = if pinned.len() >= 2 {
+        let pinned_tl: Vec<GridPos> = pinned.iter()
+            .map(|p| GridPos { x: p.x - half, y: p.y - half })
+            .collect();
+        route_through_pinned(&pinned_tl, w, &forbidden, angle)
+    } else if has_src_exit || has_tgt_exit || rotated {
+        // User-specified exits: use fixed positions
+        let src_exits = exits_for(src_rl, tgt_rl, edge.source_exit);
+        let tgt_exits = exits_for(tgt_rl, src_rl, edge.target_exit);
+        find_best_route(&src_exits, &tgt_exits, w, &forbidden, angle)
+    } else if src_is_child_of_tgt {
+        // Source is a child room inside target (parent) — create stub exit
+        try_child_parent_exit(src_rl, tgt_rl, w)
+    } else if tgt_is_child_of_src {
+        // Target is a child room inside source (parent) — create stub exit (reversed)
+        try_child_parent_exit(tgt_rl, src_rl, w)
+            .map(|mut wps| { wps.reverse(); wps })
+    } else if let Some(wall_path) = try_shared_wall(src_rl, tgt_rl, w) {
+        Some(wall_path)
+    } else if let Some(close_path) = try_close_rooms(src_rl, tgt_rl, w) {
+        // Rooms are close enough that normal exits overlap — span the gap directly
+        Some(close_path)
+    } else {
+        let src_exits = edge_exits(src_rl, tgt_rl, w);
+        let tgt_exits = edge_exits(tgt_rl, src_rl, w);
+        find_best_route(&src_exits, &tgt_exits, w, &forbidden, angle)
+    };
+
+    let to_center = |wps: Vec<GridPos>| -> Vec<GridPos> {
+        wps.iter().map(|p| GridPos { x: p.x + half, y: p.y + half }).collect()
+    };
+
+    let mk = |waypoints: Vec<GridPos>, invalid: bool| CorridorSegment {
+        pinned_waypoints: pinned.clone(),
+        connection_id: edge.connection.id.clone(),
+        waypoints,
+        width: cw,
+        invalid,
+        floor,
+    };
+
+    // Helper to fix up corridor endpoints to match user-set exits exactly
+    let fix_endpoints = |wps: &mut Vec<GridPos>| {
+        if let Some(exit) = edge.source_exit.filter(|_| !src_rl.is_rotated()) {
+            if let Some(first) = wps.first_mut() {
+                *first = exit_to_center(exit, src_rl, w);
+            }
+        }
+        if let Some(exit) = edge.target_exit.filter(|_| !tgt_rl.is_rotated()) {
+            if let Some(last) = wps.last_mut() {
+                *last = exit_to_center(exit, tgt_rl, w);
+            }
+        }
+    };
+
+    if let Some(waypoints) = result {
+        stamp_corridor_floors(&waypoints, w, &c_floors, per_floor);
+        let mut centered = to_center(waypoints);
+        fix_endpoints(&mut centered);
+        return Some(mk(centered, false));
+    } else {
+        // Fallback: L-shaped corridor
+        let src_exits = exits_for(src_rl, tgt_rl, edge.source_exit);
+        let tgt_exits = exits_for(tgt_rl, src_rl, edge.target_exit);
+        if let (Some(&(sx, sy)), Some(&(tx, ty))) =
+            (src_exits.first(), tgt_exits.first())
+        {
+            let waypoints = vec![
+                GridPos { x: sx, y: sy },
+                GridPos { x: tx, y: sy },
+                GridPos { x: tx, y: ty },
+            ];
+            stamp_corridor_floors(&waypoints, w, &c_floors, per_floor);
+            let mut centered = to_center(waypoints);
+            fix_endpoints(&mut centered);
+            return Some(mk(centered, true));
+        }
+    }
+    None
 }
 
 /// Re-route only corridors connected to a specific set of rooms.
@@ -355,111 +377,7 @@ pub fn route_corridors_for_rooms(
         };
 
         let pinned = pinned_map.get(&edge.connection.id).cloned().unwrap_or_default();
-        let cw = edge.connection.corridor_width;
-        let w = cw as i32;
-        let half = w / 2;
-
-        let floor = corridor_floor(graph, edge);
-        let c_floors = floor.floors();
-        let forbidden = merged_forbidden(&c_floors, &per_floor);
-
-        let has_src_exit = edge.source_exit.is_some();
-        let has_tgt_exit = edge.target_exit.is_some();
-
-        // Detect child-to-parent connections
-        let src_is_child_of_tgt = graph.parent_of(&edge.source_room_id)
-            .map(|p| p == edge.target_room_id).unwrap_or(false);
-        let tgt_is_child_of_src = graph.parent_of(&edge.target_room_id)
-            .map(|p| p == edge.source_room_id).unwrap_or(false);
-
-        let result = if pinned.len() >= 2 {
-            let pinned_tl: Vec<GridPos> = pinned.iter()
-                .map(|p| GridPos { x: p.x - half, y: p.y - half })
-                .collect();
-            route_through_pinned(&pinned_tl, w, &forbidden)
-        } else if has_src_exit || has_tgt_exit {
-            let src_exits = if let Some(exit) = edge.source_exit {
-                vec![exit_to_tl(exit, src_rl, w)]
-            } else {
-                edge_exits(src_rl, tgt_rl, w)
-            };
-            let tgt_exits = if let Some(exit) = edge.target_exit {
-                vec![exit_to_tl(exit, tgt_rl, w)]
-            } else {
-                edge_exits(tgt_rl, src_rl, w)
-            };
-            find_best_route(&src_exits, &tgt_exits, w, &forbidden)
-        } else if src_is_child_of_tgt {
-            try_child_parent_exit(src_rl, tgt_rl, w)
-        } else if tgt_is_child_of_src {
-            try_child_parent_exit(tgt_rl, src_rl, w)
-                .map(|mut wps| { wps.reverse(); wps })
-        } else if let Some(wall_path) = try_shared_wall(src_rl, tgt_rl, w) {
-            Some(wall_path)
-        } else if let Some(close_path) = try_close_rooms(src_rl, tgt_rl, w) {
-            Some(close_path)
-        } else {
-            let src_exits = edge_exits(src_rl, tgt_rl, w);
-            let tgt_exits = edge_exits(tgt_rl, src_rl, w);
-            find_best_route(&src_exits, &tgt_exits, w, &forbidden)
-        };
-
-        let to_center = |wps: Vec<GridPos>| -> Vec<GridPos> {
-            wps.iter().map(|p| GridPos { x: p.x + half, y: p.y + half }).collect()
-        };
-
-        let mk = |waypoints: Vec<GridPos>, invalid: bool| CorridorSegment {
-            pinned_waypoints: pinned.clone(),
-            connection_id: edge.connection.id.clone(),
-            waypoints,
-            width: cw,
-            invalid,
-            floor,
-        };
-
-        let fix_endpoints = |wps: &mut Vec<GridPos>| {
-            if let Some(exit) = edge.source_exit {
-                if let Some(first) = wps.first_mut() {
-                    *first = exit_to_center(exit, src_rl, w);
-                }
-            }
-            if let Some(exit) = edge.target_exit {
-                if let Some(last) = wps.last_mut() {
-                    *last = exit_to_center(exit, tgt_rl, w);
-                }
-            }
-        };
-
-        if let Some(waypoints) = result {
-            stamp_corridor_floors(&waypoints, w, &c_floors, &mut per_floor);
-            let mut centered = to_center(waypoints);
-            fix_endpoints(&mut centered);
-            new_corridors.push(mk(centered, false));
-        } else {
-            let src_exits = if let Some(exit) = edge.source_exit {
-                vec![exit_to_tl(exit, src_rl, w)]
-            } else {
-                edge_exits(src_rl, tgt_rl, w)
-            };
-            let tgt_exits = if let Some(exit) = edge.target_exit {
-                vec![exit_to_tl(exit, tgt_rl, w)]
-            } else {
-                edge_exits(tgt_rl, src_rl, w)
-            };
-            if let (Some(&(sx, sy)), Some(&(tx, ty))) =
-                (src_exits.first(), tgt_exits.first())
-            {
-                let waypoints = vec![
-                    GridPos { x: sx, y: sy },
-                    GridPos { x: tx, y: sy },
-                    GridPos { x: tx, y: ty },
-                ];
-                stamp_corridor_floors(&waypoints, w, &c_floors, &mut per_floor);
-                let mut centered = to_center(waypoints);
-                fix_endpoints(&mut centered);
-                new_corridors.push(mk(centered, true));
-            }
-        }
+        new_corridors.extend(route_edge(graph, edge, src_rl, tgt_rl, pinned, &mut per_floor));
     }
 
     // Combine: unaffected first, then newly routed
@@ -766,6 +684,220 @@ fn astar_path(
     None
 }
 
+/// A* for a w×w block moving in 8 directions (diagonal steps cost √2 and may not cut a
+/// corner), in tenths of a cell. Returns the visited cells from start to goal.
+fn astar_path_diagonal(start: (i32, i32), goal: (i32, i32), w: i32, forbidden: &CellSet) -> Option<Vec<GridPos>> {
+    use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
+
+    if start == goal {
+        return Some(vec![GridPos { x: start.0, y: start.1 }, GridPos { x: start.0, y: start.1 }]);
+    }
+    let (tx, ty) = goal;
+    // Octile distance: the exact cost of an unobstructed 8-direction path
+    let heuristic = |x: i32, y: i32| -> i32 {
+        let (dx, dy) = ((x - tx).abs(), (y - ty).abs());
+        10 * dx.max(dy) + 4 * dx.min(dy)
+    };
+    let max_iterations = (((start.0 - tx).abs() + (start.1 - ty).abs()) * 8).clamp(200, 50_000) as usize;
+
+    let mut g_score: CellMap<i32> = CellMap::default();
+    let mut came_from: CellMap<(i32, i32)> = CellMap::default();
+    let mut closed: CellSet = CellSet::default();
+    let mut open: BinaryHeap<Reverse<(i32, (i32, i32))>> = BinaryHeap::new();
+    g_score.insert(start, 0);
+    open.push(Reverse((heuristic(start.0, start.1), start)));
+
+    let moves = [(1, 0, 10), (-1, 0, 10), (0, 1, 10), (0, -1, 10), (1, 1, 14), (1, -1, 14), (-1, 1, 14), (-1, -1, 14)];
+    let mut iterations = 0;
+    while let Some(Reverse((_, cur))) = open.pop() {
+        if !closed.insert(cur) {
+            continue;
+        }
+        iterations += 1;
+        if iterations > max_iterations {
+            break;
+        }
+        if cur == goal {
+            let mut path = vec![GridPos { x: cur.0, y: cur.1 }];
+            let mut c = cur;
+            while c != start {
+                c = came_from[&c];
+                path.push(GridPos { x: c.0, y: c.1 });
+            }
+            path.reverse();
+            return Some(path);
+        }
+        let g = g_score[&cur];
+        for &(dx, dy, cost) in &moves {
+            let next = (cur.0 + dx, cur.1 + dy);
+            if closed.contains(&next) || !block_clear(next.0, next.1, w, forbidden) {
+                continue;
+            }
+            // No corner cutting: both orthogonal neighbours of a diagonal step must be clear
+            if dx != 0 && dy != 0
+                && (!block_clear(cur.0 + dx, cur.1, w, forbidden) || !block_clear(cur.0, cur.1 + dy, w, forbidden))
+            {
+                continue;
+            }
+            let tentative = g + cost;
+            if tentative < *g_score.get(&next).unwrap_or(&i32::MAX) {
+                came_from.insert(next, cur);
+                g_score.insert(next, tentative);
+                open.push(Reverse((tentative + heuristic(next.0, next.1), next)));
+            }
+        }
+    }
+    None
+}
+
+/// Whether a w×w block can slide straight from `a` to `b` without touching a
+/// forbidden cell.
+fn sweep_clear(a: GridPos, b: GridPos, w: i32, forbidden: &CellSet) -> bool {
+    crate::model::geometry::swept_cells(a, b, w, 0).iter().all(|c| !forbidden.contains(c))
+}
+
+/// Shorten a cell path to as few straight runs as the forbidden cells allow: from each
+/// point, jump to the farthest later point in a clear straight line.
+fn straighten(path: &[GridPos], w: i32, forbidden: &CellSet) -> Vec<GridPos> {
+    if path.len() <= 2 {
+        return path.to_vec();
+    }
+    let mut out = vec![path[0]];
+    let mut i = 0;
+    while i < path.len() - 1 {
+        let mut j = path.len() - 1;
+        while j > i + 1 && !sweep_clear(path[i], path[j], w, forbidden) {
+            j -= 1;
+        }
+        out.push(path[j]);
+        i = j;
+    }
+    out
+}
+
+/// A route allowing 45° runs (`Diagonal`) or straight runs at any angle (`Any`).
+fn angled_path(a: GridPos, b: GridPos, w: i32, forbidden: &CellSet, angle: CorridorAngle) -> Option<Vec<GridPos>> {
+    let raw = astar_path_diagonal((a.x, a.y), (b.x, b.y), w, forbidden)?;
+    Some(match angle {
+        CorridorAngle::Any => straighten(&raw, w, forbidden),
+        _ => simplify_path(&raw),
+    })
+}
+
+/// Length of a route in tenths of a cell, along its straight runs.
+fn route_length(path: &[GridPos]) -> i32 {
+    path.windows(2)
+        .map(|p| ((((p[1].x - p[0].x).pow(2) + (p[1].y - p[0].y).pow(2)) as f32).sqrt() * 10.0).round() as i32)
+        .sum()
+}
+
+/// [`find_best_route`] for 45° and any-angle corridors: the shortest by true length.
+fn find_best_route_angled(
+    src_exits: &[(i32, i32)],
+    tgt_exits: &[(i32, i32)],
+    w: i32,
+    forbidden: &CellSet,
+    angle: CorridorAngle,
+) -> Option<Vec<GridPos>> {
+    let mut best: Option<Vec<GridPos>> = None;
+    let mut best_len = i32::MAX;
+    let mut tried = 0;
+    for &(sx, sy) in src_exits {
+        if !block_clear(sx, sy, w, forbidden) {
+            continue;
+        }
+        for &(tx, ty) in tgt_exits {
+            if !block_clear(tx, ty, w, forbidden) {
+                continue;
+            }
+            let (a, b) = (GridPos { x: sx, y: sy }, GridPos { x: tx, y: ty });
+            if route_length(&[a, b]) >= best_len {
+                continue;
+            }
+            // Searches are costlier than orthogonal ones; cap how many exit pairs we try
+            tried += 1;
+            if tried > 24 && best.is_some() {
+                return best;
+            }
+            if let Some(path) = angled_path(a, b, w, forbidden, angle) {
+                let len = route_length(&path);
+                if len < best_len {
+                    best_len = len;
+                    best = Some(path);
+                }
+            }
+        }
+    }
+    best
+}
+
+/// Exits for a rotated room: on each turned wall (the one facing `other` first), points
+/// spread along it, each pushed out along the wall's normal until a w×w block (top-left
+/// returned) is clear of the room. A user exit becomes the single exit nearest to it.
+fn rotated_exits(rl: &RoomLayout, other: &RoomLayout, exit: Option<ExitPos>, w: i32, forbidden: &CellSet) -> Vec<(i32, i32)> {
+    let (s, c) = rl.rotation.to_radians().sin_cos();
+    let rot = |v: (f32, f32)| (v.0 * c - v.1 * s, v.0 * s + v.1 * c);
+    let (rw, rh) = (rl.width as f32, rl.height as f32);
+    // Faces in local terms: (point at local t along the face, outward normal, face length)
+    let faces: [(Box<dyn Fn(f32) -> (f32, f32)>, (f32, f32), f32); 4] = [
+        (Box::new(move |t| (t, 0.0)), (0.0, -1.0), rw),
+        (Box::new(move |t| (rw, t)), (1.0, 0.0), rh),
+        (Box::new(move |t| (t, rh)), (0.0, 1.0), rw),
+        (Box::new(move |t| (0.0, t)), (-1.0, 0.0), rh),
+    ];
+    let (oc, mc) = (other.center(), rl.center());
+    let toward = (oc.0 - mc.0, oc.1 - mc.1);
+    let mut order: Vec<usize> = (0..4).collect();
+    order.sort_by(|&i, &j| {
+        let d = |k: usize| { let n = rot(faces[k].1); -(n.0 * toward.0 + n.1 * toward.1) };
+        d(i).partial_cmp(&d(j)).unwrap()
+    });
+
+    let half = w as f32 / 2.0;
+    let place = |p: (f32, f32), n: (f32, f32)| -> Option<(i32, i32)> {
+        // Push the block's center out until it is clear of the room
+        for k in 0..4 {
+            let d = half + 0.5 + k as f32;
+            let (cx, cy) = (p.0 + n.0 * d, p.1 + n.1 * d);
+            let tl = ((cx - half).round() as i32, (cy - half).round() as i32);
+            if block_clear(tl.0, tl.1, w, forbidden) {
+                return Some(tl);
+            }
+        }
+        None
+    };
+
+    if let Some(e) = exit {
+        let a = crate::model::geometry::attach_point(rl, (e.x, e.y));
+        return place(a.point, a.normal).into_iter().collect();
+    }
+    let mut out = Vec::new();
+    for &f in &order {
+        let (point, n_local, len) = (&faces[f].0, faces[f].1, faces[f].2);
+        let n = rot(n_local);
+        let mut ts = Vec::new();
+        let (lo, hi) = (half.min(len / 2.0), (len - half).max(len / 2.0));
+        let mid = len / 2.0;
+        ts.push(mid);
+        let mut off = w.max(1) as f32;
+        while mid - off >= lo || mid + off <= hi {
+            if mid - off >= lo { ts.push(mid - off); }
+            if mid + off <= hi { ts.push(mid + off); }
+            off += w.max(1) as f32;
+        }
+        for t in ts {
+            let (lx, ly) = point(t);
+            if let Some(tl) = place(rl.to_world(lx, ly), n) {
+                if !out.contains(&tl) {
+                    out.push(tl);
+                }
+            }
+        }
+    }
+    out
+}
+
 fn simplify_path(path: &[GridPos]) -> Vec<GridPos> {
     if path.len() <= 2 {
         return path.to_vec();
@@ -791,7 +923,11 @@ fn find_best_route(
     tgt_exits: &[(i32, i32)],
     w: i32,
     forbidden: &CellSet,
+    angle: CorridorAngle,
 ) -> Option<Vec<GridPos>> {
+    if angle != CorridorAngle::Orthogonal {
+        return find_best_route_angled(src_exits, tgt_exits, w, forbidden, angle);
+    }
     let mut best: Option<Vec<GridPos>> = None;
     let mut best_len = i32::MAX;
 
@@ -851,6 +987,7 @@ fn route_through_pinned(
     waypoints: &[GridPos],
     w: i32,
     forbidden: &CellSet,
+    angle: CorridorAngle,
 ) -> Option<Vec<GridPos>> {
     if waypoints.len() < 2 {
         return None;
@@ -858,8 +995,10 @@ fn route_through_pinned(
 
     let mut full_path: Vec<GridPos> = Vec::new();
     for pair in waypoints.windows(2) {
-        let seg = astar_path(pair[0].x, pair[0].y, pair[1].x, pair[1].y, w, forbidden)?;
-        let simplified = simplify_path(&seg);
+        let simplified = match angle {
+            CorridorAngle::Orthogonal => simplify_path(&astar_path(pair[0].x, pair[0].y, pair[1].x, pair[1].y, w, forbidden)?),
+            _ => angled_path(pair[0], pair[1], w, forbidden, angle)?,
+        };
         if full_path.is_empty() {
             full_path.extend_from_slice(&simplified);
         } else {
@@ -1032,7 +1171,9 @@ pub fn compute_wall_openings(
     let container_ids = collect_container_ids(graph);
 
     // Snapshot all room rects for boundary checking
+    // Rotated rooms are left out: their walls open by clipping against the corridor
     let room_rects: Vec<(String, i32, i32, i32, i32)> = layout.rooms.iter()
+        .filter(|rl| !rl.is_rotated())
         .map(|rl| (rl.room_id.clone(), rl.x, rl.y, rl.x + rl.width as i32, rl.y + rl.height as i32))
         .collect();
 
@@ -1119,5 +1260,74 @@ pub fn compute_wall_openings(
         if let Some(ops) = openings.remove(&rl.room_id) {
             rl.wall_openings = ops;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two 4x4 rooms far apart on a diagonal, joined with the given angle setting;
+    /// `rotation` turns the second room.
+    fn route(angle: CorridorAngle, rotation: f32) -> (DungeonGraph, SpatialLayout, CorridorSegment) {
+        let mut graph = DungeonGraph::new();
+        let (a, b) = (Room::new("A".into()), Room::new("B".into()));
+        let (aid, bid) = (a.id.clone(), b.id.clone());
+        graph.add_room(a);
+        graph.add_room(b);
+        let mut conn = Connection::new(ConnectionType::Open);
+        conn.corridor_angle = angle;
+        graph.add_connection(aid.clone(), bid.clone(), conn);
+        let rl = |id: &str, x: i32, y: i32, rotation: f32| RoomLayout {
+            room_id: id.into(), x, y, width: 4, height: 4, violations: Vec::new(), wall_openings: Vec::new(), rotation,
+        };
+        let mut layout = SpatialLayout::new();
+        layout.rooms = vec![rl(&aid, 0, 0, 0.0), rl(&bid, 20, 20, rotation)];
+        let corridor = route_corridors(&graph, &layout).remove(0);
+        (graph, layout, corridor)
+    }
+
+    fn runs(c: &CorridorSegment) -> Vec<(i32, i32)> {
+        c.waypoints.windows(2).map(|w| (w[1].x - w[0].x, w[1].y - w[0].y)).collect()
+    }
+
+    #[test]
+    fn orthogonal_corridors_stay_orthogonal() {
+        let (_, _, c) = route(CorridorAngle::Orthogonal, 0.0);
+        assert!(runs(&c).iter().all(|&(dx, dy)| dx == 0 || dy == 0), "{:?}", c.waypoints);
+    }
+
+    #[test]
+    fn diagonal_corridors_take_45_degree_runs() {
+        let (_, _, c) = route(CorridorAngle::Diagonal, 0.0);
+        let r = runs(&c);
+        assert!(r.iter().all(|&(dx, dy)| dx == 0 || dy == 0 || dx.abs() == dy.abs()), "{:?}", c.waypoints);
+        assert!(r.iter().any(|&(dx, dy)| dx != 0 && dx.abs() == dy.abs()), "expected a diagonal run: {:?}", c.waypoints);
+    }
+
+    #[test]
+    fn any_angle_corridors_run_straight() {
+        let (_, _, any) = route(CorridorAngle::Any, 0.0);
+        let (_, _, diag) = route(CorridorAngle::Diagonal, 0.0);
+        // Nothing in the way: one straight run, no longer than the 45° route
+        assert_eq!(any.waypoints.len(), 2, "{:?}", any.waypoints);
+        assert!(route_length(&any.waypoints) <= route_length(&diag.waypoints));
+    }
+
+    #[test]
+    fn corridors_to_rotated_rooms_start_outside_them() {
+        let (graph, layout, c) = route(CorridorAngle::Orthogonal, 30.0);
+        let turned = &layout.rooms[1];
+        let w = c.width as f32;
+        for wp in [c.waypoints[0], *c.waypoints.last().unwrap()] {
+            let (x, y) = crate::model::geometry::corridor_center(wp, c.width);
+            assert!(!turned.contains_point(x, y), "waypoint {:?} inside the rotated room", wp);
+        }
+        // The rendered corridor attaches to the turned wall
+        let shape = crate::model::geometry::corridor_shape(&c, &layout, &graph).expect("freeform");
+        let attach = shape.ends.iter().flatten().next().expect("attached to the rotated room");
+        let (lx, ly) = turned.to_local(attach.point.0, attach.point.1);
+        let on_wall = lx.abs() < 1e-3 || (lx - 4.0).abs() < 1e-3 || ly.abs() < 1e-3 || (ly - 4.0).abs() < 1e-3;
+        assert!(on_wall, "attach {:?} (local {lx},{ly}), width {w}", attach.point);
     }
 }

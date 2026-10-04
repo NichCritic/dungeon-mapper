@@ -17,6 +17,80 @@ pub struct RoomLayout {
     /// Derived during corridor routing for containment groups.
     #[serde(default)]
     pub wall_openings: Vec<GridPos>,
+    /// Clockwise rotation in degrees about the room's center. The room's contents
+    /// (cave cells, decor, sections) are laid out in its unrotated local frame:
+    /// x, y, width, height describe that frame before rotation.
+    #[serde(default)]
+    pub rotation: f32,
+}
+
+impl RoomLayout {
+    /// True when rotated by something other than a multiple of 360°.
+    pub fn is_rotated(&self) -> bool {
+        let r = self.rotation.rem_euclid(360.0);
+        r > 1e-3 && r < 360.0 - 1e-3
+    }
+
+    /// Center of the room in grid units (the rotation pivot).
+    pub fn center(&self) -> (f32, f32) {
+        (self.x as f32 + self.width as f32 / 2.0, self.y as f32 + self.height as f32 / 2.0)
+    }
+
+    fn sin_cos(&self) -> (f32, f32) {
+        self.rotation.to_radians().sin_cos()
+    }
+
+    /// Room-local point (offset from the unrotated top-left, grid units) to world.
+    pub fn to_world(&self, lx: f32, ly: f32) -> (f32, f32) {
+        if !self.is_rotated() {
+            // Exact for unrotated rooms (no rounding through the center)
+            return (self.x as f32 + lx, self.y as f32 + ly);
+        }
+        let (cx, cy) = self.center();
+        let (dx, dy) = (lx - self.width as f32 / 2.0, ly - self.height as f32 / 2.0);
+        let (s, c) = self.sin_cos();
+        (cx + dx * c - dy * s, cy + dx * s + dy * c)
+    }
+
+    /// World point (grid units) to room-local.
+    pub fn to_local(&self, x: f32, y: f32) -> (f32, f32) {
+        if !self.is_rotated() {
+            return (x - self.x as f32, y - self.y as f32);
+        }
+        let (cx, cy) = self.center();
+        let (dx, dy) = (x - cx, y - cy);
+        let (s, c) = self.sin_cos();
+        (dx * c + dy * s + self.width as f32 / 2.0, -dx * s + dy * c + self.height as f32 / 2.0)
+    }
+
+    /// Corners in world grid units: top-left, top-right, bottom-right, bottom-left
+    /// of the unrotated frame.
+    pub fn corners(&self) -> [(f32, f32); 4] {
+        let (w, h) = (self.width as f32, self.height as f32);
+        [self.to_world(0.0, 0.0), self.to_world(w, 0.0), self.to_world(w, h), self.to_world(0.0, h)]
+    }
+
+    /// Whether a world point lies inside the room's (rotated) rectangle.
+    pub fn contains_point(&self, x: f32, y: f32) -> bool {
+        let (lx, ly) = self.to_local(x, y);
+        lx >= 0.0 && ly >= 0.0 && lx < self.width as f32 && ly < self.height as f32
+    }
+
+    /// World-space bounding box (min_x, min_y, max_x, max_y) in grid units.
+    pub fn aabb(&self) -> (f32, f32, f32, f32) {
+        if !self.is_rotated() {
+            return (self.x as f32, self.y as f32, (self.x + self.width as i32) as f32, (self.y + self.height as i32) as f32);
+        }
+        self.corners().iter().fold((f32::MAX, f32::MAX, f32::MIN, f32::MIN), |b, p| {
+            (b.0.min(p.0), b.1.min(p.1), b.2.max(p.0), b.3.max(p.1))
+        })
+    }
+
+    /// Grid cells overlapped by the bounding box: (min_x, min_y, max_x, max_y), max exclusive.
+    pub fn cell_bounds(&self) -> (i32, i32, i32, i32) {
+        let (x0, y0, x1, y1) = self.aabb();
+        (x0.floor() as i32, y0.floor() as i32, x1.ceil() as i32, y1.ceil() as i32)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -115,6 +189,9 @@ impl SpatialLayout {
             .rev()
             .map(|&i| &self.rooms[i])
             .find(|rl| {
+                if rl.is_rotated() {
+                    return rl.contains_point(gx as f32 + 0.5, gy as f32 + 0.5);
+                }
                 gx >= rl.x && gx < rl.x + rl.width as i32
                     && gy >= rl.y && gy < rl.y + rl.height as i32
             })
@@ -131,6 +208,10 @@ impl SpatialLayout {
                 let w = c.width as i32;
                 let mut cells = HashSet::new();
                 for pair in c.waypoints.windows(2) {
+                    if pair[0].x != pair[1].x && pair[0].y != pair[1].y {
+                        cells.extend(super::geometry::swept_cells(pair[0], pair[1], w, 0));
+                        continue;
+                    }
                     let min_x = pair[0].x.min(pair[1].x);
                     let max_x = pair[0].x.max(pair[1].x);
                     let min_y = pair[0].y.min(pair[1].y);
@@ -178,10 +259,11 @@ impl SpatialLayout {
         let mut max_y = i32::MIN;
 
         for rl in &self.rooms {
-            min_x = min_x.min(rl.x);
-            min_y = min_y.min(rl.y);
-            max_x = max_x.max(rl.x + rl.width as i32);
-            max_y = max_y.max(rl.y + rl.height as i32);
+            let (x0, y0, x1, y1) = rl.cell_bounds();
+            min_x = min_x.min(x0);
+            min_y = min_y.min(y0);
+            max_x = max_x.max(x1);
+            max_y = max_y.max(y1);
         }
 
         for corridor in &self.corridors {
@@ -227,6 +309,7 @@ mod tests {
             height: h,
             violations: Vec::new(),
             wall_openings: Vec::new(),
+            rotation: 0.0,
         }
     }
 

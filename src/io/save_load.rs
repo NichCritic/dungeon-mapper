@@ -4,7 +4,7 @@ use std::sync::mpsc;
 use crate::model::{Campaign, Dungeon};
 
 /// Current save file format version. Increment when the data model changes.
-const CURRENT_VERSION: u32 = 6;
+const CURRENT_VERSION: u32 = 8;
 
 /// Versioned save file envelope (version 2+: campaign-based).
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -79,7 +79,9 @@ fn load_campaign(version: u32, value: &serde_json::Value) -> Result<Campaign, St
         // v3 → v4: added Dungeon.tokens (#[serde(default)])
         // v4 → v5: decor cover, light pos/dim/carrier, PC sense ranges, session share flags (all defaults)
         // v5 → v6: added Dungeon.id (generated on load) for binding session notes to maps
-        2 | 3 | 4 | 5 | 6 => serde_json::from_value(value.clone()).map_err(|e| e.to_string()),
+        // v6 → v7: added Connection.overlap_walls (#[serde(default)] = Both)
+        // v7 → v8: added RoomLayout.rotation (default 0) and Connection.corridor_angle (default Orthogonal)
+        2 | 3 | 4 | 5 | 6 | 7 | 8 => serde_json::from_value(value.clone()).map_err(|e| e.to_string()),
         v => Err(format!(
             "Save file version {} is newer than this application supports (max: {})",
             v, CURRENT_VERSION
@@ -120,20 +122,16 @@ pub struct CreatureExportData {
 }
 
 /// Save a campaign directly to a known file path (no dialog).
-/// Returns a receiver that will produce the result.
+/// Returns a receiver that will produce the result. The campaign is cloned and
+/// serialized on the background thread: cloning is a fraction of the cost of
+/// serializing a large campaign, which would otherwise stall every autosave.
 pub fn save_campaign_to_path(campaign: &Campaign, path: PathBuf) -> mpsc::Receiver<FileOpResult> {
     let (tx, rx) = mpsc::channel();
-    let json = match serialize_versioned(campaign) {
-        Ok(j) => j,
-        Err(e) => {
-            let _ = tx.send(FileOpResult::Saved(Err(e.to_string())));
-            return rx;
-        }
-    };
+    let campaign = campaign.clone();
     std::thread::spawn(move || {
-        let result = std::fs::write(&path, &json)
-            .map(|_| path)
-            .map_err(|e| e.to_string());
+        let result = serialize_versioned(&campaign)
+            .and_then(|json| std::fs::write(&path, &json).map_err(|e| e.to_string()))
+            .map(|_| path);
         let _ = tx.send(FileOpResult::Saved(result));
     });
     rx
@@ -143,15 +141,16 @@ pub fn save_campaign_to_path(campaign: &Campaign, path: PathBuf) -> mpsc::Receiv
 /// Returns a receiver that will eventually produce the result.
 pub fn save_campaign_async(campaign: &Campaign) -> mpsc::Receiver<FileOpResult> {
     let (tx, rx) = mpsc::channel();
-    let json = match serialize_versioned(campaign) {
-        Ok(j) => j,
-        Err(e) => {
-            let _ = tx.send(FileOpResult::Saved(Err(e.to_string())));
-            return rx;
-        }
-    };
+    let campaign = campaign.clone();
     let name = campaign.name.clone();
     std::thread::spawn(move || {
+        let json = match serialize_versioned(&campaign) {
+            Ok(j) => j,
+            Err(e) => {
+                let _ = tx.send(FileOpResult::Saved(Err(e)));
+                return;
+            }
+        };
         let handle = pollster::block_on(
             rfd::AsyncFileDialog::new()
                 .set_title("Save Campaign")
@@ -390,6 +389,46 @@ pub fn export_creatures_async(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_rotation_and_corridor_angle_round_trip() {
+        use crate::model::*;
+        let mut campaign = Campaign::new("Turned".into());
+        let map = &mut campaign.maps[0];
+        let (a, b) = (Room::new("A".into()), Room::new("B".into()));
+        let (aid, bid) = (a.id.clone(), b.id.clone());
+        map.graph.add_room(a);
+        map.graph.add_room(b);
+        let mut conn = Connection::new(ConnectionType::Door);
+        conn.corridor_angle = CorridorAngle::Any;
+        map.graph.add_connection(aid.clone(), bid, conn);
+        let mut layout = SpatialLayout::new();
+        layout.rooms.push(RoomLayout { room_id: aid, x: 1, y: 2, width: 3, height: 4, violations: Vec::new(), wall_openings: Vec::new(), rotation: 37.5 });
+        map.layout = Some(layout);
+        let loaded = deserialize_versioned(&serialize_versioned(&campaign).unwrap()).unwrap();
+        assert_eq!(loaded.maps[0].layout.as_ref().unwrap().rooms[0].rotation, 37.5);
+        assert_eq!(loaded.maps[0].graph.connections[0].connection.corridor_angle, CorridorAngle::Any);
+        // Files from before v8 load unrotated and orthogonal
+        let v7 = r#"{"version":7,"campaign":{"name":"Old","maps":[{"name":"M","graph":{"rooms":[],"connections":[],"graph_positions":{}},"layout":{"rooms":[{"room_id":"r","x":0,"y":0,"width":2,"height":2}],"corridors":[],"bounds":[]}}]}}"#;
+        let old = deserialize_versioned(v7).unwrap();
+        assert_eq!(old.maps[0].layout.as_ref().unwrap().rooms[0].rotation, 0.0);
+    }
+
+    #[test]
+    fn test_save_to_path_writes_loadable_file() {
+        let mut campaign = Campaign::new("Saved".into());
+        campaign.maps[0].name = "Only Map".into();
+        let path = std::env::temp_dir().join(format!("dm-save-test-{}.dungeon", uuid::Uuid::new_v4()));
+        let rx = save_campaign_to_path(&campaign, path.clone());
+        match rx.recv().unwrap() {
+            FileOpResult::Saved(Ok(p)) => assert_eq!(p, path),
+            _ => panic!("save failed"),
+        }
+        let loaded = deserialize_versioned(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(loaded.name, "Saved");
+        assert_eq!(loaded.maps[0].name, "Only Map");
+    }
 
     #[test]
     fn test_load_legacy_unversioned() {

@@ -23,6 +23,7 @@ pub fn map_render_hash(
     for rl in &layout.rooms {
         rl.room_id.hash(h);
         (rl.x, rl.y, rl.width, rl.height).hash(h);
+        rl.rotation.to_bits().hash(h);
         for wp in &rl.wall_openings {
             (wp.x, wp.y).hash(h);
         }
