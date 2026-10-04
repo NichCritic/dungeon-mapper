@@ -11,7 +11,7 @@ use crate::ui::encounters_view::{self, EncountersViewState};
 use crate::ui::graph_editor::{self, GraphEditorState};
 use crate::ui::spatial_view::{self, SpatialViewState};
 use crate::ui::styled_view::{self, StyledViewState};
-use crate::ui::presentation_view::{self, PresentationViewState, ServerAction};
+use crate::ui::presentation_view::{self, PresentationViewState};
 use crate::ui::player_view::{self, PlayerViewState};
 
 /// Restart the application by spawning a new process and exiting.
@@ -1865,7 +1865,6 @@ impl DungeonApp {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     if self.presenting {
                         if let Some(presentation) = &mut self.presentation {
-                            let mut server_action = ServerAction::None;
                             presentation_view::presentation_sidebar(
                                 ui,
                                 &mut self.dungeon,
@@ -1873,7 +1872,6 @@ impl DungeonApp {
                                 &mut self.presentation_view_state,
                                 &mut self.player_view_state,
                                 &mut self.player_viewport_open,
-                                &mut server_action,
                                 &self.monster_db,
                                 &mut self.combat_stats_cache,
                             );

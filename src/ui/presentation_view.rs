@@ -2510,7 +2510,6 @@ pub fn presentation_sidebar(
     view_state: &mut PresentationViewState,
     player_view_state: &mut crate::ui::player_view::PlayerViewState,
     player_viewport_open: &mut bool,
-    _server_action: &mut ServerAction,
     monster_db: &MonsterDatabase,
     combat_stats_cache: &mut CombatStatsCache,
 ) {
@@ -2560,161 +2559,7 @@ pub fn presentation_sidebar(
     let in_combat = presentation.combat_tracker.is_some();
 
     if let Some(sel_room_id) = view_state.selected_room.clone() {
-        // --- Contextual sidebar for selected room ---
-        let room_label = dungeon.graph.room_by_id(&sel_room_id)
-            .map(|r| r.label.clone())
-            .unwrap_or_else(|| "?".to_string());
-        ui.heading(&room_label);
-        ui.separator();
-
-        if ui.small_button("Deselect").clicked() {
-            view_state.selected_room = None;
-        }
-
-        // Visibility control
-        let vis = presentation.room_visibility(&sel_room_id).clone();
-        ui.add_space(4.0);
-        ui.label("Visibility:");
-        ui.horizontal(|ui| {
-            if ui.selectable_label(matches!(vis, Visibility::Hidden), "Hidden").clicked() {
-                fog::hide_room(&sel_room_id, presentation);
-
-            }
-            if ui.selectable_label(matches!(vis, Visibility::Explored), "Explored").clicked() {
-                fog::explore_room(&sel_room_id, presentation);
-
-            }
-            if ui.selectable_label(matches!(vis, Visibility::Visible), "Visible").clicked() {
-                fog::reveal_room(&sel_room_id, presentation);
-
-            }
-        });
-
-        // Room position/size info
-        if let Some(layout) = &dungeon.layout {
-            if let Some(rl) = layout.room_by_id(&sel_room_id) {
-                ui.add_space(4.0);
-                ui.label(format!("Size: {}x{} ({}x{} ft)", rl.width, rl.height, rl.width * 5, rl.height * 5));
-            }
-        }
-
-        // Doors for this room
-        let room_doors: Vec<_> = dungeon.graph.connections.iter()
-            .filter(|e| e.source_room_id == sel_room_id || e.target_room_id == sel_room_id)
-            .map(|e| {
-                let other = if e.source_room_id == sel_room_id { &e.target_room_id } else { &e.source_room_id };
-                let other_label = dungeon.graph.room_by_id(other)
-                    .map(|r| r.label.as_str()).unwrap_or("?");
-                (e.connection.id.clone(), other_label.to_string())
-            })
-            .collect();
-        if !room_doors.is_empty() {
-            ui.add_space(4.0);
-            ui.label("Doors:");
-            for (conn_id, other_label) in &room_doors {
-                ui.horizontal(|ui| {
-                    let is_open = presentation.is_door_open(conn_id);
-                    let (state_label, state_color) = if is_open {
-                        ("O", egui::Color32::from_rgb(100, 255, 100))
-                    } else {
-                        ("C", egui::Color32::from_rgb(255, 100, 100))
-                    };
-                    ui.colored_label(state_color, state_label);
-                    if ui.button(other_label).clicked() {
-                        fog::toggle_door(conn_id, presentation);
-        
-                    }
-                });
-            }
-        }
-
-        // Quick actions
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            if ui.button("Reveal + Adjacent").clicked() {
-                fog::reveal_room_and_adjacent(&sel_room_id, presentation, &dungeon.graph);
-
-            }
-            if ui.button("Move Party Here").clicked() {
-                presentation.party_room = Some(sel_room_id.clone());
-            }
-        });
-        if ui.button("Center Camera").clicked() {
-            if let Some(layout) = &dungeon.layout {
-                if let Some(rl) = layout.room_by_id(&sel_room_id) {
-                    let (cx, cy) = crate::util::room_center_px(rl);
-                    view_state.view.center_on(cx, cy, view_state.canvas_size);
-                }
-            }
-        }
-
-        // Party — only if party is in this room
-        let party_here = presentation.party_room.as_ref() == Some(&sel_room_id);
-        if party_here {
-            ui.add_space(8.0);
-            ui.heading("Party");
-            ui.separator();
-            party_section(ui, dungeon, presentation, in_combat);
-            if !dungeon.party.is_empty() {
-                ui.horizontal(|ui| {
-                    if ui.small_button("Place Tokens Here").on_hover_text("One token per party member in this room").clicked() {
-                        if let Some(rl) = dungeon.layout.as_ref().and_then(|l| l.room_by_id(&sel_room_id)) {
-                            tokens::place_party_tokens(&mut dungeon.tokens, &dungeon.party, rl);
-                        }
-                    }
-                    if dungeon.tokens.iter().any(|t| matches!(t.kind, TokenKind::Player(_))) {
-                        if ui.small_button("Remove Party Tokens").clicked() {
-                            tokens::remove_party_tokens(&mut dungeon.tokens);
-                        }
-                    }
-                });
-            }
-        }
-
-        // Encounters in this room
-        let room_encounters: Vec<&crate::model::Encounter> = dungeon.encounters.iter()
-            .filter(|e| presentation.encounter_room(e) == sel_room_id)
-            .collect();
-        if !room_encounters.is_empty() {
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                ui.heading("Encounters Here");
-                if ui.small_button("Distance Checks").on_hover_text("Distances and awareness checks from this room").clicked() {
-                    open_distance_checks(ui.ctx(), Some(sel_room_id.clone()));
-                }
-            });
-            ui.separator();
-
-            for enc in &room_encounters {
-                let type_marker = match enc.encounter_type {
-                    EncounterType::Static => "S",
-                    EncounterType::Wandering(_) => "W",
-                };
-                ui.horizontal(|ui| {
-                    if ui.selectable_label(false, format!("[{}] {}", type_marker, enc.name)).clicked() {
-                        open_combat_prep(ui.ctx(), &enc.id);
-                    }
-                    let has_tokens = tokens::encounter_has_tokens(&dungeon.tokens, &enc.id);
-                    let label = if has_tokens { "Re-place Tokens" } else { "Tokens" };
-                    if ui.small_button(label).on_hover_text("Put one token per monster in this room").clicked() {
-                        if let Some(rl) = dungeon.layout.as_ref().and_then(|l| l.room_by_id(&sel_room_id)) {
-                            let sizes = tokens::encounter_sizes(enc, &dungeon.custom_monsters, monster_db);
-                            tokens::place_encounter_tokens(&mut dungeon.tokens, enc, rl, &sizes);
-                        }
-                    }
-                    if has_tokens && ui.small_button("\u{00d7}").on_hover_text("Remove this encounter's tokens").clicked() {
-                        tokens::remove_encounter_tokens(&mut dungeon.tokens, &enc.id);
-                    }
-                });
-                let summary = encounter_monster_summary(enc, dungeon, monster_db);
-                if !summary.is_empty() {
-                    ui.indent(format!("enc_monsters_{}", enc.id), |ui| {
-                        ui.label(&summary);
-                    });
-                }
-            }
-        }
-
+        selected_room_section(ui, dungeon, presentation, view_state, monster_db, sel_room_id, in_combat);
     } else {
         // --- General room/door lists (no selection) ---
         egui::CollapsingHeader::new("Rooms")
@@ -2890,25 +2735,7 @@ pub fn presentation_sidebar(
         .id_salt("pres_lighting")
         .default_open(false)
         .show(ui, |ui| {
-            ui.add(egui::Slider::new(&mut dungeon.ambient_light, 0.0..=1.0).text("Ambient"));
-            ui.checkbox(&mut presentation.los_lighting, "Line-of-sight lighting")
-                .on_hover_text("Per-cell light and party vision blocked by walls, doors and solid objects. Off: the older per-room light wash.");
-            ui.add_enabled(presentation.los_lighting, egui::Checkbox::new(&mut presentation.dm_show_light, "Show light shading on DM map"));
-            let mut remove: Option<usize> = None;
-            for (i, light) in dungeon.light_sources.iter().enumerate() {
-                let Some(TokenKind::Player(pid)) = &light.carrier else { continue };
-                let name = dungeon.party.iter().find(|p| p.id == *pid).map(|p| p.name.as_str()).unwrap_or("?");
-                ui.horizontal(|ui| {
-                    ui.label(format!("{} carries a light ({} / {} ft)", name, light.radius * 5.0, light.dim_radius() * 5.0));
-                    if ui.small_button("\u{00d7}").on_hover_text("Remove this light").clicked() {
-                        remove = Some(i);
-                    }
-                });
-            }
-            if let Some(i) = remove {
-                dungeon.light_sources.remove(i);
-            }
-            ui.weak("Torches are given out per character in the Party section; room lights are edited in the Decor tab.");
+            lighting_section(ui, dungeon, presentation);
         });
 
     // --- Cover ---
@@ -2916,51 +2743,7 @@ pub fn presentation_sidebar(
         .id_salt("pres_cover")
         .default_open(false)
         .show(ui, |ui| {
-            let token_infos = tokens::resolve_tokens(dungeon, monster_db, presentation.combat_tracker.as_ref());
-            // Default attacker: current combatant's token, else the selected token
-            if presentation.cover_attacker.is_none() {
-                let current = presentation.combat_tracker.as_ref()
-                    .and_then(|t| t.current_combatant_id().cloned())
-                    .map(|cid| match cid {
-                        crate::presentation::combat_tracker::CombatantId::Monster(mid) => TokenKind::Monster(mid),
-                        crate::presentation::combat_tracker::CombatantId::Player(pid) => TokenKind::Player(pid),
-                    });
-                presentation.cover_attacker = current
-                    .filter(|k| dungeon.tokens.iter().any(|t| t.kind == *k))
-                    .or_else(|| view_state.selected_token.clone());
-            }
-            ui.horizontal(|ui| {
-                ui.label("From:");
-                let sel_label = presentation.cover_attacker.as_ref()
-                    .and_then(|k| dungeon.tokens.iter().position(|t| t.kind == *k))
-                    .and_then(|i| token_infos.get(i).map(|info| info.label.clone()))
-                    .unwrap_or_else(|| "(pick a token)".to_string());
-                egui::ComboBox::from_id_salt("cover_attacker")
-                    .selected_text(sel_label)
-                    .width(160.0)
-                    .show_ui(ui, |ui| {
-                        for (t, info) in dungeon.tokens.iter().zip(&token_infos) {
-                            let sel = presentation.cover_attacker.as_ref() == Some(&t.kind);
-                            if ui.selectable_label(sel, &info.label).clicked() {
-                                presentation.cover_attacker = Some(t.kind.clone());
-                            }
-                        }
-                    });
-            });
-            ui.horizontal(|ui| {
-                ui.selectable_value(&mut presentation.cover_mode, CoverMode::Off, "Off");
-                ui.selectable_value(&mut presentation.cover_mode, CoverMode::Heatmap, "Heatmap");
-                ui.selectable_value(&mut presentation.cover_mode, CoverMode::Icons, "Token icons");
-            });
-            ui.checkbox(&mut presentation.show_cover_player, "Show cover to players");
-            ui.horizontal(|ui| {
-                for (level, text) in [(CoverLevel::Half, "\u{00bd} half"), (CoverLevel::ThreeQuarters, "\u{00be} three-quarters"), (CoverLevel::Total, "\u{00d7} total")] {
-                    let (rect, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
-                    ui.painter().rect_filled(rect, 2.0, cover_ui::swatch_color(level));
-                    ui.label(text);
-                }
-            });
-            ui.weak("Unshaded cells have no cover. Hover a badged token for its lines.");
+            cover_section(ui, dungeon, presentation, view_state, monster_db);
         });
 
     egui::CollapsingHeader::new("Area of Effect")
@@ -2977,7 +2760,118 @@ pub fn presentation_sidebar(
         .id_salt("player_view_section")
         .default_open(true)
         .show(ui, |ui| {
+            player_view_section(ui, dungeon, presentation, view_state, player_view_state, player_viewport_open);
+        }); // end Player View collapsing header
 
+    // --- Single Combat Simulator ---
+    ui.add_space(12.0);
+    egui::CollapsingHeader::new("Combat Simulator")
+        .id_salt("combat_sim_section")
+        .default_open(false)
+        .show(ui, |ui| {
+            combat_sim_section(ui, dungeon, presentation, view_state, monster_db, combat_stats_cache);
+        }); // end Combat Simulator collapsing header
+
+    ui.add_space(8.0);
+
+    // Web server controls
+    ui.heading("Web Server");
+    ui.separator();
+}
+
+/// Ambient light, line-of-sight lighting, and the lights the party carries.
+fn lighting_section(
+    ui: &mut egui::Ui,
+    dungeon: &mut Dungeon,
+    presentation: &mut PresentationState,
+) {
+    ui.add(egui::Slider::new(&mut dungeon.ambient_light, 0.0..=1.0).text("Ambient"));
+    ui.checkbox(&mut presentation.los_lighting, "Line-of-sight lighting")
+        .on_hover_text("Per-cell light and party vision blocked by walls, doors and solid objects. Off: the older per-room light wash.");
+    ui.add_enabled(presentation.los_lighting, egui::Checkbox::new(&mut presentation.dm_show_light, "Show light shading on DM map"));
+    let mut remove: Option<usize> = None;
+    for (i, light) in dungeon.light_sources.iter().enumerate() {
+        let Some(TokenKind::Player(pid)) = &light.carrier else { continue };
+        let name = dungeon.party.iter().find(|p| p.id == *pid).map(|p| p.name.as_str()).unwrap_or("?");
+        ui.horizontal(|ui| {
+            ui.label(format!("{} carries a light ({} / {} ft)", name, light.radius * 5.0, light.dim_radius() * 5.0));
+            if ui.small_button("\u{00d7}").on_hover_text("Remove this light").clicked() {
+                remove = Some(i);
+            }
+        });
+    }
+    if let Some(i) = remove {
+        dungeon.light_sources.remove(i);
+    }
+    ui.weak("Torches are given out per character in the Party section; room lights are edited in the Decor tab.");
+
+}
+
+/// The cover tool: attacker, mode and results.
+fn cover_section(
+    ui: &mut egui::Ui,
+    dungeon: &mut Dungeon,
+    presentation: &mut PresentationState,
+    view_state: &mut PresentationViewState,
+    monster_db: &MonsterDatabase,
+) {
+    let token_infos = tokens::resolve_tokens(dungeon, monster_db, presentation.combat_tracker.as_ref());
+    // Default attacker: current combatant's token, else the selected token
+    if presentation.cover_attacker.is_none() {
+        let current = presentation.combat_tracker.as_ref()
+            .and_then(|t| t.current_combatant_id().cloned())
+            .map(|cid| match cid {
+                crate::presentation::combat_tracker::CombatantId::Monster(mid) => TokenKind::Monster(mid),
+                crate::presentation::combat_tracker::CombatantId::Player(pid) => TokenKind::Player(pid),
+            });
+        presentation.cover_attacker = current
+            .filter(|k| dungeon.tokens.iter().any(|t| t.kind == *k))
+            .or_else(|| view_state.selected_token.clone());
+    }
+    ui.horizontal(|ui| {
+        ui.label("From:");
+        let sel_label = presentation.cover_attacker.as_ref()
+            .and_then(|k| dungeon.tokens.iter().position(|t| t.kind == *k))
+            .and_then(|i| token_infos.get(i).map(|info| info.label.clone()))
+            .unwrap_or_else(|| "(pick a token)".to_string());
+        egui::ComboBox::from_id_salt("cover_attacker")
+            .selected_text(sel_label)
+            .width(160.0)
+            .show_ui(ui, |ui| {
+                for (t, info) in dungeon.tokens.iter().zip(&token_infos) {
+                    let sel = presentation.cover_attacker.as_ref() == Some(&t.kind);
+                    if ui.selectable_label(sel, &info.label).clicked() {
+                        presentation.cover_attacker = Some(t.kind.clone());
+                    }
+                }
+            });
+    });
+    ui.horizontal(|ui| {
+        ui.selectable_value(&mut presentation.cover_mode, CoverMode::Off, "Off");
+        ui.selectable_value(&mut presentation.cover_mode, CoverMode::Heatmap, "Heatmap");
+        ui.selectable_value(&mut presentation.cover_mode, CoverMode::Icons, "Token icons");
+    });
+    ui.checkbox(&mut presentation.show_cover_player, "Show cover to players");
+    ui.horizontal(|ui| {
+        for (level, text) in [(CoverLevel::Half, "\u{00bd} half"), (CoverLevel::ThreeQuarters, "\u{00be} three-quarters"), (CoverLevel::Total, "\u{00d7} total")] {
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+            ui.painter().rect_filled(rect, 2.0, cover_ui::swatch_color(level));
+            ui.label(text);
+        }
+    });
+    ui.weak("Unshaded cells have no cover. Hover a badged token for its lines.");
+
+}
+
+/// The player window: open/close, what players see, and where their view points.
+fn player_view_section(
+    ui: &mut egui::Ui,
+    dungeon: &mut Dungeon,
+    presentation: &mut PresentationState,
+    view_state: &mut PresentationViewState,
+    player_view_state: &mut crate::ui::player_view::PlayerViewState,
+    player_viewport_open: &mut bool,
+) {
     if ui.button(if *player_viewport_open { "Close Player Window" } else { "Open Player Window" }).clicked() {
         *player_viewport_open = !*player_viewport_open;
     }
@@ -3058,15 +2952,18 @@ pub fn presentation_sidebar(
         }
     }
 
-    }); // end Player View collapsing header
 
-    // --- Single Combat Simulator ---
-    ui.add_space(12.0);
-    egui::CollapsingHeader::new("Combat Simulator")
-        .id_salt("combat_sim_section")
-        .default_open(false)
-        .show(ui, |ui| {
+}
 
+/// Simulate a fight between the selected room's encounters and the party.
+fn combat_sim_section(
+    ui: &mut egui::Ui,
+    dungeon: &mut Dungeon,
+    presentation: &mut PresentationState,
+    view_state: &mut PresentationViewState,
+    monster_db: &MonsterDatabase,
+    combat_stats_cache: &mut CombatStatsCache,
+) {
     let sim = &mut view_state.single_combat;
 
     // Build and run combat sim
@@ -3328,14 +3225,177 @@ pub fn presentation_sidebar(
         });
     }
 
-    }); // end Combat Simulator collapsing header
 
-    ui.add_space(8.0);
-
-    // Web server controls
-    ui.heading("Web Server");
-    ui.separator();
 }
+
+/// Controls for the selected room: visibility, doors, party, encounters and combat.
+fn selected_room_section(
+    ui: &mut egui::Ui,
+    dungeon: &mut Dungeon,
+    presentation: &mut PresentationState,
+    view_state: &mut PresentationViewState,
+    monster_db: &MonsterDatabase,
+    sel_room_id: String,
+    in_combat: bool,
+) {
+    // --- Contextual sidebar for selected room ---
+    let room_label = dungeon.graph.room_by_id(&sel_room_id)
+        .map(|r| r.label.clone())
+        .unwrap_or_else(|| "?".to_string());
+    ui.heading(&room_label);
+    ui.separator();
+
+    if ui.small_button("Deselect").clicked() {
+        view_state.selected_room = None;
+    }
+
+    // Visibility control
+    let vis = presentation.room_visibility(&sel_room_id).clone();
+    ui.add_space(4.0);
+    ui.label("Visibility:");
+    ui.horizontal(|ui| {
+        if ui.selectable_label(matches!(vis, Visibility::Hidden), "Hidden").clicked() {
+            fog::hide_room(&sel_room_id, presentation);
+
+        }
+        if ui.selectable_label(matches!(vis, Visibility::Explored), "Explored").clicked() {
+            fog::explore_room(&sel_room_id, presentation);
+
+        }
+        if ui.selectable_label(matches!(vis, Visibility::Visible), "Visible").clicked() {
+            fog::reveal_room(&sel_room_id, presentation);
+
+        }
+    });
+
+    // Room position/size info
+    if let Some(layout) = &dungeon.layout {
+        if let Some(rl) = layout.room_by_id(&sel_room_id) {
+            ui.add_space(4.0);
+            ui.label(format!("Size: {}x{} ({}x{} ft)", rl.width, rl.height, rl.width * 5, rl.height * 5));
+        }
+    }
+
+    // Doors for this room
+    let room_doors: Vec<_> = dungeon.graph.connections.iter()
+        .filter(|e| e.source_room_id == sel_room_id || e.target_room_id == sel_room_id)
+        .map(|e| {
+            let other = if e.source_room_id == sel_room_id { &e.target_room_id } else { &e.source_room_id };
+            let other_label = dungeon.graph.room_by_id(other)
+                .map(|r| r.label.as_str()).unwrap_or("?");
+            (e.connection.id.clone(), other_label.to_string())
+        })
+        .collect();
+    if !room_doors.is_empty() {
+        ui.add_space(4.0);
+        ui.label("Doors:");
+        for (conn_id, other_label) in &room_doors {
+            ui.horizontal(|ui| {
+                let is_open = presentation.is_door_open(conn_id);
+                let (state_label, state_color) = if is_open {
+                    ("O", egui::Color32::from_rgb(100, 255, 100))
+                } else {
+                    ("C", egui::Color32::from_rgb(255, 100, 100))
+                };
+                ui.colored_label(state_color, state_label);
+                if ui.button(other_label).clicked() {
+                    fog::toggle_door(conn_id, presentation);
+
+                }
+            });
+        }
+    }
+
+    // Quick actions
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        if ui.button("Reveal + Adjacent").clicked() {
+            fog::reveal_room_and_adjacent(&sel_room_id, presentation, &dungeon.graph);
+
+        }
+        if ui.button("Move Party Here").clicked() {
+            presentation.party_room = Some(sel_room_id.clone());
+        }
+    });
+    if ui.button("Center Camera").clicked() {
+        if let Some(layout) = &dungeon.layout {
+            if let Some(rl) = layout.room_by_id(&sel_room_id) {
+                let (cx, cy) = crate::util::room_center_px(rl);
+                view_state.view.center_on(cx, cy, view_state.canvas_size);
+            }
+        }
+    }
+
+    // Party — only if party is in this room
+    let party_here = presentation.party_room.as_ref() == Some(&sel_room_id);
+    if party_here {
+        ui.add_space(8.0);
+        ui.heading("Party");
+        ui.separator();
+        party_section(ui, dungeon, presentation, in_combat);
+        if !dungeon.party.is_empty() {
+            ui.horizontal(|ui| {
+                if ui.small_button("Place Tokens Here").on_hover_text("One token per party member in this room").clicked() {
+                    if let Some(rl) = dungeon.layout.as_ref().and_then(|l| l.room_by_id(&sel_room_id)) {
+                        tokens::place_party_tokens(&mut dungeon.tokens, &dungeon.party, rl);
+                    }
+                }
+                if dungeon.tokens.iter().any(|t| matches!(t.kind, TokenKind::Player(_))) {
+                    if ui.small_button("Remove Party Tokens").clicked() {
+                        tokens::remove_party_tokens(&mut dungeon.tokens);
+                    }
+                }
+            });
+        }
+    }
+
+    // Encounters in this room
+    let room_encounters: Vec<&crate::model::Encounter> = dungeon.encounters.iter()
+        .filter(|e| presentation.encounter_room(e) == sel_room_id)
+        .collect();
+    if !room_encounters.is_empty() {
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.heading("Encounters Here");
+            if ui.small_button("Distance Checks").on_hover_text("Distances and awareness checks from this room").clicked() {
+                open_distance_checks(ui.ctx(), Some(sel_room_id.clone()));
+            }
+        });
+        ui.separator();
+
+        for enc in &room_encounters {
+            let type_marker = match enc.encounter_type {
+                EncounterType::Static => "S",
+                EncounterType::Wandering(_) => "W",
+            };
+            ui.horizontal(|ui| {
+                if ui.selectable_label(false, format!("[{}] {}", type_marker, enc.name)).clicked() {
+                    open_combat_prep(ui.ctx(), &enc.id);
+                }
+                let has_tokens = tokens::encounter_has_tokens(&dungeon.tokens, &enc.id);
+                let label = if has_tokens { "Re-place Tokens" } else { "Tokens" };
+                if ui.small_button(label).on_hover_text("Put one token per monster in this room").clicked() {
+                    if let Some(rl) = dungeon.layout.as_ref().and_then(|l| l.room_by_id(&sel_room_id)) {
+                        let sizes = tokens::encounter_sizes(enc, &dungeon.custom_monsters, monster_db);
+                        tokens::place_encounter_tokens(&mut dungeon.tokens, enc, rl, &sizes);
+                    }
+                }
+                if has_tokens && ui.small_button("\u{00d7}").on_hover_text("Remove this encounter's tokens").clicked() {
+                    tokens::remove_encounter_tokens(&mut dungeon.tokens, &enc.id);
+                }
+            });
+            let summary = encounter_monster_summary(enc, dungeon, monster_db);
+            if !summary.is_empty() {
+                ui.indent(format!("enc_monsters_{}", enc.id), |ui| {
+                    ui.label(&summary);
+                });
+            }
+        }
+    }
+
+
+}
+
 
 /// Combat preparation window — lets the DM preview and configure an encounter
 /// before starting or adding to combat. Shows monsters with pre-rolled initiative,
@@ -3683,11 +3743,6 @@ fn apply_prep_initiative(tracker: &mut CombatTracker, enc_id: &str, prep: &Comba
             }
         }
     }
-}
-
-/// Actions the sidebar can request from the app regarding the server.
-pub enum ServerAction {
-    None,
 }
 
 #[cfg(test)]
