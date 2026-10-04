@@ -2072,7 +2072,12 @@ fn draw_doors(
     graph: &DungeonGraph,
     state: &SpatialViewState,
 ) {
-    for edge in &graph.connections {
+    for end in crate::model::geometry::door_ends(graph, layout) {
+        let edge = end.edge;
+        let kind = edge.connection.connection_type;
+        if kind.is_passage() {
+            continue;
+        }
         // Floor filtering: dim doors to lower floors, hide higher
         let dim = match state.current_floor {
             Some(floor) => match floor_dim(graph.edge_floor_relation(edge, floor)) {
@@ -2083,128 +2088,68 @@ fn draw_doors(
         };
         let white = if dim < 1.0 { dim_color(egui::Color32::WHITE, dim) } else { egui::Color32::WHITE };
         let dark = if dim < 1.0 { dim_color(egui::Color32::from_rgb(30, 30, 30), dim) } else { egui::Color32::from_rgb(30, 30, 30) };
-        if edge.connection.connection_type.is_passage() {
-            continue;
-        }
-
-        let corridor = layout.corridor_for(&edge.connection.id);
-        let Some(corridor) = corridor else { continue };
-        if corridor.waypoints.len() < 2 {
-            continue;
-        }
+        let to_screen = |(x, y): (f32, f32)| transform.world_to_screen(egui::pos2(x * GRID_PX, y * GRID_PX));
+        let secret = |painter: &egui::Painter, at: egui::Pos2| {
+            // No visible door — just an "S" near the wall
+            painter.text(at, egui::Align2::CENTER_CENTER, "S", egui::FontId::monospace((8.0 * transform.zoom).max(6.0)), dark);
+        };
 
         // Door width: 1 square for single, 2 for double
-        let dw = edge.connection.door_width() as i32;
-        let dw_half = dw as f32 / 2.0;
-
-        // For each end of the corridor, find the room it connects to
-        // and place the door on that room's wall.
-        let room_ids = [&edge.source_room_id, &edge.target_room_id];
-        let wp_ends = [
-            &corridor.waypoints[0],
-            corridor.waypoints.last().unwrap(),
-        ];
-
-        let exits = [edge.source_exit.as_ref(), edge.target_exit.as_ref()];
-
-        // For child-to-parent connections, only draw door on the child side
-        let src_is_child_of_tgt = graph.parent_of(&edge.source_room_id)
-            .map(|p| p == edge.target_room_id).unwrap_or(false);
-        let tgt_is_child_of_src = graph.parent_of(&edge.target_room_id)
-            .map(|p| p == edge.source_room_id).unwrap_or(false);
-
-        for (i, ((room_id, wp), exit)) in room_ids.iter().zip(wp_ends.iter()).zip(exits.iter()).enumerate() {
-            // Skip door on the parent side of child-to-parent connections
-            if i == 1 && src_is_child_of_tgt { continue; } // target is parent
-            if i == 0 && tgt_is_child_of_src { continue; } // source is parent
-
-            let Some(rl) = layout.room_by_id(room_id) else { continue };
-
-            let door_depth = 0.3_f32;
-            if rl.is_rotated() {
-                // Along the turned wall where the corridor attaches
-                let attach = crate::model::geometry::corridor_shape(corridor, layout, graph)
-                    .and_then(|sh| sh.ends.into_iter().flatten().find(|a| a.room_id == rl.room_id));
-                if let Some(a) = attach {
-                    let quad: Vec<egui::Pos2> = crate::model::geometry::door_quad(&a, dw_half * 2.0, door_depth).iter()
-                        .map(|&(x, y)| transform.world_to_screen(egui::pos2(x * GRID_PX, y * GRID_PX)))
-                        .collect();
-                    let center = transform.world_to_screen(egui::pos2(a.point.0 * GRID_PX, a.point.1 * GRID_PX));
-                    if edge.connection.connection_type == ConnectionType::Secret {
-                        painter.text(center, egui::Align2::CENTER_CENTER, "S", egui::FontId::monospace((8.0 * transform.zoom).max(6.0)), dark);
-                    } else {
-                        painter.add(egui::Shape::convex_polygon(quad.clone(), white, egui::Stroke::NONE));
-                        painter.add(egui::Shape::closed_line(quad, egui::Stroke::new(1.5_f32, dark)));
-                        if edge.connection.connection_type == ConnectionType::Locked {
-                            painter.circle_filled(center, 0.12 * GRID_PX * transform.zoom, dark);
-                        }
+        let Some(shape) = end.shape(graph, layout, edge.connection.door_width() as f32, 0.3) else { continue };
+        let (x0, y0, x1, y1) = match shape {
+            crate::model::geometry::DoorShape::Quad(quad, center) => {
+                // Along a rotated room's turned wall
+                let quad: Vec<egui::Pos2> = quad.into_iter().map(to_screen).collect();
+                let center = to_screen(center);
+                if kind == ConnectionType::Secret {
+                    secret(painter, center);
+                } else {
+                    painter.add(egui::Shape::convex_polygon(quad.clone(), white, egui::Stroke::NONE));
+                    painter.add(egui::Shape::closed_line(quad, egui::Stroke::new(1.5_f32, dark)));
+                    if kind == ConnectionType::Locked {
+                        painter.circle_filled(center, 0.12 * GRID_PX * transform.zoom, dark);
                     }
                 }
                 continue;
             }
-            let (door_x1, door_y1, door_x2, door_y2) =
-                crate::render::themed::door_rect(rl, wp, *exit, dw_half * 2.0, door_depth);
-
-            let screen_min = transform.world_to_screen(egui::pos2(
-                door_x1 * GRID_PX,
-                door_y1 * GRID_PX,
+            crate::model::geometry::DoorShape::Rect(x0, y0, x1, y1) => (x0, y0, x1, y1),
+        };
+        let door_rect = egui::Rect::from_min_max(to_screen((x0, y0)), to_screen((x1, y1)));
+        if kind == ConnectionType::Secret {
+            secret(painter, door_rect.center());
+            continue;
+        }
+        painter.rect_filled(door_rect, 0.0, white);
+        painter.rect_stroke(door_rect, 0.0, egui::Stroke::new(1.5_f32, dark), egui::StrokeKind::Middle);
+        if kind == ConnectionType::Locked {
+            // Small filled circle in center (lock indicator)
+            let dot_r = door_rect.width().min(door_rect.height()) * 0.2;
+            painter.circle_filled(door_rect.center(), dot_r, dark);
+        }
+        if kind == ConnectionType::OneWay {
+            // Small arrow in the center, pointing into the room
+            let (rl, wp) = (end.rl, end.wp);
+            let horizontal = door_rect.width() < door_rect.height();
+            let arrow_sz = door_rect.width().min(door_rect.height()) * 0.3;
+            let dir = if horizontal {
+                let toward_room = if (wp.x as f32) > (rl.x + rl.width as i32 / 2) as f32 { -1.0 } else { 1.0 };
+                egui::vec2(toward_room, 0.0)
+            } else {
+                let toward_room = if (wp.y as f32) > (rl.y + rl.height as i32 / 2) as f32 { -1.0 } else { 1.0 };
+                egui::vec2(0.0, toward_room)
+            };
+            let c = door_rect.center();
+            let tip = c + dir * arrow_sz;
+            let perp = egui::vec2(-dir.y, dir.x);
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    tip,
+                    c - dir * arrow_sz * 0.5 + perp * arrow_sz * 0.5,
+                    c - dir * arrow_sz * 0.5 - perp * arrow_sz * 0.5,
+                ],
+                dark,
+                egui::Stroke::NONE,
             ));
-            let screen_max = transform.world_to_screen(egui::pos2(
-                door_x2 * GRID_PX,
-                door_y2 * GRID_PX,
-            ));
-            let door_rect = egui::Rect::from_min_max(screen_min, screen_max);
-
-            match edge.connection.connection_type {
-                ConnectionType::Open | ConnectionType::Flush | ConnectionType::Merge => {} // already skipped above
-                ConnectionType::Door => {
-                    painter.rect_filled(door_rect, 0.0, white);
-                    painter.rect_stroke(door_rect, 0.0, egui::Stroke::new(1.5_f32, dark), egui::StrokeKind::Middle);
-                }
-                ConnectionType::Locked => {
-                    painter.rect_filled(door_rect, 0.0, white);
-                    painter.rect_stroke(door_rect, 0.0, egui::Stroke::new(1.5_f32, dark), egui::StrokeKind::Middle);
-                    // Small filled circle in center (lock indicator)
-                    let dot_r = door_rect.width().min(door_rect.height()) * 0.2;
-                    painter.circle_filled(door_rect.center(), dot_r, dark);
-                }
-                ConnectionType::Secret => {
-                    // No visible door — just an "S" near the wall
-                    painter.text(
-                        door_rect.center(),
-                        egui::Align2::CENTER_CENTER,
-                        "S",
-                        egui::FontId::monospace((8.0 * transform.zoom).max(6.0)),
-                        dark,
-                    );
-                }
-                ConnectionType::OneWay => {
-                    painter.rect_filled(door_rect, 0.0, white);
-                    painter.rect_stroke(door_rect, 0.0, egui::Stroke::new(1.5_f32, dark), egui::StrokeKind::Middle);
-                    // Small arrow in the center
-                    let horizontal = door_rect.width() < door_rect.height();
-                    let arrow_sz = door_rect.width().min(door_rect.height()) * 0.3;
-                    let dir = if horizontal {
-                        let toward_room = if (wp.x as f32) > (rl.x + rl.width as i32 / 2) as f32 { -1.0 } else { 1.0 };
-                        egui::vec2(toward_room, 0.0)
-                    } else {
-                        let toward_room = if (wp.y as f32) > (rl.y + rl.height as i32 / 2) as f32 { -1.0 } else { 1.0 };
-                        egui::vec2(0.0, toward_room)
-                    };
-                    let c = door_rect.center();
-                    let tip = c + dir * arrow_sz;
-                    let perp = egui::vec2(-dir.y, dir.x);
-                    painter.add(egui::Shape::convex_polygon(
-                        vec![
-                            tip,
-                            c - dir * arrow_sz * 0.5 + perp * arrow_sz * 0.5,
-                            c - dir * arrow_sz * 0.5 - perp * arrow_sz * 0.5,
-                        ],
-                        dark,
-                        egui::Stroke::NONE,
-                    ));
-                }
-            }
         }
     }
 }

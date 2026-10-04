@@ -201,60 +201,18 @@ fn draw_text_overlay(
     theme: &Theme,
     state: &StyledViewState,
 ) {
-    // Secret door "S" markers
+    // Secret door "S" markers, where the render would put the door
     if state.show_secrets {
-        for edge in &graph.connections {
-            if edge.connection.connection_type != ConnectionType::Secret {
+        let wc = theme.wall_color;
+        let color = egui::Color32::from_rgba_unmultiplied(wc[0], wc[1], wc[2], wc[3]);
+        for end in crate::model::geometry::door_ends(graph, layout) {
+            if end.edge.connection.connection_type != ConnectionType::Secret {
                 continue;
             }
-            let corridor = layout.corridor_for(&edge.connection.id);
-            let Some(corridor) = corridor else { continue };
-            if corridor.waypoints.len() < 2 { continue; }
-
-            let room_ids = [&edge.source_room_id, &edge.target_room_id];
-            let wp_ends = [&corridor.waypoints[0], corridor.waypoints.last().unwrap()];
-
-            for (room_id, wp) in room_ids.iter().zip(wp_ends.iter()) {
-                let Some(rl) = layout.room_by_id(room_id) else { continue };
-                let wp_cx = wp.x as f32;
-                let wp_cy = wp.y as f32;
-                let wc = theme.wall_color;
-                if rl.is_rotated() {
-                    // On the turned wall nearest the corridor's end
-                    let a = crate::model::geometry::attach_to_room(rl, graph, (wp_cx, wp_cy));
-                    let screen = transform.world_to_screen(egui::pos2(a.point.0 * GRID_PX, a.point.1 * GRID_PX));
-                    painter.text(screen, egui::Align2::CENTER_CENTER, "S", egui::FontId::monospace((6.0 * transform.zoom).max(4.0)),
-                        egui::Color32::from_rgba_unmultiplied(wc[0], wc[1], wc[2], wc[3]));
-                    continue;
-                }
-                let dist_right = (wp_cx - (rl.x + rl.width as i32) as f32).abs();
-                let dist_left = (wp_cx - rl.x as f32).abs();
-                let dist_bottom = (wp_cy - (rl.y + rl.height as i32) as f32).abs();
-                let dist_top = (wp_cy - rl.y as f32).abs();
-                let min_dist = dist_right.min(dist_left).min(dist_bottom).min(dist_top);
-
-                let (cx, cy) = if min_dist == dist_right {
-                    let wall_x = (rl.x + rl.width as i32) as f32;
-                    (wall_x, wp_cy)
-                } else if min_dist == dist_left {
-                    (rl.x as f32, wp_cy)
-                } else if min_dist == dist_bottom {
-                    let wall_y = (rl.y + rl.height as i32) as f32;
-                    (wp_cx, wall_y)
-                } else {
-                    (wp_cx, rl.y as f32)
-                };
-
-                let screen = transform.world_to_screen(egui::pos2(cx * GRID_PX, cy * GRID_PX));
-                let wc = theme.wall_color;
-                painter.text(
-                    screen,
-                    egui::Align2::CENTER_CENTER,
-                    "S",
-                    egui::FontId::monospace((6.0 * transform.zoom).max(4.0)),
-                    egui::Color32::from_rgba_unmultiplied(wc[0], wc[1], wc[2], wc[3]),
-                );
-            }
+            let Some(shape) = end.shape(graph, layout, end.edge.connection.door_width() as f32, 0.3) else { continue };
+            let (cx, cy) = shape.center();
+            let screen = transform.world_to_screen(egui::pos2(cx * GRID_PX, cy * GRID_PX));
+            painter.text(screen, egui::Align2::CENTER_CENTER, "S", egui::FontId::monospace((6.0 * transform.zoom).max(4.0)), color);
         }
     }
 

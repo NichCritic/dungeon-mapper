@@ -1216,105 +1216,47 @@ pub fn render_elevation_sections(
     }
 }
 
-/// Compute door rectangle in grid coordinates given an exit position or waypoint fallback.
-/// Returns (x1, y1, x2, y2) in grid coords for the door rectangle.
-pub fn door_rect(
-    rl: &RoomLayout,
-    wp: &GridPos,
-    exit: Option<&ExitPos>,
-    dw: f32,
-    door_depth: f32,
-) -> (f32, f32, f32, f32) {
-    let dw_half = dw / 2.0;
-
-    if let Some(exit) = exit {
-        // Use stored exit to determine face and position
-        let rw = rl.width as f32;
-        let rh = rl.height as f32;
-        let rx = rl.x as f32;
-        let ry = rl.y as f32;
-        let ex = exit.x;
-        let ey = exit.y;
-        let eps = 0.01;
-        if (ex - (rx + rw)).abs() < eps {
-            // Right wall
-            let wall_x = rx + rw;
-            (wall_x - door_depth / 2.0, ey - dw_half, wall_x + door_depth / 2.0, ey + dw_half)
-        } else if (ex - rx).abs() < eps {
-            // Left wall
-            (rx - door_depth / 2.0, ey - dw_half, rx + door_depth / 2.0, ey + dw_half)
-        } else if (ey - (ry + rh)).abs() < eps {
-            // Bottom wall
-            let wall_y = ry + rh;
-            (ex - dw_half, wall_y - door_depth / 2.0, ex + dw_half, wall_y + door_depth / 2.0)
-        } else {
-            // Top wall
-            (ex - dw_half, ry - door_depth / 2.0, ex + dw_half, ry + door_depth / 2.0)
-        }
-    } else {
-        // Fallback: nearest-wall heuristic from waypoint
-        let wp_cx = wp.x as f32;
-        let wp_cy = wp.y as f32;
-        let dist_right = (wp_cx - (rl.x + rl.width as i32) as f32).abs();
-        let dist_left = (wp_cx - rl.x as f32).abs();
-        let dist_bottom = (wp_cy - (rl.y + rl.height as i32) as f32).abs();
-        let dist_top = (wp_cy - rl.y as f32).abs();
-        let min_dist = dist_right.min(dist_left).min(dist_bottom).min(dist_top);
-
-        if min_dist == dist_right {
-            let wall_x = (rl.x + rl.width as i32) as f32;
-            (wall_x - door_depth / 2.0, wp_cy - dw_half, wall_x + door_depth / 2.0, wp_cy + dw_half)
-        } else if min_dist == dist_left {
-            let wall_x = rl.x as f32;
-            (wall_x - door_depth / 2.0, wp_cy - dw_half, wall_x + door_depth / 2.0, wp_cy + dw_half)
-        } else if min_dist == dist_bottom {
-            let wall_y = (rl.y + rl.height as i32) as f32;
-            (wp_cx - dw_half, wall_y - door_depth / 2.0, wp_cx + dw_half, wall_y + door_depth / 2.0)
-        } else {
-            let wall_y = rl.y as f32;
-            (wp_cx - dw_half, wall_y - door_depth / 2.0, wp_cx + dw_half, wall_y + door_depth / 2.0)
-        }
-    }
-}
-
 /// Render door symbols on corridors.
-/// A door on a rotated room, drawn along its turned wall where the corridor attaches.
-pub fn render_rotated_door(
-    renderer: &mut dyn MapRenderer,
-    corridor: &CorridorSegment,
-    rl: &RoomLayout,
-    graph: &DungeonGraph,
-    layout: &SpatialLayout,
-    theme: &Theme,
-    kind: ConnectionType,
-    dw: f32,
-    door_depth: f32,
-) {
-    let Some(shape) = geometry::corridor_shape(corridor, layout, graph) else { return };
-    let Some(attach) = shape.ends.iter().flatten().find(|a| a.room_id == rl.room_id) else { return };
-    let quad = geometry::door_quad(attach, dw, door_depth);
-    let px: Vec<(f32, f32)> = quad.iter().map(|&(x, y)| (x * GRID_PX, y * GRID_PX)).collect();
-    let (cx, cy) = (attach.point.0 * GRID_PX, attach.point.1 * GRID_PX);
-    let outline = |renderer: &mut dyn MapRenderer| {
-        for i in 0..4 {
-            let (a, b) = (px[i], px[(i + 1) % 4]);
-            renderer.draw_line(a.0, a.1, b.0, b.1, 1.0, theme.wall_color);
+/// Draw a door of `kind` with outline `shape` (grid units).
+fn draw_door(renderer: &mut dyn MapRenderer, shape: &geometry::DoorShape, kind: ConnectionType, theme: &Theme) {
+    let g = GRID_PX;
+    let (cx, cy) = { let c = shape.center(); (c.0 * g, c.1 * g) };
+    let white = [255, 255, 255, 255];
+    match *shape {
+        geometry::DoorShape::Rect(x0, y0, x1, y1) => {
+            let (px, py, pw, ph) = (x0 * g, y0 * g, (x1 - x0) * g, (y1 - y0) * g);
+            match kind {
+                ConnectionType::Open | ConnectionType::Flush | ConnectionType::Merge => {}
+                ConnectionType::Door | ConnectionType::OneWay | ConnectionType::Locked => {
+                    renderer.fill_rect(px, py, pw, ph, white);
+                    renderer.stroke_rect(px, py, pw, ph, 1.0, theme.wall_color);
+                    if kind == ConnectionType::Locked {
+                        let r = pw.min(ph) * 0.15;
+                        renderer.fill_rect(cx - r, cy - r, r * 2.0, r * 2.0, theme.wall_color);
+                    }
+                }
+                ConnectionType::Secret => renderer.draw_text("S", cx, cy, 6.0, theme.wall_color),
+            }
         }
-    };
-    match kind {
-        ConnectionType::Open | ConnectionType::Flush | ConnectionType::Merge => {}
-        ConnectionType::Door | ConnectionType::OneWay => {
-            renderer.fill_polygon(&px, [255, 255, 255, 255]);
-            outline(renderer);
-        }
-        ConnectionType::Locked => {
-            renderer.fill_polygon(&px, [255, 255, 255, 255]);
-            outline(renderer);
-            let r = dw.min(door_depth) * GRID_PX * 0.15;
-            renderer.fill_rect(cx - r, cy - r, r * 2.0, r * 2.0, theme.wall_color);
-        }
-        ConnectionType::Secret => {
-            renderer.draw_text("S", cx, cy, 6.0, theme.wall_color);
+        geometry::DoorShape::Quad(quad, _) => {
+            let px: Vec<(f32, f32)> = quad.iter().map(|&(x, y)| (x * g, y * g)).collect();
+            match kind {
+                ConnectionType::Open | ConnectionType::Flush | ConnectionType::Merge => {}
+                ConnectionType::Door | ConnectionType::OneWay | ConnectionType::Locked => {
+                    renderer.fill_polygon(&px, white);
+                    for i in 0..4 {
+                        let (a, b) = (px[i], px[(i + 1) % 4]);
+                        renderer.draw_line(a.0, a.1, b.0, b.1, 1.0, theme.wall_color);
+                    }
+                    if kind == ConnectionType::Locked {
+                        // The quad's short side is the door's depth across the wall
+                        let side = |i: usize| ((px[i].0 - px[i + 1].0).powi(2) + (px[i].1 - px[i + 1].1).powi(2)).sqrt();
+                        let r = side(0).min(side(1)) * 0.15;
+                        renderer.fill_rect(cx - r, cy - r, r * 2.0, r * 2.0, theme.wall_color);
+                    }
+                }
+                ConnectionType::Secret => renderer.draw_text("S", cx, cy, 6.0, theme.wall_color),
+            }
         }
     }
 }
@@ -1328,79 +1270,25 @@ pub fn render_doors(
     audience: &Audience,
 ) {
     let players = matches!(audience, Audience::Players { .. });
-    for edge in &graph.connections {
-        // Players never see secret doors
-        if (players || !options.show_secrets) && edge.connection.connection_type == ConnectionType::Secret {
+    for end in geometry::door_ends(graph, layout) {
+        let kind = end.edge.connection.connection_type;
+        // Players never see secret doors; passages have no door
+        if kind.is_passage() || ((players || !options.show_secrets) && kind == ConnectionType::Secret) {
             continue;
         }
-        if edge.connection.connection_type.is_passage() {
+        // Skip drawing door on cave room walls — caves have irregular boundaries
+        if graph.room_by_id(&end.rl.room_id).is_some_and(|r| r.shape == RoomShape::Cave) {
             continue;
         }
-        let corridor = layout.corridor_for(&edge.connection.id);
-        let Some(corridor) = corridor else { continue };
-        if corridor.waypoints.len() < 2 { continue; }
-
-        let dw = edge.connection.door_width() as f32;
-        let door_depth = 0.3;
-
-        let room_ids = [&edge.source_room_id, &edge.target_room_id];
-        let wp_ends = [&corridor.waypoints[0], corridor.waypoints.last().unwrap()];
-
-        let exits = [edge.source_exit.as_ref(), edge.target_exit.as_ref()];
-
-        // For child-to-parent connections, only draw door on the child side
-        let src_is_child_of_tgt = graph.parent_of(&edge.source_room_id)
-            .map(|p| p == edge.target_room_id).unwrap_or(false);
-        let tgt_is_child_of_src = graph.parent_of(&edge.target_room_id)
-            .map(|p| p == edge.source_room_id).unwrap_or(false);
-
-        for (i, ((room_id, wp), exit)) in room_ids.iter().zip(wp_ends.iter()).zip(exits.iter()).enumerate() {
-            // Skip door on the parent side of child-to-parent connections
-            if i == 1 && src_is_child_of_tgt { continue; }
-            if i == 0 && tgt_is_child_of_src { continue; }
-            // Skip drawing door on cave room walls — caves have irregular boundaries
-            let is_cave = graph.room_by_id(room_id)
-                .is_some_and(|r| r.shape == RoomShape::Cave);
-            if is_cave { continue; }
-            // Players see a door from either side they know: its room or its corridor
-            if audience.room(room_id) == Visibility::Hidden
-                && audience.corridor(&edge.connection.id, graph) == Visibility::Hidden
-            {
-                continue;
-            }
-            let Some(rl) = layout.room_by_id(room_id) else { continue };
-
-            if rl.is_rotated() {
-                render_rotated_door(renderer, corridor, rl, graph, layout, theme, edge.connection.connection_type, dw, door_depth);
-                continue;
-            }
-            let (dx1, dy1, dx2, dy2) = door_rect(rl, wp, *exit, dw, door_depth);
-
-            let px = dx1 * GRID_PX;
-            let py = dy1 * GRID_PX;
-            let pw = (dx2 - dx1) * GRID_PX;
-            let ph = (dy2 - dy1) * GRID_PX;
-
-            match edge.connection.connection_type {
-                ConnectionType::Open | ConnectionType::Flush | ConnectionType::Merge => {}
-                ConnectionType::Door | ConnectionType::OneWay => {
-                    renderer.fill_rect(px, py, pw, ph, [255, 255, 255, 255]);
-                    renderer.stroke_rect(px, py, pw, ph, 1.0, theme.wall_color);
-                }
-                ConnectionType::Locked => {
-                    renderer.fill_rect(px, py, pw, ph, [255, 255, 255, 255]);
-                    renderer.stroke_rect(px, py, pw, ph, 1.0, theme.wall_color);
-                    let cx = px + pw / 2.0;
-                    let cy = py + ph / 2.0;
-                    let r = pw.min(ph) * 0.15;
-                    renderer.fill_rect(cx - r, cy - r, r * 2.0, r * 2.0, theme.wall_color);
-                }
-                ConnectionType::Secret => {
-                    let cx = px + pw / 2.0;
-                    let cy = py + ph / 2.0;
-                    renderer.draw_text("S", cx, cy, 6.0, theme.wall_color);
-                }
-            }
+        // Players see a door from either side they know: its room or its corridor
+        if audience.room(&end.rl.room_id) == Visibility::Hidden
+            && audience.corridor(&end.edge.connection.id, graph) == Visibility::Hidden
+        {
+            continue;
+        }
+        let width = end.edge.connection.door_width() as f32;
+        if let Some(shape) = end.shape(graph, layout, width, 0.3) {
+            draw_door(renderer, &shape, kind, theme);
         }
     }
 }

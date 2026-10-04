@@ -363,6 +363,129 @@ pub fn swept_cells(a: GridPos, b: GridPos, w: i32, border: i32) -> Vec<(i32, i32
     cells.into_iter().collect()
 }
 
+/// Compute door rectangle in grid coordinates given an exit position or waypoint fallback.
+/// Returns (x1, y1, x2, y2) in grid coords for the door rectangle.
+pub fn door_rect(
+    rl: &RoomLayout,
+    wp: &GridPos,
+    exit: Option<&super::ExitPos>,
+    dw: f32,
+    door_depth: f32,
+) -> (f32, f32, f32, f32) {
+    let dw_half = dw / 2.0;
+
+    if let Some(exit) = exit {
+        // Use stored exit to determine face and position
+        let rw = rl.width as f32;
+        let rh = rl.height as f32;
+        let rx = rl.x as f32;
+        let ry = rl.y as f32;
+        let ex = exit.x;
+        let ey = exit.y;
+        let eps = 0.01;
+        if (ex - (rx + rw)).abs() < eps {
+            // Right wall
+            let wall_x = rx + rw;
+            (wall_x - door_depth / 2.0, ey - dw_half, wall_x + door_depth / 2.0, ey + dw_half)
+        } else if (ex - rx).abs() < eps {
+            // Left wall
+            (rx - door_depth / 2.0, ey - dw_half, rx + door_depth / 2.0, ey + dw_half)
+        } else if (ey - (ry + rh)).abs() < eps {
+            // Bottom wall
+            let wall_y = ry + rh;
+            (ex - dw_half, wall_y - door_depth / 2.0, ex + dw_half, wall_y + door_depth / 2.0)
+        } else {
+            // Top wall
+            (ex - dw_half, ry - door_depth / 2.0, ex + dw_half, ry + door_depth / 2.0)
+        }
+    } else {
+        // Fallback: nearest-wall heuristic from waypoint
+        let wp_cx = wp.x as f32;
+        let wp_cy = wp.y as f32;
+        let dist_right = (wp_cx - (rl.x + rl.width as i32) as f32).abs();
+        let dist_left = (wp_cx - rl.x as f32).abs();
+        let dist_bottom = (wp_cy - (rl.y + rl.height as i32) as f32).abs();
+        let dist_top = (wp_cy - rl.y as f32).abs();
+        let min_dist = dist_right.min(dist_left).min(dist_bottom).min(dist_top);
+
+        if min_dist == dist_right {
+            let wall_x = (rl.x + rl.width as i32) as f32;
+            (wall_x - door_depth / 2.0, wp_cy - dw_half, wall_x + door_depth / 2.0, wp_cy + dw_half)
+        } else if min_dist == dist_left {
+            let wall_x = rl.x as f32;
+            (wall_x - door_depth / 2.0, wp_cy - dw_half, wall_x + door_depth / 2.0, wp_cy + dw_half)
+        } else if min_dist == dist_bottom {
+            let wall_y = (rl.y + rl.height as i32) as f32;
+            (wp_cx - dw_half, wall_y - door_depth / 2.0, wp_cx + dw_half, wall_y + door_depth / 2.0)
+        } else {
+            let wall_y = rl.y as f32;
+            (wp_cx - dw_half, wall_y - door_depth / 2.0, wp_cx + dw_half, wall_y + door_depth / 2.0)
+        }
+    }
+}
+
+/// One end of a connection's corridor, where its door sits on a room's wall.
+pub struct DoorEnd<'a> {
+    pub edge: &'a super::StoredEdge,
+    pub corridor: &'a CorridorSegment,
+    pub rl: &'a RoomLayout,
+    /// The corridor's waypoint at this end.
+    pub wp: GridPos,
+    /// The user-placed exit at this end, if any.
+    pub exit: Option<&'a super::ExitPos>,
+}
+
+/// A door's outline: a grid rectangle (x0, y0, x1, y1) on an unrotated room, or a
+/// quad along a rotated room's turned wall with its center.
+pub enum DoorShape {
+    Rect(f32, f32, f32, f32),
+    Quad([Pt; 4], Pt),
+}
+
+impl DoorShape {
+    pub fn center(&self) -> Pt {
+        match *self {
+            DoorShape::Rect(x0, y0, x1, y1) => ((x0 + x1) / 2.0, (y0 + y1) / 2.0),
+            DoorShape::Quad(_, c) => c,
+        }
+    }
+}
+
+impl DoorEnd<'_> {
+    /// The door's outline here, `width` along the wall and `depth` across it.
+    pub fn shape(&self, graph: &DungeonGraph, layout: &SpatialLayout, width: f32, depth: f32) -> Option<DoorShape> {
+        if self.rl.is_rotated() {
+            let shape = corridor_shape(self.corridor, layout, graph)?;
+            let attach = shape.ends.iter().flatten().find(|a| a.room_id == self.rl.room_id)?;
+            return Some(DoorShape::Quad(door_quad(attach, width, depth), attach.point));
+        }
+        let (x0, y0, x1, y1) = door_rect(self.rl, &self.wp, self.exit, width, depth);
+        Some(DoorShape::Rect(x0, y0, x1, y1))
+    }
+}
+
+/// Both ends of every connection with a routed corridor, in connection order. The
+/// parent's end of a child-to-parent connection is left out: that corridor ends
+/// inside the parent, not at its wall.
+pub fn door_ends<'a>(graph: &'a DungeonGraph, layout: &'a SpatialLayout) -> impl Iterator<Item = DoorEnd<'a>> + 'a {
+    graph.connections.iter().flat_map(move |edge| {
+        let corridor = layout.corridor_for(&edge.connection.id).filter(|c| c.waypoints.len() >= 2);
+        let src_is_child = graph.parent_of(&edge.source_room_id).is_some_and(|p| p == edge.target_room_id);
+        let tgt_is_child = graph.parent_of(&edge.target_room_id).is_some_and(|p| p == edge.source_room_id);
+        corridor.into_iter().flat_map(move |c| {
+            let ends = [
+                (&edge.source_room_id, c.waypoints[0], edge.source_exit.as_ref(), tgt_is_child),
+                (&edge.target_room_id, c.waypoints[c.waypoints.len() - 1], edge.target_exit.as_ref(), src_is_child),
+            ];
+            ends.into_iter()
+                .filter(|&(_, _, _, parent_side)| !parent_side)
+                .filter_map(move |(room_id, wp, exit, _)| {
+                    layout.room_by_id(room_id).map(|rl| DoorEnd { edge, corridor: c, rl, wp, exit })
+                })
+        })
+    })
+}
+
 /// Grid cells whose centers lie inside a polygon.
 pub fn polygon_cells(poly: &[Pt]) -> Vec<(i32, i32)> {
     let (x0, y0, x1, y1) = bounds(poly);

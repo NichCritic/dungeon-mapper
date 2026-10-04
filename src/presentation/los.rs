@@ -19,7 +19,7 @@ use crate::model::{
 };
 use crate::presentation::tokens::TokenInfo;
 use crate::presentation::VisibilityProvider;
-use crate::render::themed::{build_floor_set, door_rect, flush_walls_with_layout};
+use crate::render::themed::{build_floor_set, flush_walls_with_layout};
 use crate::util::{DECOR_HALF_SIZE, GRID_PX};
 
 pub type Pt = (f32, f32);
@@ -253,32 +253,18 @@ pub fn build_static_occluders(
         crate::render::overlap::is_open_passage(e) || presentation.is_door_open(&e.connection.id)
     };
 
-    // Door apertures: (room_id, span rect) for every open doorway.
+    // Door apertures: (room_id, span rect) for every open doorway. A rotated room's
+    // wall opens by clipping against the corridor instead (below).
     let mut apertures: Vec<(String, (f32, f32, f32, f32))> = Vec::new();
-    for edge in &graph.connections {
-        let ct = edge.connection.connection_type;
-        let open = ct.is_passage()
-            || presentation.is_door_open(&edge.connection.id);
-        if !open {
-            continue;
-        }
-        let Some(corridor) = layout.corridor_for(&edge.connection.id) else { continue };
-        if corridor.waypoints.len() < 2 {
+    for end in crate::model::geometry::door_ends(graph, layout) {
+        let ct = end.edge.connection.connection_type;
+        if !(ct.is_passage() || presentation.is_door_open(&end.edge.connection.id)) {
             continue;
         }
         // Open passages are as wide as the corridor; doors as wide as the door.
-        let dw = if ct.is_passage() {
-            corridor.width as f32
-        } else {
-            edge.connection.door_width() as f32
-        };
-        let ends = [
-            (&edge.source_room_id, &corridor.waypoints[0], edge.source_exit.as_ref()),
-            (&edge.target_room_id, corridor.waypoints.last().unwrap(), edge.target_exit.as_ref()),
-        ];
-        for (room_id, wp, exit) in ends {
-            let Some(rl) = layout.room_by_id(room_id) else { continue };
-            apertures.push((room_id.clone(), door_rect(rl, wp, exit, dw, 0.3)));
+        let dw = if ct.is_passage() { end.corridor.width as f32 } else { end.edge.connection.door_width() as f32 };
+        if let Some(crate::model::geometry::DoorShape::Rect(x0, y0, x1, y1)) = end.shape(graph, layout, dw, 0.3) {
+            apertures.push((end.rl.room_id.clone(), (x0, y0, x1, y1)));
         }
     }
 
