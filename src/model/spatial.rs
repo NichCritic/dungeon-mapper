@@ -189,6 +189,23 @@ impl SpatialLayout {
         self.rooms.iter().find(|r| r.room_id == room_id)
     }
 
+    /// The rooms on `floor`, and the corridors touching one of them.
+    pub fn filtered_to_floor(&self, graph: &DungeonGraph, floor: i32) -> SpatialLayout {
+        let on: std::collections::HashSet<&str> = graph.rooms.iter()
+            .filter(|r| r.floor.visible_on(floor))
+            .map(|r| r.id.as_str())
+            .collect();
+        SpatialLayout {
+            rooms: self.rooms.iter().filter(|rl| on.contains(rl.room_id.as_str())).cloned().collect(),
+            corridors: self.corridors.iter()
+                .filter(|c| graph.connection_by_id(&c.connection_id)
+                    .is_some_and(|e| on.contains(e.source_room_id.as_str()) || on.contains(e.target_room_id.as_str())))
+                .cloned()
+                .collect(),
+            bounds: self.bounds.clone(),
+        }
+    }
+
     /// The routed corridor of a connection.
     pub fn corridor_for(&self, connection_id: &str) -> Option<&CorridorSegment> {
         self.corridors.iter().find(|c| c.connection_id == connection_id)

@@ -138,11 +138,17 @@ fn dim_color(c: egui::Color32, factor: f32) -> egui::Color32 {
 }
 
 /// Check if a room is on a lower floor than the current floor.
-fn is_lower_floor(room: &crate::model::Room, current_floor: i32) -> bool {
-    room.floor.floors().iter().all(|f| *f < current_floor)
-}
-
 const LOWER_FLOOR_DIM: f32 = 0.35;
+
+/// How brightly to draw something at `rel` to the viewed floor: in full, dimmed
+/// (below), or not at all (above).
+fn floor_dim(rel: FloorRel) -> Option<f32> {
+    match rel {
+        FloorRel::On => Some(1.0),
+        FloorRel::Below => Some(LOWER_FLOOR_DIM),
+        FloorRel::Above => None,
+    }
+}
 
 const HANDLE_RADIUS: f32 = 5.0;
 /// Hit radius in screen pixels (fixed, does not scale with zoom).
@@ -496,15 +502,9 @@ fn handle_spatial_interactions(
                 let mut hit_corridor = None;
                 for (ci, corridor) in layout.corridors.iter().enumerate() {
                     // Floor filtering: skip corridors not on the current floor
-                    if let Some(floor) = state.current_floor {
-                        if let Some(edge) = dungeon.graph.connection_by_id(&corridor.connection_id) {
-                            let src_visible = dungeon.graph.room_by_id(&edge.source_room_id)
-                                .is_some_and(|r| r.floor.visible_on(floor));
-                            let tgt_visible = dungeon.graph.room_by_id(&edge.target_room_id)
-                                .is_some_and(|r| r.floor.visible_on(floor));
-                            if !src_visible && !tgt_visible {
-                                continue;
-                            }
+                    if let (Some(floor), Some(edge)) = (state.current_floor, dungeon.graph.connection_by_id(&corridor.connection_id)) {
+                        if dungeon.graph.edge_floor_relation(edge, floor) != FloorRel::On {
+                            continue;
                         }
                     }
                     for pair in corridor.waypoints.windows(2) {
@@ -1474,31 +1474,12 @@ fn draw_corridors(
     let shapes = crate::model::geometry::corridor_shapes(layout, graph);
     for (ci, corridor) in layout.corridors.iter().enumerate() {
         // Floor filtering: dim corridors to lower floors, hide higher
-        let dim = if let Some(floor) = state.current_floor {
-            if let Some(edge) = graph.connection_by_id(&corridor.connection_id) {
-                let src_visible = graph.room_by_id(&edge.source_room_id)
-                    .is_some_and(|r| r.floor.visible_on(floor));
-                let tgt_visible = graph.room_by_id(&edge.target_room_id)
-                    .is_some_and(|r| r.floor.visible_on(floor));
-                if src_visible || tgt_visible {
-                    1.0
-                } else {
-                    // Both rooms not on current floor — check if lower
-                    let src_lower = graph.room_by_id(&edge.source_room_id)
-                        .is_some_and(|r| is_lower_floor(r, floor));
-                    let tgt_lower = graph.room_by_id(&edge.target_room_id)
-                        .is_some_and(|r| is_lower_floor(r, floor));
-                    if src_lower || tgt_lower {
-                        LOWER_FLOOR_DIM
-                    } else {
-                        continue; // higher floor - hide
-                    }
-                }
-            } else {
-                1.0
-            }
-        } else {
-            1.0
+        let dim = match (state.current_floor, graph.connection_by_id(&corridor.connection_id)) {
+            (Some(floor), Some(edge)) => match floor_dim(graph.edge_floor_relation(edge, floor)) {
+                Some(dim) => dim,
+                None => continue,
+            },
+            _ => 1.0,
         };
         let is_selected = state.selected_corridor == Some(ci);
         let mut color = if corridor.invalid {
@@ -1765,20 +1746,12 @@ fn draw_rooms(
     for ri in room_order {
         let rl = &layout.rooms[ri];
         // Floor filtering: dim lower floors, hide higher floors
-        let dim = if let Some(floor) = state.current_floor {
-            if let Some(room) = graph.room_by_id(&rl.room_id) {
-                if room.floor.visible_on(floor) {
-                    1.0
-                } else if is_lower_floor(room, floor) {
-                    LOWER_FLOOR_DIM
-                } else {
-                    continue; // higher floor - hide
-                }
-            } else {
-                1.0
-            }
-        } else {
-            1.0
+        let dim = match (state.current_floor, graph.room_by_id(&rl.room_id)) {
+            (Some(floor), Some(room)) => match floor_dim(room.floor.relation(floor)) {
+                Some(dim) => dim,
+                None => continue,
+            },
+            _ => 1.0,
         };
 
         let min = transform.world_to_screen(egui::pos2(grid_to_world(rl.x), grid_to_world(rl.y)));
@@ -2101,26 +2074,12 @@ fn draw_doors(
 ) {
     for edge in &graph.connections {
         // Floor filtering: dim doors to lower floors, hide higher
-        let dim = if let Some(floor) = state.current_floor {
-            let src_visible = graph.room_by_id(&edge.source_room_id)
-                .is_some_and(|r| r.floor.visible_on(floor));
-            let tgt_visible = graph.room_by_id(&edge.target_room_id)
-                .is_some_and(|r| r.floor.visible_on(floor));
-            if src_visible || tgt_visible {
-                1.0
-            } else {
-                let src_lower = graph.room_by_id(&edge.source_room_id)
-                    .is_some_and(|r| is_lower_floor(r, floor));
-                let tgt_lower = graph.room_by_id(&edge.target_room_id)
-                    .is_some_and(|r| is_lower_floor(r, floor));
-                if src_lower || tgt_lower {
-                    LOWER_FLOOR_DIM
-                } else {
-                    continue;
-                }
-            }
-        } else {
-            1.0
+        let dim = match state.current_floor {
+            Some(floor) => match floor_dim(graph.edge_floor_relation(edge, floor)) {
+                Some(dim) => dim,
+                None => continue,
+            },
+            None => 1.0,
         };
         let white = if dim < 1.0 { dim_color(egui::Color32::WHITE, dim) } else { egui::Color32::WHITE };
         let dark = if dim < 1.0 { dim_color(egui::Color32::from_rgb(30, 30, 30), dim) } else { egui::Color32::from_rgb(30, 30, 30) };

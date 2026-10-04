@@ -137,32 +137,12 @@ pub fn decor_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut DecorVie
 
     // Build floor-filtered layout
     let filtered_layout;
-    let render_layout = if let Some(floor) = state.current_floor {
-        let visible_room_ids: std::collections::HashSet<&str> = dungeon.graph.rooms.iter()
-            .filter(|r| r.floor.visible_on(floor))
-            .map(|r| r.id.as_str())
-            .collect();
-        filtered_layout = SpatialLayout {
-            rooms: layout.rooms.iter()
-                .filter(|rl| visible_room_ids.contains(rl.room_id.as_str()))
-                .cloned()
-                .collect(),
-            corridors: layout.corridors.iter()
-                .filter(|c| {
-                    dungeon.graph.connections.iter()
-                        .find(|e| e.connection.id == c.connection_id)
-                        .is_some_and(|e| {
-                            visible_room_ids.contains(e.source_room_id.as_str())
-                                || visible_room_ids.contains(e.target_room_id.as_str())
-                        })
-                })
-                .cloned()
-                .collect(),
-            bounds: layout.bounds.clone(),
-        };
-        &filtered_layout
-    } else {
-        layout
+    let render_layout = match state.current_floor {
+        Some(floor) => {
+            filtered_layout = layout.filtered_to_floor(&dungeon.graph, floor);
+            &filtered_layout
+        }
+        None => layout,
     };
 
     // Rebuild cached render commands if inputs changed

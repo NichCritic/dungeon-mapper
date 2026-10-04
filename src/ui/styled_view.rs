@@ -1,6 +1,5 @@
 use std::hash::{Hash, Hasher};
 
-use std::collections::HashSet;
 
 use crate::model::*;
 use crate::render::themed::RenderOptions;
@@ -71,32 +70,12 @@ pub fn styled_view(ui: &mut egui::Ui, dungeon: &Dungeon, state: &mut StyledViewS
     if let Some(layout) = &dungeon.layout {
         // Build floor-filtered layout if a floor is selected
         let filtered_layout;
-        let render_layout = if let Some(floor) = state.current_floor {
-            let visible_room_ids: HashSet<&str> = dungeon.graph.rooms.iter()
-                .filter(|r| r.floor.visible_on(floor))
-                .map(|r| r.id.as_str())
-                .collect();
-            filtered_layout = SpatialLayout {
-                rooms: layout.rooms.iter()
-                    .filter(|rl| visible_room_ids.contains(rl.room_id.as_str()))
-                    .cloned()
-                    .collect(),
-                corridors: layout.corridors.iter()
-                    .filter(|c| {
-                        dungeon.graph.connections.iter()
-                            .find(|e| e.connection.id == c.connection_id)
-                            .is_some_and(|e| {
-                                visible_room_ids.contains(e.source_room_id.as_str())
-                                    || visible_room_ids.contains(e.target_room_id.as_str())
-                            })
-                    })
-                    .cloned()
-                    .collect(),
-                bounds: layout.bounds.clone(),
-            };
-            &filtered_layout
-        } else {
-            layout
+        let render_layout = match state.current_floor {
+            Some(floor) => {
+                filtered_layout = layout.filtered_to_floor(&dungeon.graph, floor);
+                &filtered_layout
+            }
+            None => layout,
         };
 
         // Rebuild cached render commands if inputs changed
@@ -137,7 +116,7 @@ pub fn styled_view(ui: &mut egui::Ui, dungeon: &Dungeon, state: &mut StyledViewS
             // Lower-floor rooms
             for rl in &layout.rooms {
                 if let Some(room) = dungeon.graph.room_by_id(&rl.room_id) {
-                    if !room.floor.visible_on(floor) && room.floor.floors().iter().all(|f| *f < floor) {
+                    if room.floor.relation(floor) == FloorRel::Below {
                         let min = transform.world_to_screen(egui::pos2(
                             rl.x as f32 * GRID_PX,
                             rl.y as f32 * GRID_PX,
@@ -179,16 +158,7 @@ pub fn styled_view(ui: &mut egui::Ui, dungeon: &Dungeon, state: &mut StyledViewS
             // Lower-floor corridors
             for corridor in &layout.corridors {
                 if let Some(edge) = dungeon.graph.connection_by_id(&corridor.connection_id) {
-                    let src_on = dungeon.graph.room_by_id(&edge.source_room_id)
-                        .is_some_and(|r| r.floor.visible_on(floor));
-                    let tgt_on = dungeon.graph.room_by_id(&edge.target_room_id)
-                        .is_some_and(|r| r.floor.visible_on(floor));
-                    if src_on || tgt_on { continue; }
-                    let src_lower = dungeon.graph.room_by_id(&edge.source_room_id)
-                        .is_some_and(|r| r.floor.floors().iter().all(|f| *f < floor));
-                    let tgt_lower = dungeon.graph.room_by_id(&edge.target_room_id)
-                        .is_some_and(|r| r.floor.floors().iter().all(|f| *f < floor));
-                    if !src_lower && !tgt_lower { continue; }
+                    if dungeon.graph.edge_floor_relation(edge, floor) != FloorRel::Below { continue; }
 
                     for (min_x, min_y, max_x, max_y) in corridor.run_boxes() {
                         let smin = transform.world_to_screen(egui::pos2(

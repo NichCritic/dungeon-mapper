@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use petgraph::graph::UnGraph;
 use serde::{Deserialize, Serialize};
 
-use super::{Connection, Room};
+use super::{Connection, FloorRel, Room};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DungeonGraph {
@@ -159,6 +159,20 @@ impl DungeonGraph {
 
     pub fn room_by_id_mut(&mut self, id: &str) -> Option<&mut Room> {
         self.rooms.iter_mut().find(|r| r.id == id)
+    }
+
+    /// A connection's place relative to the viewed floor: on it if either room is,
+    /// else below if either room is lower, else above. Missing rooms count as neither.
+    pub fn edge_floor_relation(&self, edge: &StoredEdge, floor: i32) -> FloorRel {
+        let rel = |id: &str| self.room_by_id(id).map(|r| r.floor.relation(floor));
+        let (a, b) = (rel(&edge.source_room_id), rel(&edge.target_room_id));
+        if a == Some(FloorRel::On) || b == Some(FloorRel::On) {
+            FloorRel::On
+        } else if a == Some(FloorRel::Below) || b == Some(FloorRel::Below) {
+            FloorRel::Below
+        } else {
+            FloorRel::Above
+        }
     }
 
     pub fn connection_by_id(&self, id: &str) -> Option<&StoredEdge> {
@@ -337,6 +351,29 @@ impl Default for DungeonGraph {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn floor_relations_of_rooms_and_connections() {
+        use crate::model::{ConnectionType, FloorAssignment};
+        assert_eq!(FloorAssignment::Single(1).relation(1), FloorRel::On);
+        assert_eq!(FloorAssignment::Single(0).relation(1), FloorRel::Below);
+        assert_eq!(FloorAssignment::Single(2).relation(1), FloorRel::Above);
+        assert_eq!(FloorAssignment::Half(1, 2).relation(2), FloorRel::On);
+
+        let mut g = DungeonGraph::new();
+        let (mut a, mut b) = (Room::new("A".into()), Room::new("B".into()));
+        a.floor = FloorAssignment::Single(0);
+        b.floor = FloorAssignment::Single(2);
+        let (aid, bid) = (a.id.clone(), b.id.clone());
+        g.add_room(a);
+        g.add_room(b);
+        g.add_connection(aid, bid, Connection::new(ConnectionType::Door));
+        let e = g.connections[0].clone();
+        assert_eq!(g.edge_floor_relation(&e, 2), FloorRel::On);
+        assert_eq!(g.edge_floor_relation(&e, 1), FloorRel::Below);
+        assert_eq!(g.edge_floor_relation(&e, -1), FloorRel::Above);
+    }
+
     use super::*;
     use crate::model::{Connection, ConnectionType, Room};
 

@@ -1,5 +1,13 @@
 use serde::{Deserialize, Serialize};
 
+/// Where a room or corridor sits relative to the floor being viewed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FloorRel {
+    On,
+    Below,
+    Above,
+}
+
 /// Which floor(s) a room belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum FloorAssignment {
@@ -34,6 +42,17 @@ impl FloorAssignment {
         };
         let ((a0, a1), (b0, b1)) = (pair(self), pair(other));
         a0 == b0 || a0 == b1 || a1 == b0 || a1 == b1
+    }
+
+    /// Where this sits relative to the floor being viewed.
+    pub fn relation(&self, floor: i32) -> FloorRel {
+        if self.visible_on(floor) {
+            FloorRel::On
+        } else if self.floors().iter().all(|f| *f < floor) {
+            FloorRel::Below
+        } else {
+            FloorRel::Above
+        }
     }
 
     /// The highest floor the room is on.
