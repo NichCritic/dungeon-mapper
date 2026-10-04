@@ -4,7 +4,7 @@ use std::sync::mpsc;
 use crate::model::{Campaign, Dungeon};
 
 /// Current save file format version. Increment when the data model changes.
-const CURRENT_VERSION: u32 = 8;
+const CURRENT_VERSION: u32 = 9;
 
 /// Versioned save file envelope (version 2+: campaign-based).
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -81,7 +81,8 @@ fn load_campaign(version: u32, value: &serde_json::Value) -> Result<Campaign, St
         // v5 → v6: added Dungeon.id (generated on load) for binding session notes to maps
         // v6 → v7: added Connection.overlap_walls (#[serde(default)] = Both)
         // v7 → v8: added RoomLayout.rotation (default 0) and Connection.corridor_angle (default Orthogonal)
-        2 | 3 | 4 | 5 | 6 | 7 | 8 => serde_json::from_value(value.clone()).map_err(|e| e.to_string()),
+        // v8 → v9: added CorridorSegment.angle, the setting it was routed with (default Orthogonal)
+        2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 => serde_json::from_value(value.clone()).map_err(|e| e.to_string()),
         v => Err(format!(
             "Save file version {} is newer than this application supports (max: {})",
             v, CURRENT_VERSION
@@ -317,6 +318,10 @@ mod tests {
         let v7 = r#"{"version":7,"campaign":{"name":"Old","maps":[{"name":"M","graph":{"rooms":[],"connections":[],"graph_positions":{}},"layout":{"rooms":[{"room_id":"r","x":0,"y":0,"width":2,"height":2}],"corridors":[],"bounds":[]}}]}}"#;
         let old = deserialize_versioned(v7).unwrap();
         assert_eq!(old.maps[0].layout.as_ref().unwrap().rooms[0].rotation, 0.0);
+        // Pre-v9 corridors count as routed orthogonally
+        let v8 = r#"{"version":8,"campaign":{"name":"Old","maps":[{"name":"M","graph":{"rooms":[],"connections":[],"graph_positions":{}},"layout":{"rooms":[],"corridors":[{"connection_id":"c","waypoints":[{"x":0,"y":0},{"x":3,"y":0}],"width":2}],"bounds":[]}}]}}"#;
+        let old = deserialize_versioned(v8).unwrap();
+        assert_eq!(old.maps[0].layout.as_ref().unwrap().corridors[0].angle, CorridorAngle::Orthogonal);
     }
 
     #[test]

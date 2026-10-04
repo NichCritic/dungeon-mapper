@@ -59,6 +59,21 @@ fn mixed_label(ui: &mut egui::Ui, all_same: bool) {
     }
 }
 
+/// Resize a room's placed footprint in place (the automatic layout update never
+/// resizes placed rooms, so an explicit size edit applies it directly). Cave cells are
+/// laid out for the old footprint, so they regenerate.
+fn resize_placed_room(dungeon: &mut Dungeon, room_id: &str, w: Option<u32>, h: Option<u32>) {
+    let Some(rl) = dungeon.layout.as_mut().and_then(|l| l.room_by_id_mut(room_id)) else { return };
+    let before = (rl.width, rl.height);
+    rl.width = w.unwrap_or(rl.width).max(1);
+    rl.height = h.unwrap_or(rl.height).max(1);
+    if (rl.width, rl.height) != before {
+        if let Some(cave) = dungeon.graph.room_by_id_mut(room_id).and_then(|r| r.cave_data.as_mut()) {
+            cave.cells.clear();
+        }
+    }
+}
+
 fn multi_room_properties(ui: &mut egui::Ui, dungeon: &mut Dungeon, ids: &[String]) {
     // Snapshot values to avoid borrow conflicts
     struct RoomSnap { hint: SizeHint, w: u32, h: u32, shape: RoomShape, rot: bool, tags: Vec<RoomTag>, floor: FloorAssignment, env: RoomEnvironment }
@@ -89,6 +104,8 @@ fn multi_room_properties(ui: &mut egui::Ui, dungeon: &mut Dungeon, ids: &[String
                 room.grid_width = None;
                 room.grid_height = None;
             }
+            let (w, h) = hint.grid_size();
+            resize_placed_room(dungeon, id, Some(w), Some(h));
         }
     }
 
@@ -105,6 +122,7 @@ fn multi_room_properties(ui: &mut egui::Ui, dungeon: &mut Dungeon, ids: &[String
                 if let Some(room) = dungeon.graph.room_by_id_mut(id) {
                     room.grid_width = Some(w);
                 }
+                resize_placed_room(dungeon, id, Some(w), None);
             }
         }
         mixed_label(ui, all_same_w);
@@ -117,6 +135,7 @@ fn multi_room_properties(ui: &mut egui::Ui, dungeon: &mut Dungeon, ids: &[String
                 if let Some(room) = dungeon.graph.room_by_id_mut(id) {
                     room.grid_height = Some(h);
                 }
+                resize_placed_room(dungeon, id, None, Some(h));
             }
         }
         mixed_label(ui, all_same_h);

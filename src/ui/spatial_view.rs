@@ -2830,6 +2830,7 @@ fn duplicate_group(dungeon: &mut Dungeon, room_ids: &[String], group_idx: usize)
                 invalid: false,
                 pinned_waypoints: Vec::new(),
                 floor: old_corridor.floor,
+                angle: old_corridor.angle,
             })
         }).collect();
         layout.corridors.extend(new_corridors);
@@ -2934,7 +2935,7 @@ mod tests {
         let pins = vec![GridPos { x: 4, y: 2 }, GridPos { x: 7, y: 2 }, GridPos { x: 10, y: 2 }];
         layout.corridors = vec![CorridorSegment {
             connection_id: d.graph.connections[0].connection.id.clone(),
-            waypoints: pins.clone(), width: 2, invalid: false, pinned_waypoints: pins, floor: FloorAssignment::default(),
+            waypoints: pins.clone(), width: 2, invalid: false, pinned_waypoints: pins, floor: FloorAssignment::default(), angle: CorridorAngle::Orthogonal,
         }];
         d.layout = Some(layout);
         flip_group(&mut d, &[aid.clone(), bid.clone()], true);

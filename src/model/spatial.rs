@@ -109,6 +109,9 @@ pub struct CorridorSegment {
     /// half-floor corridors visible on both floors.
     #[serde(default)]
     pub floor: FloorAssignment,
+    /// The angle setting the corridor was routed with, so a changed setting re-routes it.
+    #[serde(default)]
+    pub angle: super::CorridorAngle,
 }
 
 impl CorridorSegment {
@@ -343,6 +346,7 @@ mod tests {
             invalid: false,
             pinned_waypoints: Vec::new(),
             floor: FloorAssignment::default(),
+            angle: Default::default(),
         };
         // A 2-wide corridor centered on y=0 covers rows -1 and 0; a 1-wide one at y=1 covers row 1
         let mut layout = SpatialLayout::new();

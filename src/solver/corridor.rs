@@ -259,6 +259,7 @@ fn route_edge(
         width: cw,
         invalid,
         floor,
+        angle,
     };
 
     // Helper to fix up corridor endpoints to match user-set exits exactly
@@ -308,55 +309,55 @@ pub fn route_corridors_for_rooms(
     layout: &SpatialLayout,
     affected_room_ids: &HashSet<String>,
 ) -> Vec<CorridorSegment> {
-    // Collect pinned waypoints
-    let mut pinned_map: HashMap<String, Vec<GridPos>> = HashMap::new();
-    for c in &layout.corridors {
-        if !c.pinned_waypoints.is_empty() {
-            pinned_map.insert(c.connection_id.clone(), c.pinned_waypoints.clone());
-        }
-    }
+    route_corridors_where(graph, layout, |e| {
+        affected_room_ids.contains(&e.source_room_id) || affected_room_ids.contains(&e.target_room_id)
+    })
+}
+
+/// Route the connections `needs_route` picks, plus any without a corridor yet. Every
+/// other existing corridor stays exactly as it is (stamped first, so new routes keep
+/// clear of it). Corridors of deleted or flush connections are dropped.
+pub fn route_corridors_where(
+    graph: &DungeonGraph,
+    layout: &SpatialLayout,
+    needs_route: impl Fn(&StoredEdge) -> bool,
+) -> Vec<CorridorSegment> {
+    let pinned_map: HashMap<String, Vec<GridPos>> = layout.corridors.iter()
+        .filter(|c| !c.pinned_waypoints.is_empty())
+        .map(|c| (c.connection_id.clone(), c.pinned_waypoints.clone()))
+        .collect();
 
     // Exclude container room interiors from forbidden set
     let container_ids = collect_container_ids(graph);
     let mut per_floor = init_per_floor_forbidden_with_exclusions(graph, layout, &container_ids);
 
-    // Partition edges into affected vs unaffected
-    let mut affected_edges: Vec<&StoredEdge> = Vec::new();
-    let mut unaffected_corridors: Vec<CorridorSegment> = Vec::new();
+    let routed_now = |e: &StoredEdge| needs_route(e) || layout.corridor_for(&e.connection.id).is_none();
 
-    let affected_conn_ids: HashSet<String> = graph.connections.iter()
-        .filter(|e| {
-            affected_room_ids.contains(&e.source_room_id)
-                || affected_room_ids.contains(&e.target_room_id)
-        })
-        .map(|e| e.connection.id.clone())
-        .collect();
-
-    for edge in &graph.connections {
-        if affected_conn_ids.contains(&edge.connection.id) {
-            affected_edges.push(edge);
-        }
-    }
-
-    // Keep unaffected corridors and stamp them into per-floor forbidden
+    // Keep the other corridors and stamp them into the per-floor forbidden sets
+    let mut corridors: Vec<CorridorSegment> = Vec::new();
     for c in &layout.corridors {
-        if !affected_conn_ids.contains(&c.connection_id) {
-            let w = c.width as i32;
-            let half = w / 2;
-            let tl_waypoints: Vec<GridPos> = c.waypoints.iter()
-                .map(|p| GridPos { x: p.x - half, y: p.y - half })
-                .collect();
-            let c_floors = c.floor.floors();
-            stamp_corridor_floors(&tl_waypoints, w, &c_floors, &mut per_floor);
-            unaffected_corridors.push(c.clone());
+        let Some(edge) = graph.connection_by_id(&c.connection_id) else { continue };
+        if edge.connection.connection_type == ConnectionType::Flush || routed_now(edge) {
+            continue;
         }
+        let w = c.width as i32;
+        let half = w / 2;
+        let tl_waypoints: Vec<GridPos> = c.waypoints.iter()
+            .map(|p| GridPos { x: p.x - half, y: p.y - half })
+            .collect();
+        let mut kept = c.clone();
+        // The rooms' floors may have changed; the route itself has not
+        kept.floor = corridor_floor(graph, edge);
+        stamp_corridor_floors(&tl_waypoints, w, &kept.floor.floors(), &mut per_floor);
+        corridors.push(kept);
     }
 
-    // Sort affected edges by distance (shorter first)
-    affected_edges.sort_by_key(|edge| {
-        let src = layout.room_by_id(&edge.source_room_id);
-        let tgt = layout.room_by_id(&edge.target_room_id);
-        match (src, tgt) {
+    // Route the rest, shortest first. Flush connections have no corridor.
+    let mut to_route: Vec<&StoredEdge> = graph.connections.iter()
+        .filter(|e| e.connection.connection_type != ConnectionType::Flush && routed_now(e))
+        .collect();
+    to_route.sort_by_key(|edge| {
+        match (layout.room_by_id(&edge.source_room_id), layout.room_by_id(&edge.target_room_id)) {
             (Some(s), Some(t)) => {
                 let dx = (s.x + s.width as i32 / 2) - (t.x + t.width as i32 / 2);
                 let dy = (s.y + s.height as i32 / 2) - (t.y + t.height as i32 / 2);
@@ -365,24 +366,14 @@ pub fn route_corridors_for_rooms(
             _ => i32::MAX,
         }
     });
-
-    // Route affected corridors
-    let mut new_corridors = Vec::new();
-    for edge in &affected_edges {
-        let src_rl = layout.room_by_id(&edge.source_room_id);
-        let tgt_rl = layout.room_by_id(&edge.target_room_id);
-
-        let Some((src_rl, tgt_rl)) = src_rl.zip(tgt_rl) else {
+    for edge in to_route {
+        let (Some(src_rl), Some(tgt_rl)) = (layout.room_by_id(&edge.source_room_id), layout.room_by_id(&edge.target_room_id)) else {
             continue;
         };
-
         let pinned = pinned_map.get(&edge.connection.id).cloned().unwrap_or_default();
-        new_corridors.extend(route_edge(graph, edge, src_rl, tgt_rl, pinned, &mut per_floor));
+        corridors.extend(route_edge(graph, edge, src_rl, tgt_rl, pinned, &mut per_floor));
     }
-
-    // Combine: unaffected first, then newly routed
-    unaffected_corridors.extend(new_corridors);
-    unaffected_corridors
+    corridors
 }
 
 /// Mark all grid cells occupied by a corridor as forbidden.

@@ -1179,13 +1179,15 @@ pub fn solve_incremental(
         .map(|r| r.id.clone())
         .collect();
 
-    // Keep rooms that still exist in the graph
+    // Keep rooms that still exist in the graph exactly where they are: only an explicit
+    // full solve moves or resizes placed rooms. Corridors are kept too, and only the
+    // ones whose connection changed are re-routed (below).
     let mut layout = SpatialLayout {
         rooms: existing.rooms.iter()
             .filter(|rl| graph_room_ids.contains(&rl.room_id))
             .cloned()
             .collect(),
-        corridors: Vec::new(), // corridors will be re-routed
+        corridors: existing.corridors.clone(),
         bounds: existing.bounds.clone(),
     };
 
@@ -1197,67 +1199,6 @@ pub fn solve_incremental(
 
     // Compute effective sizes for containment
     let effective_sizes = compute_effective_sizes(graph);
-
-    // Resize existing containers that are too small for their children
-    for (room_id, &(ew, eh)) in &effective_sizes {
-        if let Some(rl) = layout.room_by_id_mut(room_id) {
-            if rl.width < ew || rl.height < eh {
-                rl.width = rl.width.max(ew);
-                rl.height = rl.height.max(eh);
-            }
-        }
-    }
-
-    // Reposition children that are outside their container's bounds
-    for group in &graph.groups {
-        let Some(parent_id) = &group.parent_room_id else { continue };
-        let parent_bounds = layout.room_by_id(parent_id)
-            .map(|p| (p.x, p.y, p.width, p.height));
-        let Some((px, py, pw, ph)) = parent_bounds else { continue };
-        let padding = group.containment_padding as i32;
-        let inner_x = px + padding;
-        let inner_y = py + padding;
-        let inner_w = (pw as i32 - padding * 2).max(1);
-        let inner_h = (ph as i32 - padding * 2).max(1);
-
-        // Row-pack all children that are currently outside the container
-        let mut needs_repack = false;
-        for child_id in &group.room_ids {
-            if let Some(child_rl) = layout.room_by_id(child_id) {
-                if child_rl.x < inner_x || child_rl.y < inner_y
-                    || child_rl.x + child_rl.width as i32 > inner_x + inner_w
-                    || child_rl.y + child_rl.height as i32 > inner_y + inner_h
-                {
-                    needs_repack = true;
-                    break;
-                }
-            }
-        }
-
-        if needs_repack {
-            let mut cursor_x = inner_x;
-            let mut cursor_y = inner_y;
-            let mut row_max_h = 0i32;
-            for child_id in &group.room_ids {
-                let child_size = effective_sizes.get(child_id.as_str()).copied()
-                    .or_else(|| graph.room_by_id(child_id).map(|r| r.grid_size()));
-                let Some((cw, ch)) = child_size else { continue };
-                if cursor_x > inner_x && cursor_x + cw as i32 > inner_x + inner_w {
-                    cursor_x = inner_x;
-                    cursor_y += row_max_h + 1;
-                    row_max_h = 0;
-                }
-                if let Some(rl) = layout.room_by_id_mut(child_id) {
-                    rl.x = cursor_x;
-                    rl.y = cursor_y;
-                    rl.width = cw;
-                    rl.height = ch;
-                }
-                cursor_x += cw as i32 + 1;
-                row_max_h = row_max_h.max(ch as i32);
-            }
-        }
-    }
 
     let child_room_ids: HashSet<String> = graph.groups.iter()
         .filter(|g| g.parent_room_id.is_some())
@@ -1497,11 +1438,72 @@ pub fn solve_incremental(
         }
     }
 
-    // Route all corridors (re-route is cheap compared to placement)
-    layout.corridors = crate::solver::corridor::route_corridors(graph, &layout);
+    // New rooms inside a container that is already placed: the first free spot inside it
+    for room in &graph.rooms {
+        if layout.room_by_id(&room.id).is_some() {
+            continue;
+        }
+        let Some(parent) = graph.parent_of(&room.id).and_then(|p| layout.room_by_id(p)).cloned() else { continue };
+        let (w, h) = effective_sizes.get(&room.id).copied().unwrap_or_else(|| room.grid_size());
+        let padding = graph.containment_group(&parent.room_id).map(|g| g.containment_padding).unwrap_or(1) as i32;
+        let (x, y) = free_spot_inside(&layout, graph, &parent, (w, h), padding, room.floor);
+        layout.rooms.push(RoomLayout {
+            room_id: room.id.clone(),
+            x, y, width: w, height: h,
+            violations: Vec::new(),
+            wall_openings: Vec::new(),
+            rotation: 0.0,
+        });
+    }
+
+    // Route only what changed: connections to newly placed rooms, and ones whose width or
+    // angle setting differs from what their corridor was routed with. (Connections with
+    // no corridor yet are routed too; deleted and flush ones lose theirs.)
+    let new_ids: HashSet<&str> = layout.rooms.iter()
+        .map(|rl| rl.room_id.as_str())
+        .filter(|id| !existing_room_ids.contains(*id))
+        .collect();
+    layout.corridors = crate::solver::corridor::route_corridors_where(graph, &layout, |e| {
+        new_ids.contains(e.source_room_id.as_str())
+            || new_ids.contains(e.target_room_id.as_str())
+            || layout.corridor_for(&e.connection.id).is_some_and(|c| {
+                c.width != e.connection.corridor_width || c.angle != e.connection.corridor_angle
+            })
+    });
     crate::solver::corridor::compute_wall_openings(graph, &mut layout);
 
     Ok(layout)
+}
+
+/// The first spot (row by row from the top-left) inside `parent`, `padding` cells in,
+/// where a `w`x`h` room overlaps no other placed room on its floor; the inner top-left
+/// corner if none is free.
+fn free_spot_inside(
+    layout: &SpatialLayout,
+    graph: &DungeonGraph,
+    parent: &RoomLayout,
+    (w, h): (u32, u32),
+    padding: i32,
+    floor: FloorAssignment,
+) -> (i32, i32) {
+    let (x0, y0) = (parent.x + padding, parent.y + padding);
+    let (x1, y1) = (parent.x + parent.width as i32 - padding - w as i32, parent.y + parent.height as i32 - padding - h as i32);
+    let others: Vec<GridRect> = layout.rooms.iter()
+        .filter(|rl| rl.room_id != parent.room_id)
+        .filter(|rl| graph.room_by_id(&rl.room_id).is_none_or(|r| r.floor.shares_floor(&floor)))
+        .map(|rl| GridRect { x: rl.x, y: rl.y, w: rl.width, h: rl.height })
+        .collect();
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            let free = others.iter().all(|o| {
+                x + w as i32 <= o.x || o.x + o.w as i32 <= x || y + h as i32 <= o.y || o.y + o.h as i32 <= y
+            });
+            if free {
+                return (x, y);
+            }
+        }
+    }
+    (x0, y0)
 }
 
 
@@ -1601,6 +1603,104 @@ mod tests {
             assert!(child_rl.y + child_rl.height as i32 <= cy + ch, "bottom overflow");
         }
     }
+    /// A chain of four connected rooms, solved once.
+    fn chain() -> (DungeonGraph, SpatialLayout) {
+        let mut graph = DungeonGraph::new();
+        let mut ids = Vec::new();
+        for i in 0..4 {
+            let r = Room::new(format!("R{i}"));
+            ids.push(r.id.clone());
+            graph.add_room(r);
+        }
+        for w in ids.windows(2) {
+            graph.add_connection(w[0].clone(), w[1].clone(), Connection::new(ConnectionType::Door));
+        }
+        let layout = solve_layout(&graph, 1).expect("layout");
+        (graph, layout)
+    }
+
+    fn assert_rooms_kept(before: &SpatialLayout, after: &SpatialLayout) {
+        for b in &before.rooms {
+            let a = after.room_by_id(&b.room_id).expect("room kept");
+            assert_eq!((a.x, a.y, a.width, a.height), (b.x, b.y, b.width, b.height), "room {} moved", b.room_id);
+        }
+    }
+
+    fn assert_corridors_kept(before: &SpatialLayout, after: &SpatialLayout) {
+        for b in &before.corridors {
+            let a = after.corridor_for(&b.connection_id).expect("corridor kept");
+            assert_eq!(a.waypoints, b.waypoints, "corridor {} re-routed", b.connection_id);
+        }
+    }
+
+    #[test]
+    fn incremental_solve_leaves_placed_rooms_and_corridors_alone() {
+        let (mut graph, mut layout) = chain();
+        // Hand-edit the layout: move a room and widen another; a graph-only edit follows
+        layout.rooms[1].x += 7;
+        layout.rooms[2].width += 3;
+        graph.rooms[0].tags.push(RoomTag::Trap);
+        let after = solve_incremental(&graph, &layout, 1).unwrap();
+        assert_rooms_kept(&layout, &after);
+        assert_corridors_kept(&layout, &after);
+    }
+
+    #[test]
+    fn incremental_solve_places_and_connects_only_whats_new() {
+        let (mut graph, layout) = chain();
+        let new = Room::new("New".into());
+        let new_id = new.id.clone();
+        graph.add_room(new);
+        let anchor = graph.rooms[3].id.clone();
+        graph.add_connection(anchor, new_id.clone(), Connection::new(ConnectionType::Door));
+        let after = solve_incremental(&graph, &layout, 1).unwrap();
+        assert_rooms_kept(&layout, &after);
+        assert_corridors_kept(&layout, &after);
+        assert!(after.room_by_id(&new_id).is_some(), "new room placed");
+        assert_eq!(after.corridors.len(), layout.corridors.len() + 1, "new connection routed");
+    }
+
+    #[test]
+    fn incremental_solve_reroutes_a_corridor_whose_angle_changed() {
+        let (mut graph, layout) = chain();
+        graph.connections[1].connection.corridor_angle = CorridorAngle::Any;
+        let changed = graph.connections[1].connection.id.clone();
+        let after = solve_incremental(&graph, &layout, 1).unwrap();
+        assert_rooms_kept(&layout, &after);
+        assert_eq!(after.corridor_for(&changed).unwrap().angle, CorridorAngle::Any);
+        for b in layout.corridors.iter().filter(|c| c.connection_id != changed) {
+            assert_eq!(after.corridor_for(&b.connection_id).unwrap().waypoints, b.waypoints);
+        }
+    }
+
+    #[test]
+    fn incremental_solve_places_a_new_room_inside_its_existing_container() {
+        let mut graph = DungeonGraph::new();
+        let mut hall = Room::new("Hall".into());
+        hall.grid_width = Some(12);
+        hall.grid_height = Some(12);
+        let hall_id = hall.id.clone();
+        graph.add_room(hall);
+        let first = Room::new("First".into());
+        let first_id = first.id.clone();
+        graph.add_room(first);
+        let mut group = RoomGroup::new("Inside".into());
+        group.parent_room_id = Some(hall_id.clone());
+        group.room_ids = vec![first_id];
+        graph.groups.push(group);
+        let layout = solve_layout(&graph, 1).unwrap();
+
+        let second = Room::new("Second".into());
+        let second_id = second.id.clone();
+        graph.add_room(second);
+        graph.groups[0].room_ids.push(second_id.clone());
+        let after = solve_incremental(&graph, &layout, 1).unwrap();
+        assert_rooms_kept(&layout, &after);
+        let (h, c) = (after.room_by_id(&hall_id).unwrap(), after.room_by_id(&second_id).expect("placed"));
+        assert!(c.x >= h.x && c.y >= h.y && c.x + c.width as i32 <= h.x + h.width as i32 && c.y + c.height as i32 <= h.y + h.height as i32,
+            "inside the container: {:?} in {:?}", (c.x, c.y, c.width, c.height), (h.x, h.y, h.width, h.height));
+    }
+
     #[test]
     fn test_incremental_containment_new_container() {
         // Simulate: rooms exist, then user creates a containment group
@@ -1649,25 +1749,10 @@ mod tests {
                 "bottom: {} > {}", child_rl.y + child_rl.height as i32, cy + ch);
         }
 
-        // Also test incremental solve from layout1
+        // The automatic incremental solve leaves already-placed rooms where they are:
+        // packing them into the new container waits for an explicit Recompute All
         let layout3 = solve_incremental(&graph, &layout1, 1).expect("Incremental");
-
-        let container_rl = layout3.room_by_id(&container_id).expect("Container placed");
-        let cx = container_rl.x;
-        let cy = container_rl.y;
-        let cw = container_rl.width as i32;
-        let ch = container_rl.height as i32;
-
-        for child_id in &child_ids {
-            let child_rl = layout3.room_by_id(child_id)
-                .unwrap_or_else(|| panic!("Child {} should be placed in incremental", child_id));
-            assert!(child_rl.x >= cx, "incr x: {} < {}", child_rl.x, cx);
-            assert!(child_rl.y >= cy, "incr y: {} < {}", child_rl.y, cy);
-            assert!(child_rl.x + child_rl.width as i32 <= cx + cw,
-                "incr right: {} > {}", child_rl.x + child_rl.width as i32, cx + cw);
-            assert!(child_rl.y + child_rl.height as i32 <= cy + ch,
-                "incr bottom: {} > {}", child_rl.y + child_rl.height as i32, cy + ch);
-        }
+        assert_rooms_kept(&layout1, &layout3);
     }
 
     #[test]
