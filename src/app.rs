@@ -884,6 +884,30 @@ impl eframe::App for DungeonApp {
         // Sync campaign party into working dungeon at frame start
         self.sync_party_to_dungeon();
 
+        self.poll_background_tasks();
+        self.show_import_dialogs(ctx);
+        // Pre-warm render caches for all views (debounced, runs before UI so status bar sees pending state)
+        self.prewarm_render_caches(ctx);
+
+        self.handle_global_keys(ctx);
+        // Collect panel rects for annotation spotlight
+        self.annotation_state.panel_rects.clear();
+
+        self.show_menu_bar(ctx);
+        self.show_map_tabs(ctx);
+        self.process_layout_requests(ctx);
+        self.show_status_bar(ctx);
+        self.show_dialogs(ctx);
+        self.show_side_panels(ctx);
+        let canvas_rect = self.show_canvas(ctx);
+        self.show_overlays(ctx, canvas_rect);
+        self.end_frame(ctx);
+    }
+}
+
+impl DungeonApp {
+    /// Poll the background jobs: bestiary load, file operations, cloud sync and updates.
+    fn poll_background_tasks(&mut self) {
         // Poll background monster database load
         if let Some(rx) = &self.pending_monster_db {
             if let Ok(db) = rx.try_recv() {
@@ -1082,7 +1106,10 @@ impl eframe::App for DungeonApp {
                 self.pending_update_apply = None;
             }
         }
+    }
 
+    /// The import-map and Drive file-picker dialogs, while open.
+    fn show_import_dialogs(&mut self, ctx: &egui::Context) {
         // Import map dialog
         if self.import_candidates.is_some() {
             let mut close_dialog = false;
@@ -1164,10 +1191,10 @@ impl eframe::App for DungeonApp {
                 self.drive_file_list = None;
             }
         }
+    }
 
-        // Pre-warm render caches for all views (debounced, runs before UI so status bar sees pending state)
-        self.prewarm_render_caches(ctx);
-
+    /// Global shortcuts: undo/redo, save, and the annotation (F7), notes (F9) and help (F8) toggles.
+    fn handle_global_keys(&mut self, ctx: &egui::Context) {
         // Global keys: Ctrl+Z undo, Ctrl+Y / Ctrl+Shift+Z redo, Ctrl+S save
         let (undo_pressed, redo_pressed, save_pressed) = ctx.input(|i| {
             let ctrl = i.modifiers.command; // Cmd on Mac, Ctrl on others
@@ -1223,10 +1250,10 @@ impl eframe::App for DungeonApp {
             self.help_mode = !self.help_mode;
             self.annotation_mode = false;
         }
+    }
 
-        // Collect panel rects for annotation spotlight
-        self.annotation_state.panel_rects.clear();
-
+    /// The top menu bar.
+    fn show_menu_bar(&mut self, ctx: &egui::Context) {
         // Top menu bar
         let menu_response = egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
@@ -1495,7 +1522,10 @@ impl eframe::App for DungeonApp {
             });
         });
         self.annotation_state.panel_rects.push(menu_response.response.rect);
+    }
 
+    /// The map tab strip, when the campaign has several maps.
+    fn show_map_tabs(&mut self, ctx: &egui::Context) {
         // Map tab strip (shown when campaign has multiple maps)
         if self.campaign.maps.len() > 1 {
             let mut switch_to = None;
@@ -1556,7 +1586,10 @@ impl eframe::App for DungeonApp {
                 }
             }
         }
+    }
 
+    /// Act on layout work requested this frame: full re-solves, cave regeneration and contours, and the auto-solve after graph edits.
+    fn process_layout_requests(&mut self, ctx: &egui::Context) {
         // Handle "Recompute All" request from sidebar
         if self.spatial_state.recompute_requested {
             self.spatial_state.recompute_requested = false;
@@ -1593,7 +1626,10 @@ impl eframe::App for DungeonApp {
                 ctx.request_repaint();
             }
         }
+    }
 
+    /// The bottom status bar.
+    fn show_status_bar(&mut self, ctx: &egui::Context) {
         // Status bar
         let status_response = egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
             let zoom = if self.presenting {
@@ -1669,7 +1705,10 @@ impl eframe::App for DungeonApp {
             });
         });
         self.annotation_state.panel_rects.push(status_response.response.rect);
+    }
 
+    /// Modal dialogs: update confirmation, layout-solver refusals and the post-update restart prompt.
+    fn show_dialogs(&mut self, ctx: &egui::Context) {
         // Update confirmation dialog
         if self.show_update_dialog {
             if let Some(info) = &self.available_update {
@@ -1768,7 +1807,10 @@ impl eframe::App for DungeonApp {
                     });
                 });
         }
+    }
 
+    /// The combat log, minimized-window tabs and windows, the right sidebar and the notes drawer.
+    fn show_side_panels(&mut self, ctx: &egui::Context) {
         // Combat log panel (bottom, only during presentation with active combat)
         if self.presenting {
             if let Some(presentation) = &mut self.presentation {
@@ -1944,7 +1986,10 @@ impl eframe::App for DungeonApp {
                 self.notes_dirty_since = None;
             }
         }
+    }
 
+    /// The central canvas for the active tab (or the presentation); returns its rect.
+    fn show_canvas(&mut self, ctx: &egui::Context) -> egui::Rect {
         // Main canvas
         let central_response = egui::CentralPanel::default().show(ctx, |ui| {
             if self.presenting {
@@ -1981,11 +2026,14 @@ impl eframe::App for DungeonApp {
 
         // Also record central panel rect
         self.annotation_state.panel_rects.push(central_response.response.rect);
+        central_response.response.rect
+    }
 
+    /// The annotation and help overlays, drawn over everything.
+    fn show_overlays(&mut self, ctx: &egui::Context, canvas_rect: egui::Rect) {
         // Full-screen annotation overlay (drawn on top of everything)
         if self.annotation_mode {
             let current_view = self.current_view_name();
-            let canvas_rect = central_response.response.rect;
             let screen_rect = ctx.screen_rect();
 
             // Pre-extract data for nearest-room lookup to avoid borrowing self in the closure
@@ -2070,7 +2118,10 @@ impl eframe::App for DungeonApp {
                 self.presenting,
             );
         }
+    }
 
+    /// End of frame: sync the party back, track undo history, autosave, push the web view and draw the player window.
+    fn end_frame(&mut self, ctx: &egui::Context) {
         // Sync party changes back to campaign
         self.sync_party_from_dungeon();
 
@@ -2144,9 +2195,6 @@ impl eframe::App for DungeonApp {
             }
         }
     }
-}
-
-impl DungeonApp {
     /// Pre-warm render caches for all views in the background.
     /// Uses debouncing: only triggers builds after the dungeon hash has been stable for 500ms.
     fn prewarm_render_caches(&mut self, ctx: &egui::Context) {
