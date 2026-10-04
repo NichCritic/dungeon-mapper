@@ -137,131 +137,86 @@ pub fn save_campaign_to_path(campaign: &Campaign, path: PathBuf) -> mpsc::Receiv
     rx
 }
 
-/// Spawn an async save dialog on a background thread.
-/// Returns a receiver that will eventually produce the result.
-pub fn save_campaign_async(campaign: &Campaign) -> mpsc::Receiver<FileOpResult> {
+/// Show a file dialog (built by `dialog`) on a background thread. `act` handles the
+/// chosen path and gives the result to send; closing the dialog sends `Cancelled`.
+fn with_dialog(
+    dialog: impl FnOnce() -> rfd::AsyncFileDialog + Send + 'static,
+    save: bool,
+    act: impl FnOnce(PathBuf) -> FileOpResult + Send + 'static,
+) -> mpsc::Receiver<FileOpResult> {
     let (tx, rx) = mpsc::channel();
-    let campaign = campaign.clone();
-    let name = campaign.name.clone();
     std::thread::spawn(move || {
-        let json = match serialize_versioned(&campaign) {
-            Ok(j) => j,
-            Err(e) => {
-                let _ = tx.send(FileOpResult::Saved(Err(e)));
-                return;
-            }
+        let dialog = dialog();
+        let file = if save { pollster::block_on(dialog.save_file()) } else { pollster::block_on(dialog.pick_file()) };
+        let result = match file {
+            Some(file) => act(file.path().to_path_buf()),
+            None => FileOpResult::Cancelled,
         };
-        let handle = pollster::block_on(
-            rfd::AsyncFileDialog::new()
-                .set_title("Save Campaign")
-                .add_filter("Dungeon File", &["dungeon"])
-                .set_file_name(format!("{}.dungeon", name))
-                .save_file(),
-        );
-        match handle {
-            Some(file) => {
-                let path = file.path().to_path_buf();
-                let result = std::fs::write(&path, &json)
-                    .map(|_| path)
-                    .map_err(|e| e.to_string());
-                let _ = tx.send(FileOpResult::Saved(result));
-            }
-            None => {
-                let _ = tx.send(FileOpResult::Cancelled);
-            }
-        }
+        let _ = tx.send(result);
     });
     rx
 }
 
-/// Spawn an async open dialog on a background thread.
+fn write_file(path: &PathBuf, contents: &str) -> Result<(), String> {
+    std::fs::write(path, contents).map_err(|e| e.to_string())
+}
+
+fn read_json<T: serde::de::DeserializeOwned>(path: &PathBuf) -> Result<T, String> {
+    let json = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    serde_json::from_str(&json).map_err(|e| e.to_string())
+}
+
+/// Ask where to save the campaign, then write it (serialized on the background thread).
+pub fn save_campaign_async(campaign: &Campaign) -> mpsc::Receiver<FileOpResult> {
+    let campaign = campaign.clone();
+    let name = campaign.name.clone();
+    with_dialog(
+        move || rfd::AsyncFileDialog::new()
+            .set_title("Save Campaign")
+            .add_filter("Dungeon File", &["dungeon"])
+            .set_file_name(format!("{}.dungeon", name)),
+        true,
+        move |path| FileOpResult::Saved(
+            serialize_versioned(&campaign).and_then(|json| write_file(&path, &json)).map(|_| path),
+        ),
+    )
+}
+
+/// Ask which campaign to open, then load it.
 pub fn load_campaign_async() -> mpsc::Receiver<FileOpResult> {
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let handle = pollster::block_on(
-            rfd::AsyncFileDialog::new()
-                .set_title("Open Dungeon")
-                .add_filter("Dungeon File", &["dungeon"])
-                .pick_file(),
-        );
-        match handle {
-            Some(file) => {
-                let path = file.path().to_path_buf();
-                match std::fs::read_to_string(&path) {
-                    Ok(json) => {
-                        let result = deserialize_versioned(&json)
-                            .map(|c| (c, path));
-                        let _ = tx.send(FileOpResult::Loaded(result));
-                    }
-                    Err(e) => {
-                        let _ = tx.send(FileOpResult::Loaded(Err(e.to_string())));
-                    }
-                }
-            }
-            None => {
-                let _ = tx.send(FileOpResult::Cancelled);
-            }
-        }
-    });
-    rx
+    with_dialog(
+        || rfd::AsyncFileDialog::new().set_title("Open Dungeon").add_filter("Dungeon File", &["dungeon"]),
+        false,
+        |path| FileOpResult::Loaded(
+            std::fs::read_to_string(&path).map_err(|e| e.to_string())
+                .and_then(|json| deserialize_versioned(&json))
+                .map(|c| (c, path)),
+        ),
+    )
 }
 
 /// Open a file dialog to import a map from another .dungeon file.
 /// Returns the loaded campaign so the caller can pick which map(s) to import.
 pub fn import_map_async() -> mpsc::Receiver<FileOpResult> {
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let handle = pollster::block_on(
-            rfd::AsyncFileDialog::new()
-                .set_title("Import Map From...")
-                .add_filter("Dungeon File", &["dungeon"])
-                .pick_file(),
-        );
-        match handle {
-            Some(file) => {
-                let path = file.path().to_path_buf();
-                match std::fs::read_to_string(&path) {
-                    Ok(json) => {
-                        let result = deserialize_versioned(&json);
-                        let _ = tx.send(FileOpResult::ImportedMap(result));
-                    }
-                    Err(e) => {
-                        let _ = tx.send(FileOpResult::ImportedMap(Err(e.to_string())));
-                    }
-                }
-            }
-            None => {
-                let _ = tx.send(FileOpResult::Cancelled);
-            }
-        }
-    });
-    rx
+    with_dialog(
+        || rfd::AsyncFileDialog::new().set_title("Import Map From...").add_filter("Dungeon File", &["dungeon"]),
+        false,
+        |path| FileOpResult::ImportedMap(
+            std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|json| deserialize_versioned(&json)),
+        ),
+    )
 }
 
-/// Spawn an async export dialog on a background thread.
+/// Ask where to export the map image, then render and write it.
 pub fn export_png_async(dungeon: &Dungeon, dm_mode: bool) -> mpsc::Receiver<FileOpResult> {
-    let (tx, rx) = mpsc::channel();
     let dungeon = dungeon.clone();
-    std::thread::spawn(move || {
-        let handle = pollster::block_on(
-            rfd::AsyncFileDialog::new()
-                .set_title(if dm_mode { "Export DM Map" } else { "Export Player Map" })
-                .add_filter("PNG Image", &["png"])
-                .save_file(),
-        );
-        match handle {
-            Some(file) => {
-                let path = file.path().to_path_buf();
-                let result = crate::io::export::export_png(&dungeon, &path, dm_mode, 2)
-                    .map_err(|e| e.to_string());
-                let _ = tx.send(FileOpResult::ExportedPng(result));
-            }
-            None => {
-                let _ = tx.send(FileOpResult::Cancelled);
-            }
-        }
-    });
-    rx
+    with_dialog(
+        move || rfd::AsyncFileDialog::new()
+            .set_title(if dm_mode { "Export DM Map" } else { "Export Player Map" })
+            .add_filter("PNG Image", &["png"]),
+        true,
+        move |path| FileOpResult::ExportedPng(crate::io::export::export_png(&dungeon, &path, dm_mode, 2)),
+    )
 }
 
 /// Export selected encounters (and their referenced custom monsters) to a JSON file.
@@ -269,7 +224,6 @@ pub fn export_encounters_async(
     encounters: &[crate::model::Encounter],
     custom_monsters: &[crate::model::monster::CustomMonster],
 ) -> mpsc::Receiver<FileOpResult> {
-    let (tx, rx) = mpsc::channel();
     let referenced_ids: std::collections::HashSet<String> = encounters.iter()
         .flat_map(|e| e.monsters.iter())
         .filter_map(|em| match &em.monster_ref {
@@ -285,107 +239,58 @@ pub fn export_encounters_async(
             .cloned()
             .collect(),
     };
-    let json = match serde_json::to_string_pretty(&data) {
-        Ok(j) => j,
-        Err(e) => {
-            let _ = tx.send(FileOpResult::ExportedEncounters(Err(e.to_string())));
-            return rx;
-        }
-    };
-    std::thread::spawn(move || {
-        let handle = pollster::block_on(
-            rfd::AsyncFileDialog::new()
-                .set_title("Export Encounters")
-                .add_filter("Encounter JSON", &["json"])
-                .set_file_name("encounters.json")
-                .save_file(),
-        );
-        match handle {
-            Some(file) => {
-                let path = file.path().to_path_buf();
-                let result = std::fs::write(&path, &json).map(|_| ()).map_err(|e| e.to_string());
-                let _ = tx.send(FileOpResult::ExportedEncounters(result));
-            }
-            None => { let _ = tx.send(FileOpResult::Cancelled); }
-        }
-    });
-    rx
+    with_dialog(
+        || rfd::AsyncFileDialog::new()
+            .set_title("Export Encounters")
+            .add_filter("Encounter JSON", &["json"])
+            .set_file_name("encounters.json"),
+        true,
+        move |path| FileOpResult::ExportedEncounters(
+            serde_json::to_string_pretty(&data).map_err(|e| e.to_string()).and_then(|json| write_file(&path, &json)),
+        ),
+    )
 }
 
 /// Import encounters from a JSON file.
 pub fn import_encounters_async() -> mpsc::Receiver<FileOpResult> {
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let handle = pollster::block_on(
-            rfd::AsyncFileDialog::new()
-                .set_title("Import Encounters")
-                .add_filter("Encounter JSON", &["json"])
-                .pick_file(),
-        );
-        match handle {
-            Some(file) => {
-                let path = file.path().to_path_buf();
-                match std::fs::read_to_string(&path) {
-                    Ok(json) => {
-                        match serde_json::from_str::<EncounterExportData>(&json) {
-                            Ok(data) => {
-                                let _ = tx.send(FileOpResult::ImportedEncounters(Ok(EncounterImportData {
-                                    encounters: data.encounters,
-                                    custom_monsters: data.custom_monsters,
-                                })));
-                            }
-                            Err(e) => {
-                                let _ = tx.send(FileOpResult::ImportedEncounters(Err(e.to_string())));
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        let _ = tx.send(FileOpResult::ImportedEncounters(Err(e.to_string())));
-                    }
-                }
-            }
-            None => { let _ = tx.send(FileOpResult::Cancelled); }
-        }
-    });
-    rx
+    with_dialog(
+        || rfd::AsyncFileDialog::new().set_title("Import Encounters").add_filter("Encounter JSON", &["json"]),
+        false,
+        |path| FileOpResult::ImportedEncounters(read_json::<EncounterExportData>(&path).map(|data| EncounterImportData {
+            encounters: data.encounters,
+            custom_monsters: data.custom_monsters,
+        })),
+    )
 }
 
 /// Export custom creatures to a JSON file.
 pub fn export_creatures_async(
     custom_monsters: &[crate::model::monster::CustomMonster],
 ) -> mpsc::Receiver<FileOpResult> {
-    let (tx, rx) = mpsc::channel();
     let data = CreatureExportData {
         custom_monsters: custom_monsters.to_vec(),
     };
-    let json = match serde_json::to_string_pretty(&data) {
-        Ok(j) => j,
-        Err(e) => {
-            let _ = tx.send(FileOpResult::ExportedCreatures(Err(e.to_string())));
-            return rx;
-        }
-    };
-    std::thread::spawn(move || {
-        let handle = pollster::block_on(
-            rfd::AsyncFileDialog::new()
-                .set_title("Export Creatures")
-                .add_filter("Creature JSON", &["json"])
-                .set_file_name("creatures.json")
-                .save_file(),
-        );
-        match handle {
-            Some(file) => {
-                let path = file.path().to_path_buf();
-                let result = std::fs::write(&path, &json).map(|_| ()).map_err(|e| e.to_string());
-                let _ = tx.send(FileOpResult::ExportedCreatures(result));
-            }
-            None => { let _ = tx.send(FileOpResult::Cancelled); }
-        }
-    });
-    rx
+    with_dialog(
+        || rfd::AsyncFileDialog::new()
+            .set_title("Export Creatures")
+            .add_filter("Creature JSON", &["json"])
+            .set_file_name("creatures.json"),
+        true,
+        move |path| FileOpResult::ExportedCreatures(
+            serde_json::to_string_pretty(&data).map_err(|e| e.to_string()).and_then(|json| write_file(&path, &json)),
+        ),
+    )
 }
 
 /// Import custom creatures from a JSON file.
+pub fn import_creatures_async() -> mpsc::Receiver<FileOpResult> {
+    with_dialog(
+        || rfd::AsyncFileDialog::new().set_title("Import Creatures").add_filter("Creature JSON", &["json"]),
+        false,
+        |path| FileOpResult::ImportedCreatures(read_json::<CreatureExportData>(&path).map(|data| data.custom_monsters)),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -596,36 +501,3 @@ mod tests {
     }
 }
 
-pub fn import_creatures_async() -> mpsc::Receiver<FileOpResult> {
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let handle = pollster::block_on(
-            rfd::AsyncFileDialog::new()
-                .set_title("Import Creatures")
-                .add_filter("Creature JSON", &["json"])
-                .pick_file(),
-        );
-        match handle {
-            Some(file) => {
-                let path = file.path().to_path_buf();
-                match std::fs::read_to_string(&path) {
-                    Ok(json) => {
-                        match serde_json::from_str::<CreatureExportData>(&json) {
-                            Ok(data) => {
-                                let _ = tx.send(FileOpResult::ImportedCreatures(Ok(data.custom_monsters)));
-                            }
-                            Err(e) => {
-                                let _ = tx.send(FileOpResult::ImportedCreatures(Err(e.to_string())));
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        let _ = tx.send(FileOpResult::ImportedCreatures(Err(e.to_string())));
-                    }
-                }
-            }
-            None => { let _ = tx.send(FileOpResult::Cancelled); }
-        }
-    });
-    rx
-}
