@@ -4,3 +4,4 @@ Cargo.lock
 .claude/
 .cargo/config.toml
 signing-key.secret
+annotations.md
