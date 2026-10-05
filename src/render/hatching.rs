@@ -1,7 +1,37 @@
-use crate::util::{CellMap, CellSet};
+use crate::util::CellSet;
 use crate::model::{ShadingStyle, SpatialLayout};
 use crate::render::traits::MapRenderer;
 use crate::util::GRID_PX;
+
+/// Dense membership grid over a cell set's bounding box: the shading tests cells
+/// millions of times, and an array index is much cheaper than a hash lookup.
+struct CellGrid {
+    x0: i32,
+    y0: i32,
+    w: i32,
+    h: i32,
+    bits: Vec<bool>,
+}
+
+impl CellGrid {
+    fn new(cells: &CellSet) -> Self {
+        let (mut x0, mut y0, mut x1, mut y1) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+        for &(x, y) in cells {
+            (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
+        }
+        let (w, h) = if cells.is_empty() { (0, 0) } else { (x1 - x0 + 1, y1 - y0 + 1) };
+        let mut bits = vec![false; (w * h) as usize];
+        for &(x, y) in cells {
+            bits[((y - y0) * w + (x - x0)) as usize] = true;
+        }
+        CellGrid { x0, y0, w, h, bits }
+    }
+
+    fn contains(&self, x: i32, y: i32) -> bool {
+        let (lx, ly) = (x - self.x0, y - self.y0);
+        lx >= 0 && ly >= 0 && lx < self.w && ly < self.h && self.bits[(ly * self.w + lx) as usize]
+    }
+}
 
 /// Parameters controlling exterior shading appearance.
 pub struct ShadingParams {
@@ -36,9 +66,10 @@ pub fn draw_exterior_shading(
         }
     }
 
+    let walls = WallDistance::new(&boundary_cells, contour_segments, radius_px);
     match params.style {
         ShadingStyle::Hatched => {
-            draw_dyson_hatching(renderer, floor, &boundary_cells, radius_px, params.density, params.color, contour_segments);
+            draw_dyson_hatching(renderer, floor, &boundary_cells, radius_px, params.density, params.color, &walls);
         }
         ShadingStyle::Solid => {
             let extents = layout.extents();
@@ -49,7 +80,7 @@ pub fn draw_exterior_shading(
                 extents.2 + search_r,
                 extents.3 + search_r,
             );
-            draw_solid_shading(renderer, floor, &boundary_cells, search_extents, radius_px, params.color, contour_segments);
+            draw_solid_shading(renderer, floor, search_extents, radius_px, params.color, &walls);
         }
         ShadingStyle::Stippled => {
             let extents = layout.extents();
@@ -60,7 +91,7 @@ pub fn draw_exterior_shading(
                 extents.2 + search_r,
                 extents.3 + search_r,
             );
-            draw_stippled_shading(renderer, floor, &boundary_cells, search_extents, radius_px, params.density, params.color, contour_segments);
+            draw_stippled_shading(renderer, floor, search_extents, radius_px, params.density, params.color, &walls);
         }
     }
 }
@@ -80,7 +111,10 @@ pub fn draw_exterior_shading(
 /// a different answer.
 struct SeedGrid {
     cell: f32,
-    buckets: CellMap<Vec<u32>>,
+    /// Bucket `(cx, cy)` holds `members[starts[i]..starts[i + 1]]`, ascending, with
+    /// `i` row-major from `(min_cx, min_cy)`
+    starts: Vec<u32>,
+    members: Vec<u32>,
     min_cx: i32,
     max_cx: i32,
     min_cy: i32,
@@ -93,20 +127,42 @@ const BOUND_MARGIN: f32 = 0.999;
 impl SeedGrid {
     fn build(seeds: &[(f32, f32, f32)], cell: f32) -> Self {
         let cell = cell.max(1.0);
-        let mut buckets: CellMap<Vec<u32>> =
-            CellMap::default();
+        let key = |x: f32, y: f32| ((x / cell).floor() as i32, (y / cell).floor() as i32);
         let (mut min_cx, mut max_cx) = (i32::MAX, i32::MIN);
         let (mut min_cy, mut max_cy) = (i32::MAX, i32::MIN);
-        for (i, &(x, y, _)) in seeds.iter().enumerate() {
-            let cx = (x / cell).floor() as i32;
-            let cy = (y / cell).floor() as i32;
-            min_cx = min_cx.min(cx);
-            max_cx = max_cx.max(cx);
-            min_cy = min_cy.min(cy);
-            max_cy = max_cy.max(cy);
-            buckets.entry((cx, cy)).or_default().push(i as u32);
+        for &(x, y, _) in seeds {
+            let (cx, cy) = key(x, y);
+            (min_cx, max_cx, min_cy, max_cy) = (min_cx.min(cx), max_cx.max(cx), min_cy.min(cy), max_cy.max(cy));
         }
-        Self { cell, buckets, min_cx, max_cx, min_cy, max_cy }
+        let width = if seeds.is_empty() { 0 } else { (max_cx - min_cx + 1) as usize };
+        let height = if seeds.is_empty() { 0 } else { (max_cy - min_cy + 1) as usize };
+        let index = |(cx, cy): (i32, i32)| (cy - min_cy) as usize * width + (cx - min_cx) as usize;
+        let mut starts = vec![0u32; width * height + 1];
+        for &(x, y, _) in seeds {
+            starts[index(key(x, y)) + 1] += 1;
+        }
+        for i in 1..starts.len() {
+            starts[i] += starts[i - 1];
+        }
+        // Filled in seed order, so each bucket lists its seeds by ascending index
+        let mut fill = starts.clone();
+        let mut members = vec![0u32; seeds.len()];
+        for (i, &(x, y, _)) in seeds.iter().enumerate() {
+            let slot = &mut fill[index(key(x, y))];
+            members[*slot as usize] = i as u32;
+            *slot += 1;
+        }
+        Self { cell, starts, members, min_cx, max_cx, min_cy, max_cy }
+    }
+
+    /// The seeds in bucket `(cx, cy)`.
+    fn bucket(&self, cx: i32, cy: i32) -> &[u32] {
+        if cx < self.min_cx || cx > self.max_cx || cy < self.min_cy || cy > self.max_cy {
+            return &[];
+        }
+        let width = (self.max_cx - self.min_cx + 1) as usize;
+        let i = (cy - self.min_cy) as usize * width + (cx - self.min_cx) as usize;
+        &self.members[self.starts[i] as usize..self.starts[i + 1] as usize]
     }
 
     /// Nearest seed to `(px, py)`, as `(index, squared distance)`.
@@ -123,7 +179,7 @@ impl SeedGrid {
         skip: Option<usize>,
         limit: f32,
     ) -> Option<(usize, f32)> {
-        if self.buckets.is_empty() {
+        if self.members.is_empty() {
             return None;
         }
         let qcx = (px / self.cell).floor() as i32;
@@ -155,8 +211,7 @@ impl SeedGrid {
                     if r > 0 && (cx - qcx).abs() != r && (cy - qcy).abs() != r {
                         continue;
                     }
-                    let Some(bucket) = self.buckets.get(&(cx, cy)) else { continue };
-                    for &si in bucket {
+                    for &si in self.bucket(cx, cy) {
                         let i = si as usize;
                         if Some(i) == skip {
                             continue;
@@ -218,7 +273,7 @@ fn draw_dyson_hatching(
     radius_px: f32,
     density: f32,
     color: [u8; 4],
-    contour_segments: &[(f32, f32, f32, f32)],
+    walls: &WallDistance,
 ) {
     let base_spacing = (6.0 / density).max(2.0);
 
@@ -244,7 +299,7 @@ fn draw_dyson_hatching(
         let wx = gx as f32 * GRID_PX;
         let wy = gy as f32 * GRID_PX;
 
-        let d = dist_to_floor(wx + GRID_PX / 2.0, wy + GRID_PX / 2.0, boundary_cells, contour_segments);
+        let d = walls.dist(wx + GRID_PX / 2.0, wy + GRID_PX / 2.0);
         if d > radius_px {
             continue;
         }
@@ -262,7 +317,7 @@ fn draw_dyson_hatching(
                 let jgx = (jx / GRID_PX).floor() as i32;
                 let jgy = (jy / GRID_PX).floor() as i32;
                 if !floor.contains(&(jgx, jgy)) {
-                    let jd = dist_to_floor(jx, jy, boundary_cells, contour_segments);
+                    let jd = walls.dist(jx, jy);
                     if jd <= radius_px {
                         let angle = hash_f32(jx, jy, 7) * std::f32::consts::PI;
                         seeds.push((jx, jy, angle));
@@ -283,115 +338,227 @@ fn draw_dyson_hatching(
     // quadratic in the map's boundary length (billions of distance tests on a large
     // map). The grid answers them identically, in a couple of cells each.
     let grid = SeedGrid::build(&seeds, base_spacing);
+    let floor_grid = CellGrid::new(floor);
 
-    let nearest_seed = |px: f32, py: f32| -> usize {
-        grid.nearest(&seeds, px, py, None, f32::INFINITY)
-            .map(|(i, _)| i)
-            .unwrap_or(0)
-    };
-
-    let line_spacing = (2.5 / density).max(1.0);
+    // Each seed's lines depend only on shared read-only data, so seeds are split into
+    // contiguous chunks across threads; the chunks' lines are emitted in seed order,
+    // exactly as a single pass would.
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get().saturating_sub(1)).clamp(1, 8);
+    let chunk = seeds.len().div_ceil(threads);
+    let lines: Vec<Vec<(f32, f32, f32, f32)>> = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..seeds.len()).step_by(chunk.max(1))
+            .map(|start| {
+                let (seeds, grid, floor_grid) = (&seeds, &grid, &floor_grid);
+                scope.spawn(move || {
+                    let end = (start + chunk).min(seeds.len());
+                    let mut out = Vec::new();
+                    for seed_idx in start..end {
+                        hatch_seed_lines(seeds, seed_idx, grid, floor_grid, walls, radius_px, base_spacing, density, &mut out);
+                    }
+                    out
+                })
+            })
+            .collect();
+        workers.into_iter().map(|w| w.join().expect("hatching thread")).collect()
+    });
     let line_weight = 0.8;
-    let step = 1.5;
-
-    for (seed_idx, &(sx, sy, angle)) in seeds.iter().enumerate() {
-        let line_dx = angle.cos();
-        let line_dy = angle.sin();
-        let perp_dx = -line_dy;
-        let perp_dy = line_dx;
-
-        // Nearest other seed, capped at radius_px * 2.0. Taking the square root of
-        // the smallest squared distance gives the same f32 as the smallest of the
-        // individual square roots, so the cap comparison is unchanged.
-        let mut min_neighbor_dist = radius_px * 2.0;
-        if let Some((_, d_sq)) = grid.nearest(&seeds, sx, sy, Some(seed_idx), min_neighbor_dist) {
-            let d = d_sq.sqrt();
-            if d < min_neighbor_dist {
-                min_neighbor_dist = d;
-            }
-        }
-        let cell_half_width = (min_neighbor_dist / 2.0).min(base_spacing);
-        let num_lines = (cell_half_width * 2.0 / line_spacing).ceil() as i32;
-
-        for i in -num_lines / 2..=num_lines / 2 {
-            let offset = i as f32 * line_spacing;
-            let lx = sx + perp_dx * offset;
-            let ly = sy + perp_dy * offset;
-
-            if nearest_seed(lx, ly) != seed_idx {
-                continue;
-            }
-
-            let mut neg_t = 0.0_f32;
-            let mut pos_t = 0.0_f32;
-
-            let mut t = step;
-            loop {
-                let px = lx + line_dx * t;
-                let py = ly + line_dy * t;
-                let pgx = (px / GRID_PX).floor() as i32;
-                let pgy = (py / GRID_PX).floor() as i32;
-                if floor.contains(&(pgx, pgy)) { break; }
-                if dist_to_floor(px, py, boundary_cells, contour_segments) > radius_px { break; }
-                if nearest_seed(px, py) != seed_idx { break; }
-                pos_t = t;
-                t += step;
-                if t > radius_px * 2.0 { break; }
-            }
-
-            t = -step;
-            loop {
-                let px = lx + line_dx * t;
-                let py = ly + line_dy * t;
-                let pgx = (px / GRID_PX).floor() as i32;
-                let pgy = (py / GRID_PX).floor() as i32;
-                if floor.contains(&(pgx, pgy)) { break; }
-                if dist_to_floor(px, py, boundary_cells, contour_segments) > radius_px { break; }
-                if nearest_seed(px, py) != seed_idx { break; }
-                neg_t = t;
-                t -= step;
-                if t < -radius_px * 2.0 { break; }
-            }
-
-            if pos_t - neg_t < step {
-                continue;
-            }
-
-            let x1 = lx + line_dx * neg_t;
-            let y1 = ly + line_dy * neg_t;
-            let x2 = lx + line_dx * pos_t;
-            let y2 = ly + line_dy * pos_t;
-
-            renderer.draw_line(x1, y1, x2, y2, line_weight, color);
-        }
+    for (x1, y1, x2, y2) in lines.into_iter().flatten() {
+        renderer.draw_line(x1, y1, x2, y2, line_weight, color);
     }
 }
 
-fn dist_to_floor(wx: f32, wy: f32, boundary_cells: &CellSet, contour_segments: &[(f32, f32, f32, f32)]) -> f32 {
-    let gx = (wx / GRID_PX).floor() as i32;
-    let gy = (wy / GRID_PX).floor() as i32;
-    let mut min_dist_sq = f32::MAX;
-    for dy in -2..=2 {
-        for dx in -2..=2 {
-            let cx = gx + dx;
-            let cy = gy + dy;
-            if !boundary_cells.contains(&(cx, cy)) { continue; }
-            let cell_x1 = cx as f32 * GRID_PX;
-            let cell_y1 = cy as f32 * GRID_PX;
-            let nearest_x = wx.clamp(cell_x1, cell_x1 + GRID_PX);
-            let nearest_y = wy.clamp(cell_y1, cell_y1 + GRID_PX);
-            let d = (wx - nearest_x).powi(2) + (wy - nearest_y).powi(2);
-            min_dist_sq = min_dist_sq.min(d);
+/// The hatch lines of one seed's Voronoi cell: parallel lines at the seed's angle,
+/// each running out from the seed until it reaches floor, leaves the shading radius or
+/// enters another seed's cell.
+#[allow(clippy::too_many_arguments)]
+fn hatch_seed_lines(
+    seeds: &[(f32, f32, f32)],
+    seed_idx: usize,
+    grid: &SeedGrid,
+    floor: &CellGrid,
+    walls: &WallDistance,
+    radius_px: f32,
+    base_spacing: f32,
+    density: f32,
+    out: &mut Vec<(f32, f32, f32, f32)>,
+) {
+    let nearest_seed = |px: f32, py: f32| -> usize {
+        grid.nearest(seeds, px, py, None, f32::INFINITY)
+            .map(|(i, _)| i)
+            .unwrap_or(0)
+    };
+    let on_floor = |px: f32, py: f32| floor.contains((px / GRID_PX).floor() as i32, (py / GRID_PX).floor() as i32);
+
+    let line_spacing = (2.5 / density).max(1.0);
+    let step = 1.5;
+    let (sx, sy, angle) = seeds[seed_idx];
+    let line_dx = angle.cos();
+    let line_dy = angle.sin();
+    let perp_dx = -line_dy;
+    let perp_dy = line_dx;
+
+    // Nearest other seed, capped at radius_px * 2.0. Taking the square root of
+    // the smallest squared distance gives the same f32 as the smallest of the
+    // individual square roots, so the cap comparison is unchanged.
+    let mut min_neighbor_dist = radius_px * 2.0;
+    if let Some((_, d_sq)) = grid.nearest(seeds, sx, sy, Some(seed_idx), min_neighbor_dist) {
+        let d = d_sq.sqrt();
+        if d < min_neighbor_dist {
+            min_neighbor_dist = d;
         }
     }
+    let cell_half_width = (min_neighbor_dist / 2.0).min(base_spacing);
+    let num_lines = (cell_half_width * 2.0 / line_spacing).ceil() as i32;
 
-    // Also check distance to marching squares contour segments (for smooth cave boundaries)
-    for &(x1, y1, x2, y2) in contour_segments {
-        let d = point_to_segment_dist_sq(wx, wy, x1, y1, x2, y2);
-        min_dist_sq = min_dist_sq.min(d);
+    for i in -num_lines / 2..=num_lines / 2 {
+        let offset = i as f32 * line_spacing;
+        let lx = sx + perp_dx * offset;
+        let ly = sy + perp_dy * offset;
+
+        if nearest_seed(lx, ly) != seed_idx {
+            continue;
+        }
+
+        let mut neg_t = 0.0_f32;
+        let mut pos_t = 0.0_f32;
+
+        let mut t = step;
+        loop {
+            let px = lx + line_dx * t;
+            let py = ly + line_dy * t;
+            if on_floor(px, py) { break; }
+            if walls.dist(px, py) > radius_px { break; }
+            if nearest_seed(px, py) != seed_idx { break; }
+            pos_t = t;
+            t += step;
+            if t > radius_px * 2.0 { break; }
+        }
+
+        t = -step;
+        loop {
+            let px = lx + line_dx * t;
+            let py = ly + line_dy * t;
+            if on_floor(px, py) { break; }
+            if walls.dist(px, py) > radius_px { break; }
+            if nearest_seed(px, py) != seed_idx { break; }
+            neg_t = t;
+            t -= step;
+            if t < -radius_px * 2.0 { break; }
+        }
+
+        if pos_t - neg_t < step {
+            continue;
+        }
+
+        out.push((lx + line_dx * neg_t, ly + line_dy * neg_t, lx + line_dx * pos_t, ly + line_dy * pos_t));
+    }
+}
+
+
+/// Distance from a point to the nearest wall: the edges of boundary floor cells
+/// within two cells, and the marching-squares contour segments (smooth cave walls).
+///
+/// Contour segments are bucketed by the grid cells their bounding boxes touch, so a
+/// query only looks at those near it instead of every segment on the map (big caves
+/// have tens of thousands, and the hatching makes millions of queries). The answer is
+/// exact whenever it is within `reach_px`; beyond that it may come out larger than the
+/// true distance, but still beyond `reach_px`, so a comparison against that radius
+/// gives the same result either way.
+pub(crate) struct WallDistance<'a> {
+    boundary_cells: CellGrid,
+    segments: &'a [(f32, f32, f32, f32)],
+    /// Bucket grid over the segments' cells: `starts[i]..starts[i + 1]` indexes
+    /// `members` for bucket `i` (row-major from `origin`, `width` buckets wide)
+    origin: (i32, i32),
+    width: i32,
+    height: i32,
+    starts: Vec<u32>,
+    members: Vec<u32>,
+    /// How many buckets out from the query's cell to look
+    reach: i32,
+}
+
+impl<'a> WallDistance<'a> {
+    pub(crate) fn new(boundary_cells: &'a CellSet, segments: &'a [(f32, f32, f32, f32)], reach_px: f32) -> Self {
+        let cells_of = |&(x1, y1, x2, y2): &(f32, f32, f32, f32)| {
+            let c = |v: f32| (v / GRID_PX).floor() as i32;
+            (c(x1.min(x2)), c(y1.min(y2)), c(x1.max(x2)), c(y1.max(y2)))
+        };
+        let (mut x0, mut y0, mut x1, mut y1) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+        for seg in segments {
+            let (a, b, c, d) = cells_of(seg);
+            (x0, y0, x1, y1) = (x0.min(a), y0.min(b), x1.max(c), y1.max(d));
+        }
+        let (width, height) = if segments.is_empty() { (0, 0) } else { (x1 - x0 + 1, y1 - y0 + 1) };
+        let index = |x: i32, y: i32| ((y - y0) * width + (x - x0)) as usize;
+        let mut counts = vec![0u32; (width * height) as usize + 1];
+        for seg in segments {
+            let (a, b, c, d) = cells_of(seg);
+            for y in b..=d {
+                for x in a..=c {
+                    counts[index(x, y) + 1] += 1;
+                }
+            }
+        }
+        for i in 1..counts.len() {
+            counts[i] += counts[i - 1];
+        }
+        let starts = counts;
+        let mut fill = starts.clone();
+        let mut members = vec![0u32; *starts.last().unwrap_or(&0) as usize];
+        for (si, seg) in segments.iter().enumerate() {
+            let (a, b, c, d) = cells_of(seg);
+            for y in b..=d {
+                for x in a..=c {
+                    let slot = &mut fill[index(x, y)];
+                    members[*slot as usize] = si as u32;
+                    *slot += 1;
+                }
+            }
+        }
+        let reach = (reach_px / GRID_PX).ceil() as i32 + 1;
+        WallDistance { boundary_cells: CellGrid::new(boundary_cells), segments, origin: (x0, y0), width, height, starts, members, reach }
     }
 
-    min_dist_sq.sqrt()
+    pub(crate) fn dist(&self, wx: f32, wy: f32) -> f32 {
+        let gx = (wx / GRID_PX).floor() as i32;
+        let gy = (wy / GRID_PX).floor() as i32;
+        let mut min_dist_sq = f32::MAX;
+        for dy in -2..=2 {
+            for dx in -2..=2 {
+                let cx = gx + dx;
+                let cy = gy + dy;
+                if !self.boundary_cells.contains(cx, cy) { continue; }
+                let cell_x1 = cx as f32 * GRID_PX;
+                let cell_y1 = cy as f32 * GRID_PX;
+                let nearest_x = wx.clamp(cell_x1, cell_x1 + GRID_PX);
+                let nearest_y = wy.clamp(cell_y1, cell_y1 + GRID_PX);
+                let d = (wx - nearest_x).powi(2) + (wy - nearest_y).powi(2);
+                min_dist_sq = min_dist_sq.min(d);
+            }
+        }
+
+        if self.segments.is_empty() {
+            return min_dist_sq.sqrt();
+        }
+        // Contour segments in the buckets around the point
+        let (ox, oy) = self.origin;
+        let bx0 = (gx - self.reach - ox).max(0);
+        let by0 = (gy - self.reach - oy).max(0);
+        let bx1 = (gx + self.reach - ox).min(self.width - 1);
+        let by1 = (gy + self.reach - oy).min(self.height - 1);
+        for by in by0..=by1 {
+            for bx in bx0..=bx1 {
+                let i = (by * self.width + bx) as usize;
+                for &si in &self.members[self.starts[i] as usize..self.starts[i + 1] as usize] {
+                    let (x1, y1, x2, y2) = self.segments[si as usize];
+                    min_dist_sq = min_dist_sq.min(point_to_segment_dist_sq(wx, wy, x1, y1, x2, y2));
+                }
+            }
+        }
+
+        min_dist_sq.sqrt()
+    }
 }
 
 /// Squared distance from point (px, py) to line segment (x1,y1)-(x2,y2).
@@ -412,11 +579,10 @@ fn point_to_segment_dist_sq(px: f32, py: f32, x1: f32, y1: f32, x2: f32, y2: f32
 fn draw_solid_shading(
     renderer: &mut dyn MapRenderer,
     floor: &CellSet,
-    boundary_cells: &CellSet,
     extents: (i32, i32, i32, i32),
     radius_px: f32,
     color: [u8; 4],
-    contour_segments: &[(f32, f32, f32, f32)],
+    walls: &WallDistance,
 ) {
     let mut shade_color = color;
     shade_color[3] = (color[3] as f32 * 0.3) as u8;
@@ -427,7 +593,7 @@ fn draw_solid_shading(
             if floor.contains(&(gx, gy)) { continue; }
             let wx = gx as f32 * GRID_PX + GRID_PX / 2.0;
             let wy = gy as f32 * GRID_PX + GRID_PX / 2.0;
-            let d = dist_to_floor(wx, wy, boundary_cells, contour_segments);
+            let d = walls.dist(wx, wy);
             if d < radius_px {
                 let alpha = 1.0 - (d / radius_px);
                 let mut c = shade_color;
@@ -441,12 +607,11 @@ fn draw_solid_shading(
 fn draw_stippled_shading(
     renderer: &mut dyn MapRenderer,
     floor: &CellSet,
-    boundary_cells: &CellSet,
     extents: (i32, i32, i32, i32),
     radius_px: f32,
     density: f32,
     color: [u8; 4],
-    contour_segments: &[(f32, f32, f32, f32)],
+    walls: &WallDistance,
 ) {
     let dot_interval = (4.0 / density).max(1.5);
 
@@ -456,7 +621,7 @@ fn draw_stippled_shading(
             if floor.contains(&(gx, gy)) { continue; }
             let wx = gx as f32 * GRID_PX;
             let wy = gy as f32 * GRID_PX;
-            let d = dist_to_floor(wx + GRID_PX / 2.0, wy + GRID_PX / 2.0, boundary_cells, contour_segments);
+            let d = walls.dist(wx + GRID_PX / 2.0, wy + GRID_PX / 2.0);
             if d >= radius_px { continue; }
 
             let mut dy = 1.0;
@@ -466,7 +631,7 @@ fn draw_stippled_shading(
                 while dx < GRID_PX {
                     let px = wx + dx;
                     let py = wy + dy;
-                    let pd = dist_to_floor(px, py, boundary_cells, contour_segments);
+                    let pd = walls.dist(px, py);
                     if pd < radius_px {
                         let pgx = (px / GRID_PX).floor() as i32;
                         let pgy = (py / GRID_PX).floor() as i32;
@@ -502,6 +667,51 @@ mod tests {
                 (x, y, c * std::f32::consts::PI)
             })
             .collect()
+    }
+
+    /// Wall distance by checking every contour segment: what `WallDistance` replaced.
+    fn scan_wall_distance(wx: f32, wy: f32, boundary: &CellSet, segments: &[(f32, f32, f32, f32)]) -> f32 {
+        let gx = (wx / GRID_PX).floor() as i32;
+        let gy = (wy / GRID_PX).floor() as i32;
+        let mut min_dist_sq = f32::MAX;
+        for dy in -2..=2 {
+            for dx in -2..=2 {
+                let (cx, cy) = (gx + dx, gy + dy);
+                if !boundary.contains(&(cx, cy)) { continue; }
+                let (x1, y1) = (cx as f32 * GRID_PX, cy as f32 * GRID_PX);
+                let (nx, ny) = (wx.clamp(x1, x1 + GRID_PX), wy.clamp(y1, y1 + GRID_PX));
+                min_dist_sq = min_dist_sq.min((wx - nx).powi(2) + (wy - ny).powi(2));
+            }
+        }
+        for &(x1, y1, x2, y2) in segments {
+            min_dist_sq = min_dist_sq.min(point_to_segment_dist_sq(wx, wy, x1, y1, x2, y2));
+        }
+        min_dist_sq.sqrt()
+    }
+
+    #[test]
+    fn wall_distance_matches_scanning_every_segment_within_reach() {
+        // A ragged ring of short segments (like a cave contour) plus some boundary cells
+        let g = GRID_PX;
+        let segments: Vec<(f32, f32, f32, f32)> = (0..400).map(|i| {
+            let a = i as f32 / 400.0 * std::f32::consts::TAU;
+            let b = (i + 1) as f32 / 400.0 * std::f32::consts::TAU;
+            let r = |t: f32| 30.0 * g + hash_f32(t, 0.0, 9) * g;
+            (a.cos() * r(a), a.sin() * r(a), b.cos() * r(b), b.sin() * r(b))
+        }).collect();
+        let boundary: CellSet = (-5..5).map(|x| (x, 0)).collect();
+        let reach = 2.5 * g;
+        let walls = WallDistance::new(&boundary, &segments, reach);
+        for i in 0..20_000 {
+            let x = (hash_f32(i as f32, 1.0, 3) - 0.5) * 80.0 * g;
+            let y = (hash_f32(1.0, i as f32, 4) - 0.5) * 80.0 * g;
+            let (fast, slow) = (walls.dist(x, y), scan_wall_distance(x, y, &boundary, &segments));
+            if slow <= reach {
+                assert_eq!(fast, slow, "at {:?}", (x, y));
+            } else {
+                assert!(fast > reach, "at {:?}: {} vs {}", (x, y), fast, slow);
+            }
+        }
     }
 
     fn scan_nearest(seeds: &[(f32, f32, f32)], px: f32, py: f32) -> usize {

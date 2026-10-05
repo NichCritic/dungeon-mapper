@@ -406,9 +406,11 @@ impl DungeonApp {
             .filter(|rl| rl.is_rotated())
             .map(|rl| (rl.room_id.clone(), rl.rotation))
             .collect();
+        let previous = self.dungeon.layout.take();
         match crate::solver::layout::solve_layout(
-            &self.dungeon.graph,
+            &mut self.dungeon.graph,
             self.spatial_state.density_gap,
+            previous.as_ref(),
         ) {
             Ok(mut layout) => {
                 layout.bounds = old_bounds;
@@ -423,7 +425,10 @@ impl DungeonApp {
                 }
                 self.dungeon.layout = Some(layout);
             }
-            Err(e) => eprintln!("Layout solver error: {}", e),
+            Err(e) => {
+                eprintln!("Layout solver error: {}", e);
+                self.dungeon.layout = previous;
+            }
         }
         // Clear cave cells so they regenerate with updated exits
         for room in &mut self.dungeon.graph.rooms {
@@ -1653,13 +1658,13 @@ impl DungeonApp {
                 }
                 if let Some(layout) = &self.dungeon.layout {
                     let enc_hash = crate::ui::encounters_view::cache_spec(layout, &self.dungeon.graph, &self.dungeon.theme).hash;
-                    if !self.encounters_state.render_cache.is_current(enc_hash) { stale_renders.push("Encounters"); }
+                    if !self.encounters_state.render_cache.is_current(enc_hash) && !self.encounters_state.render_cache.has_failed(enc_hash) { stale_renders.push("Encounters"); }
                     let pres_hash = crate::ui::presentation_view::cache_spec(layout, &self.dungeon.graph, &self.dungeon.theme).hash;
-                    if !self.presentation_view_state.render_cache.is_current(pres_hash) { stale_renders.push("Presentation"); }
+                    if !self.presentation_view_state.render_cache.is_current(pres_hash) && !self.presentation_view_state.render_cache.has_failed(pres_hash) { stale_renders.push("Presentation"); }
                     let styled_hash = crate::ui::styled_view::cache_spec(layout, &self.dungeon.graph, &self.dungeon.theme, self.styled_state.show_grid, self.styled_state.current_floor).hash;
-                    if !self.styled_state.render_cache.is_current(styled_hash) { stale_renders.push("Styled"); }
+                    if !self.styled_state.render_cache.is_current(styled_hash) && !self.styled_state.render_cache.has_failed(styled_hash) { stale_renders.push("Styled"); }
                     let decor_hash = crate::ui::decor_view::cache_spec(layout, &self.dungeon.graph, &self.dungeon.theme, self.decor_state.current_floor).hash;
-                    if !self.decor_state.render_cache.is_current(decor_hash) { stale_renders.push("Decor"); }
+                    if !self.decor_state.render_cache.is_current(decor_hash) && !self.decor_state.render_cache.has_failed(decor_hash) { stale_renders.push("Decor"); }
                 }
             }
             ui.horizontal(|ui| {
@@ -2253,7 +2258,7 @@ impl DungeonApp {
             (crate::ui::decor_view::cache_spec(layout, graph, theme, self.decor_state.current_floor), &mut self.decor_state.render_cache, decor_filtered),
         ];
         for (spec, cache, filtered) in caches {
-            if !filtered && !cache.is_current(spec.hash) && cache.pending_label().is_none() {
+            if !filtered && !cache.is_current(spec.hash) && cache.pending_label().is_none() && !cache.has_failed(spec.hash) {
                 cache.ensure_spec(&spec, graph, layout, theme);
                 ctx.request_repaint_after(CACHE_CHECK_INTERVAL);
                 return;

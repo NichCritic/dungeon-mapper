@@ -164,6 +164,31 @@ pub struct CaveData {
     pub contour_segments: Vec<(f32, f32, f32, f32)>,
 }
 
+impl CaveData {
+    /// Runs of floor cells, row by row over `rows`, for a cave `width` cells wide:
+    /// (row, first column, one past the last column). Big caves have tens of thousands
+    /// of cells, so they are drawn as runs rather than cell by cell.
+    pub fn floor_runs(&self, width: usize, rows: std::ops::Range<usize>) -> impl Iterator<Item = (usize, usize, usize)> + '_ {
+        rows.flat_map(move |ly| {
+            let row = self.cells.get(ly * width..(ly + 1) * width).unwrap_or(&[]);
+            let mut x = 0;
+            std::iter::from_fn(move || {
+                while x < row.len() && !row[x] {
+                    x += 1;
+                }
+                if x >= row.len() {
+                    return None;
+                }
+                let start = x;
+                while x < row.len() && row[x] {
+                    x += 1;
+                }
+                Some((ly, start, x))
+            })
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
 pub enum DecorType {
     Table,
@@ -619,6 +644,23 @@ impl Room {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn floor_runs_merge_neighbouring_floor_cells() {
+        // 4 wide, rows: floor floor rock floor / all rock / all floor
+        let cave = CaveData {
+            cells: vec![true, true, false, true, false, false, false, false, true, true, true, true],
+            seed: 0,
+            algorithm: CaveAlgorithm::CellularAutomata,
+            density: 0.45,
+            smoothing_iterations: 4,
+            generation: 0,
+            contour_segments: Vec::new(),
+        };
+        let runs: Vec<_> = cave.floor_runs(4, 0..3).collect();
+        assert_eq!(runs, vec![(0, 0, 2), (0, 3, 4), (2, 0, 4)]);
+        assert_eq!(cave.floor_runs(4, 1..2).count(), 0);
+    }
 
     #[test]
     fn test_room_new() {

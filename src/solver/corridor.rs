@@ -140,7 +140,7 @@ pub fn route_corridors(
     // Exclude container room interiors from forbidden set so corridors can
     // route through the parent's empty space between children.
     let container_ids = collect_container_ids(graph);
-    let mut per_floor = init_per_floor_forbidden_with_exclusions(graph, layout, &container_ids);
+    let per_floor_rooms = init_per_floor_forbidden_with_exclusions(graph, layout, &container_ids);
 
     // Sort edges by distance (shorter first)
     let mut sorted_edges: Vec<&StoredEdge> = graph.connections.iter().collect();
@@ -157,27 +157,43 @@ pub fn route_corridors(
         }
     });
 
-    let mut corridors = Vec::new();
-
-    for edge in &sorted_edges {
-        // Flush connections have no corridor
-        if edge.connection.connection_type == ConnectionType::Flush {
-            continue;
+    // Corridors are routed one at a time, so an early one can wall off a later one.
+    // When that happens, route the blocked ones first and try again; keep the best pass.
+    let mut best: Option<((usize, i32), Vec<CorridorSegment>)> = None;
+    let mut order: Vec<&StoredEdge> = sorted_edges.into_iter()
+        .filter(|e| e.connection.connection_type != ConnectionType::Flush)
+        .collect();
+    for _ in 0..REROUTE_PASSES {
+        let mut per_floor = per_floor_rooms.clone();
+        let mut corridors = Vec::new();
+        for edge in &order {
+            let (Some(src_rl), Some(tgt_rl)) = (layout.room_by_id(&edge.source_room_id), layout.room_by_id(&edge.target_room_id)) else {
+                continue;
+            };
+            let pinned = pinned_map.get(&edge.connection.id).cloned().unwrap_or_default();
+            corridors.extend(route_edge(graph, edge, src_rl, tgt_rl, pinned, &mut per_floor));
         }
-
-        let src_rl = layout.room_by_id(&edge.source_room_id);
-        let tgt_rl = layout.room_by_id(&edge.target_room_id);
-
-        let Some((src_rl, tgt_rl)) = src_rl.zip(tgt_rl) else {
-            continue;
-        };
-
-        let pinned = pinned_map.get(&edge.connection.id).cloned().unwrap_or_default();
-        corridors.extend(route_edge(graph, edge, src_rl, tgt_rl, pinned, &mut per_floor));
+        let failed: HashSet<&str> = corridors.iter().filter(|c| c.invalid).map(|c| c.connection_id.as_str()).collect();
+        let length: i32 = corridors.iter()
+            .map(|c| c.waypoints.windows(2).map(|w| (w[1].x - w[0].x).abs() + (w[1].y - w[0].y).abs()).sum::<i32>())
+            .sum();
+        let key = (failed.len(), length);
+        let done = failed.is_empty();
+        let (blocked, rest): (Vec<&StoredEdge>, Vec<&StoredEdge>) = order.iter()
+            .partition(|e| failed.contains(e.connection.id.as_str()));
+        if best.as_ref().is_none_or(|(k, _)| key < *k) {
+            best = Some((key, corridors));
+        }
+        if done {
+            break;
+        }
+        order = blocked.into_iter().chain(rest).collect();
     }
-
-    corridors
+    best.map(|(_, c)| c).unwrap_or_default()
 }
+
+/// How many times `route_corridors` re-routes with the blocked connections moved first.
+const REROUTE_PASSES: usize = 4;
 
 /// Route one connection around the current forbidden cells, and stamp the result
 /// into them so later corridors keep clear. Waypoints come back in center coordinates.

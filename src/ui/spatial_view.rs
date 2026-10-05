@@ -15,8 +15,6 @@ enum DragTarget {
     Waypoint(usize, usize),
     /// Dragging a group constraint corner: (group index, corner: 0=TL 1=TR 2=BL 3=BR)
     GroupCorner(usize, u8),
-    /// Dragging a whole group (group index)
-    Group(usize),
     /// Dragging an elevation section: (room_id, section index)
     Section(String, usize),
     /// Dragging a corridor exit handle: (connection_id, is_source_exit)
@@ -315,7 +313,7 @@ fn handle_spatial_interactions(
     }
 }
 
-/// A primary drag starting: pick what it grabs (rotation handle, waypoint, exit, group corner, section, room or group). Returns true when the input is used up.
+/// A primary drag starting: pick what it grabs (rotation handle, waypoint, exit, group corner, section or room). Returns true when the input is used up.
 fn on_drag_start(
     response: &egui::Response,
     transform: &ViewTransform,
@@ -418,37 +416,9 @@ fn on_drag_start(
             }
         }
 
-        // Check rooms — prefer deepest-nested (smallest) room at click point
-        let gx = world_to_grid(world.x);
-        let gy = world_to_grid(world.y);
+        // Check rooms — see pick_room for which wins where they overlap
         if let Some(layout) = &dungeon.layout {
-            let mut best_hit: Option<(&RoomLayout, u32)> = None; // (room_layout, nesting_depth)
-            for rl in &layout.rooms {
-                if let Some(floor) = state.current_floor {
-                    if let Some(room) = dungeon.graph.room_by_id(&rl.room_id) {
-                        if !room.floor.visible_on(floor) {
-                            continue;
-                        }
-                    }
-                }
-
-                if room_hit(rl, world, 0.4) {
-                    let depth = dungeon.graph.nesting_depth(&rl.room_id);
-                    let area = rl.width * rl.height;
-                    let is_better = match &best_hit {
-                        None => true,
-                        Some((prev, prev_depth)) => {
-                            depth > *prev_depth
-                                || (depth == *prev_depth && area < prev.width * prev.height)
-                        }
-                    };
-                    if is_better {
-                        best_hit = Some((rl, depth));
-                    }
-                }
-            }
-
-            if let Some((rl, _)) = best_hit {
+            if let Some(rl) = pick_room(layout, &dungeon.graph, state.current_floor, world) {
                 let rl_id = rl.room_id.clone();
                 if state.selected_room.as_deref() != Some(&rl_id) {
                     state.cave_edit_mode = false;
@@ -459,23 +429,6 @@ fn on_drag_start(
                 state.drag_target = DragTarget::Room(rl_id);
                 state.drag_accum = egui::Vec2::ZERO;
                 return true;
-            }
-
-            // Check group body (after rooms, so rooms take priority)
-            for (gi, group) in dungeon.graph.groups.iter().enumerate() {
-                if let Some((bx, by, bw, bh)) = group.spatial_bounds(layout) {
-                    if gx >= bx && gx < bx + bw as i32
-                        && gy >= by && gy < by + bh as i32
-                    {
-                        state.selected_group = Some(gi);
-                        state.selected_room = None;
-                        state.selected_corridor = None;
-                        state.selected_waypoint = None;
-                        state.drag_target = DragTarget::Group(gi);
-                        state.drag_accum = egui::Vec2::ZERO;
-                        return true;
-                    }
-                }
             }
         }
     }
@@ -606,31 +559,7 @@ fn on_click(
             } else {
                 // Check room hit — prefer deepest-nested room
                 let mut hit_room = false;
-                let mut best_hit: Option<(&RoomLayout, u32)> = None;
-                for rl in &layout.rooms {
-                    if let Some(floor) = state.current_floor {
-                        if let Some(room) = dungeon.graph.room_by_id(&rl.room_id) {
-                            if !room.floor.visible_on(floor) {
-                                continue;
-                            }
-                        }
-                    }
-                    if room_hit(rl, world, 0.4) {
-                        let depth = dungeon.graph.nesting_depth(&rl.room_id);
-                        let area = rl.width * rl.height;
-                        let is_better = match &best_hit {
-                            None => true,
-                            Some((prev, prev_depth)) => {
-                                depth > *prev_depth
-                                    || (depth == *prev_depth && area < prev.width * prev.height)
-                            }
-                        };
-                        if is_better {
-                            best_hit = Some((rl, depth));
-                        }
-                    }
-                }
-                if let Some((rl, _)) = best_hit {
+                if let Some(rl) = pick_room(layout, &dungeon.graph, state.current_floor, world) {
                     let rl_id = rl.room_id.clone();
                     if !hit_room {
                         // Check if click is on an elevation section
@@ -1008,58 +937,6 @@ fn on_drag(
                     }
                 }
             }
-            DragTarget::Group(gi) => {
-                let gi = *gi;
-                if gi < dungeon.graph.groups.len() {
-                    let group_room_ids = dungeon.graph.groups[gi].room_ids.clone();
-                    let room_id_set: std::collections::HashSet<&String> = group_room_ids.iter().collect();
-
-                    // Find connections internal to the group
-                    let internal_conn_ids: Vec<String> = dungeon.graph.connections.iter()
-                        .filter(|e| room_id_set.contains(&e.source_room_id) && room_id_set.contains(&e.target_room_id))
-                        .map(|e| e.connection.id.clone())
-                        .collect();
-
-                    if let Some(layout) = &mut dungeon.layout {
-                        // Move all rooms in the group
-                        for rid in &group_room_ids {
-                            if let Some(rl) = layout.room_by_id_mut(rid) {
-                                rl.x += grid_steps_x;
-                                rl.y += grid_steps_y;
-                            }
-                        }
-                        // Move internal corridor waypoints
-                        for corridor in &mut layout.corridors {
-                            if internal_conn_ids.contains(&corridor.connection_id) {
-                                for wp in &mut corridor.waypoints {
-                                    wp.x += grid_steps_x;
-                                    wp.y += grid_steps_y;
-                                }
-                                for wp in &mut corridor.pinned_waypoints {
-                                    wp.x += grid_steps_x;
-                                    wp.y += grid_steps_y;
-                                }
-                            }
-                        }
-                    }
-
-                    // Shift exit positions for connections touching group rooms
-                    for edge in &mut dungeon.graph.connections {
-                        if room_id_set.contains(&edge.source_room_id) {
-                            if let Some(ref mut exit) = edge.source_exit {
-                                exit.x += grid_steps_x as f32;
-                                exit.y += grid_steps_y as f32;
-                            }
-                        }
-                        if room_id_set.contains(&edge.target_room_id) {
-                            if let Some(ref mut exit) = edge.target_exit {
-                                exit.x += grid_steps_x as f32;
-                                exit.y += grid_steps_y as f32;
-                            }
-                        }
-                    }
-                }
-            }
             DragTarget::Section(room_id, sec_idx) => {
                 let room_id = room_id.clone();
                 let sec_idx = *sec_idx;
@@ -1125,24 +1002,6 @@ fn on_drag_stop(
         }
         DragTarget::GroupCorner(_, _) => {
             // Group constraint changed — will trigger re-solve via hash check
-        }
-        DragTarget::Group(gi) => {
-            let gi = *gi;
-            // Re-route only corridors connected to rooms in the group
-            if let Some(layout) = &mut dungeon.layout {
-                let affected: std::collections::HashSet<String> =
-                    if gi < dungeon.graph.groups.len() {
-                        dungeon.graph.groups[gi].room_ids.iter().cloned().collect()
-                    } else {
-                        std::collections::HashSet::new()
-                    };
-                layout.corridors =
-                    crate::solver::corridor::route_corridors_for_rooms(
-                        &dungeon.graph, layout, &affected,
-                    );
-                layout.recheck_corridor_overlaps();
-            }
-            state.cave_contours_dirty = true;
         }
         DragTarget::Section(_, _) => {} // position already updated during drag
         DragTarget::Rotate(room_id) => {
@@ -1266,6 +1125,34 @@ fn grid_line(a: (i32, i32), b: (i32, i32)) -> Vec<(i32, i32)> {
 
 /// Whether a world point (pixels) lies on a room, with `margin` cells of slack, in the
 /// room's own (possibly rotated) frame.
+/// The room a click at `world` lands on, among those visible on `floor`: the most deeply
+/// nested; then, where caves overlap, one whose open floor is under the cursor over one
+/// where it's rock; then the smallest.
+fn pick_room<'a>(layout: &'a SpatialLayout, graph: &DungeonGraph, floor: Option<i32>, world: egui::Pos2) -> Option<&'a RoomLayout> {
+    layout.rooms.iter()
+        .filter(|rl| floor.is_none_or(|f| graph.room_by_id(&rl.room_id).is_none_or(|r| r.floor.visible_on(f))))
+        .filter(|rl| room_hit(rl, world, 0.4))
+        .max_by_key(|rl| (
+            graph.nesting_depth(&rl.room_id),
+            !on_cave_rock(rl, graph.room_by_id(&rl.room_id), world),
+            std::cmp::Reverse(rl.width * rl.height),
+        ))
+}
+
+/// Whether `world` falls on a rock (non-floor) cell of a generated cave.
+fn on_cave_rock(rl: &RoomLayout, room: Option<&Room>, world: egui::Pos2) -> bool {
+    let Some(cave) = room.filter(|r| r.shape == RoomShape::Cave).and_then(|r| r.cave_data.as_ref()) else { return false };
+    if cave.cells.len() != (rl.width * rl.height) as usize {
+        return false;
+    }
+    let (lx, ly) = rl.to_local(world.x / GRID_PX, world.y / GRID_PX);
+    let (lx, ly) = (lx.floor() as i64, ly.floor() as i64);
+    if lx < 0 || ly < 0 || lx >= rl.width as i64 || ly >= rl.height as i64 {
+        return false;
+    }
+    !cave.cells[(ly * rl.width as i64 + lx) as usize]
+}
+
 fn room_hit(rl: &RoomLayout, world: egui::Pos2, margin: f32) -> bool {
     let (lx, ly) = rl.to_local(world.x / GRID_PX, world.y / GRID_PX);
     lx >= -margin && ly >= -margin && lx <= rl.width as f32 + margin && ly <= rl.height as f32 + margin
@@ -1292,6 +1179,19 @@ fn is_orthogonal(graph: &DungeonGraph, corridor: &CorridorSegment) -> bool {
     graph.connections.iter()
         .find(|e| e.connection.id == corridor.connection_id)
         .is_none_or(|e| e.connection.corridor_angle == CorridorAngle::Orthogonal)
+}
+
+/// The columns and rows of an unrotated room that fall inside `clip` (screen space),
+/// as local cell ranges.
+fn visible_cells(transform: &ViewTransform, clip: egui::Rect, rl: &RoomLayout) -> (std::ops::Range<usize>, std::ops::Range<usize>) {
+    let a = transform.screen_to_world(clip.min);
+    let b = transform.screen_to_world(clip.max);
+    let span = |lo: f32, hi: f32, origin: i32, len: u32| {
+        let start = ((lo.min(hi) / GRID_PX).floor() as i32 - origin).clamp(0, len as i32) as usize;
+        let end = ((lo.max(hi) / GRID_PX).ceil() as i32 - origin).clamp(0, len as i32) as usize;
+        start..end
+    };
+    (span(a.x, b.x, rl.x, rl.width), span(a.y, b.y, rl.y, rl.height))
 }
 
 /// Draw a rotated room: its turned outline (or circle), cave cells, local grid, label
@@ -1321,12 +1221,10 @@ fn draw_rotated_room(
         }
         RoomShape::Cave if room.and_then(|r| r.cave_data.as_ref()).is_some_and(|c| c.cells.len() == (rl.width * rl.height) as usize) => {
             let cave = room.and_then(|r| r.cave_data.as_ref()).unwrap();
-            for ly in 0..rl.height as usize {
-                for lx in 0..rl.width as usize {
-                    let floor = cave.cells[ly * rl.width as usize + lx];
-                    let (x, y) = (lx as f32, ly as f32);
-                    painter.add(egui::Shape::convex_polygon(quad(x, y, x + 1.0, y + 1.0), if floor { fill } else { wall_fill }, egui::Stroke::NONE));
-                }
+            painter.add(egui::Shape::convex_polygon(quad(0.0, 0.0, w, h), wall_fill, egui::Stroke::NONE));
+            for (ly, x0, x1) in cave.floor_runs(rl.width as usize, 0..rl.height as usize) {
+                let (y, x0, x1) = (ly as f32, x0 as f32, x1 as f32);
+                painter.add(egui::Shape::convex_polygon(quad(x0, y, x1, y + 1.0), fill, egui::Stroke::NONE));
             }
             let contour = egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(40, 40, 40));
             for &(x1, y1, x2, y2) in &cave.contour_segments {
@@ -1866,38 +1764,33 @@ fn draw_rooms(
                 painter.circle_stroke(center, radius, stroke);
             }
             RoomShape::Cave => {
-                // Draw cave cells individually
-                if let Some(cave) = room.and_then(|r| r.cave_data.as_ref()) {
-                    if !cave.cells.is_empty() {
-                        let w = rl.width as usize;
-                        for ly in 0..rl.height as usize {
-                            for lx in 0..w {
-                                let gx = rl.x + lx as i32;
-                                let gy = rl.y + ly as i32;
-                                let cell_min = transform.world_to_screen(
-                                    egui::pos2(grid_to_world(gx), grid_to_world(gy)),
-                                );
-                                let cell_max = transform.world_to_screen(
-                                    egui::pos2(grid_to_world(gx + 1), grid_to_world(gy + 1)),
-                                );
-                                let cell_rect = egui::Rect::from_min_max(cell_min, cell_max);
-                                let is_floor = cave.cells.get(ly * w + lx).copied().unwrap_or(false);
-                                let c = if is_floor { fill } else { wall_fill };
-                                painter.rect_filled(cell_rect, 0.0, c);
-                            }
+                if let Some(cave) = room.and_then(|r| r.cave_data.as_ref()).filter(|c| !c.cells.is_empty()) {
+                    // Rock over the whole box, then the open floor as runs along each
+                    // row: big caves are tens of thousands of cells. Only the rows and
+                    // columns on screen are drawn.
+                    painter.rect_filled(rect.intersect(painter.clip_rect()), 0.0, wall_fill);
+                    let (cols, rows) = visible_cells(transform, painter.clip_rect(), rl);
+                    for (ly, x0, x1) in cave.floor_runs(rl.width as usize, rows) {
+                        let (x0, x1) = (x0.max(cols.start), x1.min(cols.end));
+                        if x0 >= x1 {
+                            continue;
                         }
-                        // Draw baked marching squares contour
-                        let contour_stroke = egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(40, 40, 40));
-                        for &(x1, y1, x2, y2) in &cave.contour_segments {
-                            let s1 = transform.world_to_screen(egui::pos2(x1, y1));
-                            let s2 = transform.world_to_screen(egui::pos2(x2, y2));
+                        let min = transform.world_to_screen(egui::pos2(grid_to_world(rl.x + x0 as i32), grid_to_world(rl.y + ly as i32)));
+                        let max = transform.world_to_screen(egui::pos2(grid_to_world(rl.x + x1 as i32), grid_to_world(rl.y + ly as i32 + 1)));
+                        painter.rect_filled(egui::Rect::from_min_max(min, max), 0.0, fill);
+                    }
+                    // Draw baked marching squares contour
+                    let contour_stroke = egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(40, 40, 40));
+                    let clip = painter.clip_rect().expand(2.0);
+                    for &(x1, y1, x2, y2) in &cave.contour_segments {
+                        let s1 = transform.world_to_screen(egui::pos2(x1, y1));
+                        let s2 = transform.world_to_screen(egui::pos2(x2, y2));
+                        if clip.intersects(egui::Rect::from_two_pos(s1, s2)) {
                             painter.line_segment([s1, s2], contour_stroke);
                         }
-                    } else {
-                        // No cells yet — draw as rectangle
-                        painter.rect_filled(rect, 0.0, fill);
                     }
                 } else {
+                    // No cells yet — draw as rectangle
                     painter.rect_filled(rect, 0.0, fill);
                 }
                 // AABB border — highlighted when in cave edit mode
@@ -1917,12 +1810,13 @@ fn draw_rooms(
         // Grid lines on all rooms
         {
             let grid_stroke = egui::Stroke::new(0.5_f32, egui::Color32::from_rgba_unmultiplied(80, 80, 80, 60));
-            for ly in 1..rl.height as i32 {
+            let (cols, rows) = visible_cells(transform, painter.clip_rect(), rl);
+            for ly in (rows.start.max(1) as i32)..(rows.end as i32).min(rl.height as i32) {
                 let y1 = transform.world_to_screen(egui::pos2(grid_to_world(rl.x), grid_to_world(rl.y + ly)));
                 let y2 = transform.world_to_screen(egui::pos2(grid_to_world(rl.x + rl.width as i32), grid_to_world(rl.y + ly)));
                 painter.line_segment([y1, y2], grid_stroke);
             }
-            for lx in 1..rl.width as i32 {
+            for lx in (cols.start.max(1) as i32)..(cols.end as i32).min(rl.width as i32) {
                 let x1 = transform.world_to_screen(egui::pos2(grid_to_world(rl.x + lx), grid_to_world(rl.y)));
                 let x2 = transform.world_to_screen(egui::pos2(grid_to_world(rl.x + lx), grid_to_world(rl.y + rl.height as i32)));
                 painter.line_segment([x1, x2], grid_stroke);
@@ -2919,6 +2813,39 @@ fn transform_group(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_click_picks_the_cave_whose_floor_is_under_it() {
+        let mut graph = DungeonGraph::new();
+        let mut layout = SpatialLayout::new();
+        // Two 4x4 caves overlapping by two columns; A is open on the left, B on the right
+        let mut ids = Vec::new();
+        for (i, x) in [0, 2].into_iter().enumerate() {
+            let mut r = Room::new(format!("Cave{i}"));
+            r.shape = RoomShape::Cave;
+            let open_col = |c: usize| if i == 0 { c < 2 } else { c >= 2 };
+            r.cave_data = Some(CaveData {
+                cells: (0..16).map(|k| open_col(k % 4)).collect(),
+                seed: 0,
+                algorithm: CaveAlgorithm::CellularAutomata,
+                density: 0.45,
+                smoothing_iterations: 4,
+                generation: 0,
+                contour_segments: Vec::new(),
+            });
+            ids.push(r.id.clone());
+            layout.rooms.push(RoomLayout {
+                room_id: r.id.clone(), x, y: 0, width: 4, height: 4,
+                violations: Vec::new(), wall_openings: Vec::new(), rotation: 0.0,
+            });
+            graph.add_room(r);
+        }
+        let at = |gx: f32| egui::pos2(gx * GRID_PX, 1.5 * GRID_PX);
+        // Column 4 is inside both boxes but only B's floor (A's is rock there)
+        assert_eq!(pick_room(&layout, &graph, None, at(4.5)).map(|r| &r.room_id), Some(&ids[1]));
+        // Column 1 is only A's
+        assert_eq!(pick_room(&layout, &graph, None, at(1.5)).map(|r| &r.room_id), Some(&ids[0]));
+    }
 
     #[test]
     fn flipping_a_group_moves_pins_and_exits_with_it() {

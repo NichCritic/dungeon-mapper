@@ -26,7 +26,7 @@ mod tests {
 
         // Solve layout
         // Use gap=4 to ensure rooms have corridor space between them
-        let layout = solve_layout(&graph, 4).expect("layout should solve");
+        let layout = solve_layout(&mut graph.clone(), 4, None).expect("layout should solve");
         
         println!("Room positions:");
         for rl in &layout.rooms {

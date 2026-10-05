@@ -78,6 +78,8 @@ pub struct BackgroundRenderCache {
     current_hash: u64,
     /// Pending background render job.
     pending: Option<PendingRender>,
+    /// Inputs whose render crashed: not retried (it would crash again) until they change.
+    failed_hash: Option<u64>,
     /// Bumped whenever `commands` is replaced, so the replay cache knows to rebuild.
     generation: u64,
     replay: ReplayCache,
@@ -95,6 +97,7 @@ impl Default for BackgroundRenderCache {
             commands: None,
             current_hash: 0,
             pending: None,
+            failed_hash: None,
             generation: 0,
             replay: ReplayCache::default(),
         }
@@ -122,8 +125,8 @@ impl BackgroundRenderCache {
             return true;
         }
 
-        // Already building for this hash
-        if self.pending.as_ref().is_some_and(|p| p.hash == hash) {
+        // Already building for this hash, or its build crashed
+        if self.pending.as_ref().is_some_and(|p| p.hash == hash) || self.failed_hash == Some(hash) {
             return false;
         }
 
@@ -171,7 +174,7 @@ impl BackgroundRenderCache {
             return true;
         }
 
-        if self.pending.as_ref().is_some_and(|p| p.hash == hash) {
+        if self.pending.as_ref().is_some_and(|p| p.hash == hash) || self.failed_hash == Some(hash) {
             return false;
         }
 
@@ -194,20 +197,32 @@ impl BackgroundRenderCache {
 
     /// Poll for completion without triggering new builds.
     pub fn poll(&mut self) {
-        if let Some(pending) = &self.pending {
-            if let Ok(commands) = pending.rx.try_recv() {
-                let h = pending.hash;
+        let Some(pending) = &self.pending else { return };
+        match pending.rx.try_recv() {
+            Ok(commands) => {
+                self.current_hash = pending.hash;
                 self.pending = None;
                 self.commands = Some(commands);
-                self.current_hash = h;
                 self.generation += 1;
             }
+            // The build thread panicked: stop waiting on it rather than "loading" forever
+            Err(mpsc::TryRecvError::Disconnected) => {
+                eprintln!("Background render '{}' failed", pending.label);
+                self.failed_hash = Some(pending.hash);
+                self.pending = None;
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
         }
     }
 
     /// Check if the cache is current for the given hash.
     pub fn is_current(&self, hash: u64) -> bool {
         self.commands.is_some() && self.current_hash == hash
+    }
+
+    /// Whether the build for these inputs crashed (and so won't finish).
+    pub fn has_failed(&self, hash: u64) -> bool {
+        self.failed_hash == Some(hash)
     }
 
     /// Get the label of the in-progress build, if any.

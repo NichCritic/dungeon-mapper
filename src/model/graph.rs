@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use petgraph::graph::UnGraph;
 use serde::{Deserialize, Serialize};
 
 use super::{Connection, FloorRel, Room};
@@ -133,10 +132,26 @@ impl DungeonGraph {
         self.rooms.push(room);
     }
 
+    /// Remove a room with its connections, its place on the graph and its group
+    /// memberships. A containment group whose container this was goes too (its rooms
+    /// become free-standing), as does any group left empty.
     pub fn remove_room(&mut self, room_id: &str) {
         self.rooms.retain(|r| r.id != room_id);
         self.connections
             .retain(|e| e.source_room_id != room_id && e.target_room_id != room_id);
+        self.graph_positions.remove(room_id);
+        self.prune_groups();
+    }
+
+    /// Drop group memberships of rooms that no longer exist, containment groups whose
+    /// container is gone, and groups left empty. (Older versions left these behind when
+    /// a room was deleted.)
+    pub fn prune_groups(&mut self) {
+        let ids: HashSet<&str> = self.rooms.iter().map(|r| r.id.as_str()).collect();
+        for g in &mut self.groups {
+            g.room_ids.retain(|id| ids.contains(id.as_str()));
+        }
+        self.groups.retain(|g| !g.room_ids.is_empty() && g.parent_room_id.as_deref().is_none_or(|p| ids.contains(p)));
     }
 
     pub fn add_connection(&mut self, source_id: String, target_id: String, connection: Connection) {
@@ -319,28 +334,6 @@ impl DungeonGraph {
 
         errors
     }
-
-    /// Build a petgraph for algorithms (BFS, pathfinding, etc.)
-    pub fn build_petgraph(&self) -> (UnGraph<String, String>, HashMap<String, petgraph::graph::NodeIndex>) {
-        let mut graph = UnGraph::new_undirected();
-        let mut node_map = HashMap::new();
-
-        for room in &self.rooms {
-            let idx = graph.add_node(room.id.clone());
-            node_map.insert(room.id.clone(), idx);
-        }
-
-        for edge in &self.connections {
-            if let (Some(&src), Some(&tgt)) = (
-                node_map.get(&edge.source_room_id),
-                node_map.get(&edge.target_room_id),
-            ) {
-                graph.add_edge(src, tgt, edge.connection.id.clone());
-            }
-        }
-
-        (graph, node_map)
-    }
 }
 
 impl Default for DungeonGraph {
@@ -440,35 +433,27 @@ mod tests {
     }
 
     #[test]
-    fn test_build_petgraph_empty() {
-        let graph = DungeonGraph::new();
-        let (pg, node_map) = graph.build_petgraph();
-        assert_eq!(pg.node_count(), 0);
-        assert_eq!(pg.edge_count(), 0);
-        assert!(node_map.is_empty());
-    }
-
-    #[test]
-    fn test_build_petgraph_three_rooms() {
+    fn removing_a_room_drops_it_from_groups_and_the_graph_view() {
         let mut graph = DungeonGraph::new();
-        let r1 = Room::new("A".to_string());
-        let r2 = Room::new("B".to_string());
-        let r3 = Room::new("C".to_string());
-        let id1 = r1.id.clone();
-        let id2 = r2.id.clone();
-        let id3 = r3.id.clone();
-        graph.add_room(r1);
-        graph.add_room(r2);
-        graph.add_room(r3);
-        graph.add_connection(id1.clone(), id2.clone(), Connection::new(ConnectionType::Door));
-        graph.add_connection(id2.clone(), id3.clone(), Connection::new(ConnectionType::Open));
+        let ids: Vec<String> = (0..3).map(|i| { let r = Room::new(format!("R{i}")); let id = r.id.clone(); graph.add_room(r); id }).collect();
+        graph.graph_positions.insert(ids[1].clone(), (1.0, 2.0));
+        let mut loose = RoomGroup::new("Loose".into());
+        loose.room_ids = vec![ids[1].clone(), ids[2].clone()];
+        graph.groups.push(loose);
+        let mut inside = RoomGroup::new("Inside".into());
+        inside.parent_room_id = Some(ids[0].clone());
+        inside.room_ids = vec![ids[2].clone()];
+        graph.groups.push(inside);
 
-        let (pg, node_map) = graph.build_petgraph();
-        assert_eq!(pg.node_count(), 3);
-        assert_eq!(pg.edge_count(), 2);
-        assert!(node_map.contains_key(&id1));
-        assert!(node_map.contains_key(&id2));
-        assert!(node_map.contains_key(&id3));
+        graph.remove_room(&ids[1]);
+        assert!(!graph.graph_positions.contains_key(&ids[1]));
+        assert_eq!(graph.groups[0].room_ids, vec![ids[2].clone()], "dropped from its group");
+
+        // Removing a container removes its containment group; its room stays
+        graph.remove_room(&ids[0]);
+        assert!(graph.groups.iter().all(|g| g.parent_room_id.is_none()));
+        assert!(graph.room_by_id(&ids[2]).is_some());
+        assert!(graph.parent_of(&ids[2]).is_none());
     }
 
     #[test]

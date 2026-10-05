@@ -339,15 +339,10 @@ pub fn render_room_floor_with_color(
         RoomShape::Cave => {
             if let Some(cave) = room.and_then(|r| r.cave_data.as_ref()) {
                 if !cave.cells.is_empty() {
-                    let w = rl.width as usize;
-                    for ly in 0..rl.height as usize {
-                        for lx in 0..w {
-                            if cave.cells.get(ly * w + lx).copied().unwrap_or(false) {
-                                let px = (rl.x as usize + lx) as f32 * GRID_PX;
-                                let py = (rl.y as usize + ly) as f32 * GRID_PX;
-                                renderer.fill_rect(px, py, GRID_PX, GRID_PX, color);
-                            }
-                        }
+                    for (ly, x0, x1) in cave.floor_runs(rl.width as usize, 0..rl.height as usize) {
+                        let px = (rl.x + x0 as i32) as f32 * GRID_PX;
+                        let py = (rl.y + ly as i32) as f32 * GRID_PX;
+                        renderer.fill_rect(px, py, (x1 - x0) as f32 * GRID_PX, GRID_PX, color);
                     }
                     return;
                 }
@@ -1462,5 +1457,45 @@ fn rasterize_rotated_room(floor: &mut CellSet, rl: &RoomLayout, room: Option<&Ro
                 floor.insert((gx, gy));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::render::recording::{RecordingRenderer, RenderCommand};
+
+    #[test]
+    fn a_cave_left_of_the_origin_renders_its_floor_in_place() {
+        // A 3x2 cave at x=-13: its floor once went through `x as usize`, which panics
+        // (overflow) in debug builds and so stalled the background renders
+        let mut graph = DungeonGraph::new();
+        let mut r = Room::new("Cave".into());
+        r.shape = RoomShape::Cave;
+        r.cave_data = Some(CaveData {
+            cells: vec![true, true, false, false, true, true],
+            seed: 0,
+            algorithm: CaveAlgorithm::CellularAutomata,
+            density: 0.45,
+            smoothing_iterations: 4,
+            generation: 0,
+            contour_segments: Vec::new(),
+        });
+        let layout = SpatialLayout {
+            rooms: vec![RoomLayout {
+                room_id: r.id.clone(), x: -13, y: 5, width: 3, height: 2,
+                violations: Vec::new(), wall_openings: Vec::new(), rotation: 0.0,
+            }],
+            ..SpatialLayout::new()
+        };
+        graph.add_room(r);
+        let mut rec = RecordingRenderer::new();
+        let options = RenderOptions { show_grid: false, show_labels: false, show_notes: false, show_secrets: false, show_decor: false, show_lighting: false };
+        render_themed(&mut rec, &graph, &layout, &Theme::default(), &options);
+        let g = GRID_PX;
+        let floor = |x: f32, y: f32, w: f32| rec.commands.iter().any(|c| matches!(c,
+            RenderCommand::FillRect { x: cx, y: cy, w: cw, h, .. } if *cx == x * g && *cy == y * g && *cw == w * g && *h == g));
+        assert!(floor(-13.0, 5.0, 2.0), "first row's run");
+        assert!(floor(-12.0, 6.0, 2.0), "second row's run");
     }
 }

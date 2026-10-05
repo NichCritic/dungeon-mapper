@@ -38,6 +38,15 @@ pub fn serialize_campaign_json(campaign: &Campaign) -> Result<String, String> {
 /// - Version 1: versioned single dungeon ({ version, dungeon })
 /// - Version 2+: campaign format ({ version, campaign })
 fn deserialize_versioned(json: &str) -> Result<Campaign, String> {
+    let mut campaign = parse_versioned(json)?;
+    // Older versions left deleted rooms in their groups
+    for map in &mut campaign.maps {
+        map.graph.prune_groups();
+    }
+    Ok(campaign)
+}
+
+fn parse_versioned(json: &str) -> Result<Campaign, String> {
     let raw: serde_json::Value = serde_json::from_str(json).map_err(|e| e.to_string())?;
 
     if let Some(version) = raw.get("version").and_then(|v| v.as_u64()) {
