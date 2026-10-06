@@ -146,7 +146,7 @@ pub fn player_viewport(
         let light_map = if presentation.los_lighting { presentation.light_cache.as_ref() } else { None };
         if presentation.show_light_player {
             if let Some(map) = light_map {
-                lighting::render_light_overlay(&painter, &transform, map, 1.0);
+                lighting::render_light_overlay(&painter, &transform, &map.player_shade_runs, 1.0);
             }
         }
         if presentation.show_vision_player {

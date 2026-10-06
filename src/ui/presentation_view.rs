@@ -1173,7 +1173,7 @@ pub fn presentation_view(
         lighting::ensure_light_map(presentation, dungeon, layout, &occ, !dragging);
         if presentation.dm_show_light {
             if let Some(map) = presentation.light_cache.as_ref() {
-                lighting::render_light_overlay(&painter, &transform, map, 0.35);
+                lighting::render_light_overlay(&painter, &transform, &map.shade_runs, 0.35);
                 lighting::render_vision_rings(&painter, &transform, map);
             }
         }

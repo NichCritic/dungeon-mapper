@@ -20,6 +20,12 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1200.0, 800.0])
             .with_title("Dungeon Mapper"),
+        // On Wayland a vsynced buffer swap waits for the compositor's frame callback,
+        // and a window on a hidden workspace never gets one: the swap blocks the main
+        // thread, the app stops answering the compositor's pings, and it is reported
+        // as not responding. Seen with NVIDIA's EGL on Hyprland. egui only repaints
+        // when asked, so without vsync it still idles.
+        vsync: !cfg!(target_os = "linux"),
         ..Default::default()
     };
 

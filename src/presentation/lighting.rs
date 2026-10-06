@@ -85,8 +85,12 @@ pub struct LightMap {
     pub lights: Vec<LightRing>,
     pub vision: Vec<VisionRing>,
     /// Shading to draw, merged into horizontal runs of equal darkness so the overlay is
-    /// a few hundred rects rather than one per cell.
+    /// a few hundred rects rather than one per cell. Covers the whole map (the DM view).
     pub shade_runs: Vec<ShadeRun>,
+    /// The same shading limited to what the player map shows — rooms and corridors not
+    /// hidden by fog, and a one-cell wall band around them — so the overlay never draws
+    /// the shape of anything the players haven't found.
+    pub player_shade_runs: Vec<ShadeRun>,
 }
 
 /// Cells `x0..x1` of row `y` share one shade alpha (before the view's scale).
@@ -116,19 +120,65 @@ impl LightMap {
     }
 
     fn compute_shade_runs(&self) -> Vec<ShadeRun> {
-        let mut shaded: Vec<((i32, i32), f32)> = self.floor.iter().chain(self.band.iter())
+        merge_runs(self.floor.iter().chain(self.band.iter())
+            .filter_map(|&c| self.shade_alpha(c).map(|a| (c, a)))
+            .collect())
+    }
+
+    /// Shading over just the `shown` floor cells and a wall band around them. A band
+    /// cell takes its shade only from the shown cells it touches, so a hidden corridor
+    /// next to a room shades exactly like the room's other walls.
+    fn compute_player_shade_runs(&self, shown: &CellSet) -> Vec<ShadeRun> {
+        let mut shaded: Vec<((i32, i32), f32)> = shown.iter()
             .filter_map(|&c| self.shade_alpha(c).map(|a| (c, a)))
             .collect();
-        shaded.sort_by_key(|&((x, y), _)| (y, x));
-        let mut runs: Vec<ShadeRun> = Vec::new();
-        for ((x, y), alpha) in shaded {
-            match runs.last_mut() {
-                Some(r) if r.y == y && r.x1 == x && r.alpha == alpha => r.x1 += 1,
-                _ => runs.push(ShadeRun { y, x0: x, x1: x + 1, alpha }),
+        let mut band: CellSet = CellSet::default();
+        for &(x, y) in shown {
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    if !shown.contains(&(x + dx, y + dy)) {
+                        band.insert((x + dx, y + dy));
+                    }
+                }
             }
         }
-        runs
+        for &(bx, by) in &band {
+            let mut best = CellLight::Dark;
+            let mut seen = false;
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    let n = (bx + dx, by + dy);
+                    if !shown.contains(&n) { continue; }
+                    best = best.max(self.level(n));
+                    seen |= self.party_visible.contains(&n);
+                }
+            }
+            let alpha = if !seen {
+                Some(235.0)
+            } else {
+                match best {
+                    CellLight::Bright => None,
+                    CellLight::Dim => Some(110.0),
+                    CellLight::Dark => Some(170.0),
+                }
+            };
+            shaded.extend(alpha.map(|a| ((bx, by), a)));
+        }
+        merge_runs(shaded)
     }
+}
+
+/// Merge shaded cells into horizontal runs of equal darkness.
+fn merge_runs(mut shaded: Vec<((i32, i32), f32)>) -> Vec<ShadeRun> {
+    shaded.sort_by_key(|&((x, y), _)| (y, x));
+    let mut runs: Vec<ShadeRun> = Vec::new();
+    for ((x, y), alpha) in shaded {
+        match runs.last_mut() {
+            Some(r) if r.y == y && r.x1 == x && r.alpha == alpha => r.x1 += 1,
+            _ => runs.push(ShadeRun { y, x0: x, x1: x + 1, alpha }),
+        }
+    }
+    runs
 }
 
 /// Origin of a light: carried token, explicit position, or the room center.
@@ -331,16 +381,24 @@ pub fn compute_light_map(
         if seen { party_visible.insert(c); }
     }
 
-    let mut map = LightMap { key, floor, band, cells, party_visible, lights, vision, shade_runs: Vec::new() };
+    let mut map = LightMap { key, floor, band, cells, party_visible, lights, vision, shade_runs: Vec::new(), player_shade_runs: Vec::new() };
     map.shade_runs = map.compute_shade_runs();
+    // What the player map draws: rooms and corridors fog hasn't hidden
+    let shown = crate::render::themed::rasterize_floor_filtered(
+        layout, &dungeon.graph, crate::render::themed::Coverage::Center,
+        |rl| *visibility.room_visibility(&rl.room_id) != Visibility::Hidden,
+        |c| super::fog::corridor_visibility(&c.connection_id, visibility, &dungeon.graph) != Visibility::Hidden,
+    );
+    map.player_shade_runs = map.compute_player_shade_runs(&shown);
     map
 }
 
-/// Shade cells the party cannot see (near-black) and dim cells (grey).
-/// `alpha_scale` lets the DM canvas draw the same map faintly.
-pub fn render_light_overlay(painter: &egui::Painter, t: &ViewTransform, map: &LightMap, alpha_scale: f32) {
+/// Shade cells the party cannot see (near-black) and dim cells (grey): the player
+/// window passes [`LightMap::player_shade_runs`], the DM canvas [`LightMap::shade_runs`]
+/// with a small `alpha_scale` to draw it faintly.
+pub fn render_light_overlay(painter: &egui::Painter, t: &ViewTransform, runs: &[ShadeRun], alpha_scale: f32) {
     let clip = painter.clip_rect();
-    for run in &map.shade_runs {
+    for run in runs {
         let min = t.world_to_screen(egui::pos2(run.x0 as f32 * GRID_PX, run.y as f32 * GRID_PX));
         let max = t.world_to_screen(egui::pos2(run.x1 as f32 * GRID_PX, (run.y + 1) as f32 * GRID_PX));
         let rect = egui::Rect::from_two_pos(min, max).expand(0.5);
@@ -406,7 +464,7 @@ mod tests {
         let cells: CellMap<CellLight> =
             [((0, 0), CellLight::Dim), ((1, 0), CellLight::Dim), ((2, 0), CellLight::Bright)].into_iter().collect();
         let party_visible: CellSet = [(0, 0), (1, 0), (2, 0), (0, 1), (1, 1)].into_iter().collect();
-        let mut map = LightMap { key: 0, floor, band, cells, party_visible, lights: Vec::new(), vision: Vec::new(), shade_runs: Vec::new() };
+        let mut map = LightMap { key: 0, floor, band, cells, party_visible, lights: Vec::new(), vision: Vec::new(), shade_runs: Vec::new(), player_shade_runs: Vec::new() };
         map.shade_runs = map.compute_shade_runs();
         assert_eq!(map.shade_runs, vec![
             ShadeRun { y: -1, x0: 0, x1: 1, alpha: 235.0 },
@@ -414,6 +472,30 @@ mod tests {
             ShadeRun { y: 0, x0: 3, x1: 4, alpha: 235.0 },
             ShadeRun { y: 1, x0: 0, x1: 2, alpha: 170.0 },
         ]);
+    }
+
+    #[test]
+    fn player_shading_leaves_hidden_rooms_out() {
+        // Two rooms side by side, one revealed and one still hidden by fog
+        let mut d = crate::model::Dungeon::new("t".into());
+        let (a, b) = (crate::model::Room::new("A".into()), crate::model::Room::new("B".into()));
+        let (aid, bid) = (a.id.clone(), b.id.clone());
+        d.graph.add_room(a);
+        d.graph.add_room(b);
+        let rl = |id: &str, x| RoomLayout { room_id: id.to_string(), x, y: 0, width: 4, height: 4, violations: Vec::new(), wall_openings: Vec::new(), rotation: 0.0 };
+        let layout = SpatialLayout { rooms: vec![rl(&aid, 0), rl(&bid, 10)], corridors: Vec::new(), bounds: Vec::new() };
+        let snap = PresentationSnapshot {
+            room_visibility: [(aid.clone(), Visibility::Visible), (bid.clone(), Visibility::Hidden)].into_iter().collect(),
+            doors_open: Default::default(),
+        };
+        let occ = los::build_static_occluders(&d, &layout, &snap);
+        let map = compute_light_map(&d, &layout, &snap, &occ, 0);
+        let covers = |runs: &[ShadeRun], x: i32| runs.iter().any(|r| r.y == 1 && r.x0 <= x && x < r.x1);
+        assert!(covers(&map.shade_runs, 11), "the DM map shades the hidden room");
+        for x in 9..15 {
+            assert!(!covers(&map.player_shade_runs, x), "the player map shades hidden room B at x={x}");
+        }
+        assert!(covers(&map.player_shade_runs, 4), "the revealed room's wall band is still shaded");
     }
 
     fn make_layout_with_room(room_id: &str, x: i32, y: i32, w: u32, h: u32) -> SpatialLayout {

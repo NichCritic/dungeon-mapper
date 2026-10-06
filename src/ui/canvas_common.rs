@@ -99,7 +99,8 @@ pub fn paint_render_pending(ui: &egui::Ui, painter: &egui::Painter, rect: egui::
         egui::FontId::proportional(14.0),
         egui::Color32::WHITE,
     );
-    ui.ctx().request_repaint();
+    // Poll for the finished render without spinning: frames aren't vsync-paced on Linux
+    ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
 }
 
 /// A room's outline on screen (turned with the room when rotated).

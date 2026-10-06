@@ -191,7 +191,11 @@ pub fn render_map(
     }
     // Redraw corridor floors at circular room junctions to punch through
     // the circle wall stroke that covers the corridor opening.
-    repair_circle_junctions(renderer, graph, layout, theme);
+    repair_circle_junctions(renderer, graph, layout, |c| match audience.corridor(&c.connection_id, graph) {
+        Visibility::Hidden => None,
+        Visibility::Explored => Some(dimmed_floor),
+        Visibility::Visible => Some(theme.floor_color),
+    });
     // Build set of cells inside cave rooms (so corridor walls don't double-draw there)
     let cave_cells = build_cave_cell_set(layout, graph);
     for &ci in &corridor_order {
@@ -954,11 +958,13 @@ pub fn render_corridor_walls(
 
 /// Redraw corridor floor segments that overlap with circular room bounding boxes.
 /// This repairs the circle wall stroke that would otherwise cover the corridor opening.
+/// `floor_color` gives each corridor's floor colour for the audience, or `None` for a
+/// corridor they can't see (its opening stays closed).
 pub fn repair_circle_junctions(
     renderer: &mut dyn MapRenderer,
     graph: &DungeonGraph,
     layout: &SpatialLayout,
-    theme: &Theme,
+    floor_color: impl Fn(&CorridorSegment) -> Option<[u8; 4]>,
 ) {
     // Collect circular room bounding rects
     let circle_rooms: Vec<&RoomLayout> = layout.rooms.iter().filter(|rl| {
@@ -975,6 +981,8 @@ pub fn repair_circle_junctions(
         if geometry::is_freeform(corridor, layout, graph) {
             continue;
         }
+        // A corridor the audience can't see leaves the rim whole
+        let Some(color) = floor_color(corridor) else { continue };
         for (min_gx, min_gy, max_gx, max_gy) in corridor.run_boxes() {
 
             for rl in &circle_rooms {
@@ -991,7 +999,7 @@ pub fn repair_circle_junctions(
                     let py = overlap_min_y as f32 * GRID_PX;
                     let pw = (overlap_max_x - overlap_min_x) as f32 * GRID_PX;
                     let ph = (overlap_max_y - overlap_min_y) as f32 * GRID_PX;
-                    renderer.fill_rect(px, py, pw, ph, theme.floor_color);
+                    renderer.fill_rect(px, py, pw, ph, color);
                 }
             }
         }
