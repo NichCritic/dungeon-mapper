@@ -13,7 +13,9 @@ pub enum FloorRel {
 pub enum FloorAssignment {
     /// Room exists on a single floor.
     Single(i32),
-    /// Room spans two adjacent floors (a "half floor"), appearing on both.
+    /// Spans a range of floors, appearing on each: a room between two floors (a "half
+    /// floor"), or a corridor or stairwell joining rooms on different floors. Either
+    /// order; every floor from the lower to the higher counts.
     Half(i32, i32),
 }
 
@@ -26,9 +28,15 @@ impl Default for FloorAssignment {
 impl FloorAssignment {
     /// Returns true if this room should be visible on the given floor.
     pub fn visible_on(&self, floor: i32) -> bool {
-        match self {
-            FloorAssignment::Single(f) => *f == floor,
-            FloorAssignment::Half(a, b) => *a == floor || *b == floor,
+        let (lo, hi) = self.range();
+        lo <= floor && floor <= hi
+    }
+
+    /// The lowest and highest floor this is on.
+    pub fn range(&self) -> (i32, i32) {
+        match *self {
+            FloorAssignment::Single(f) => (f, f),
+            FloorAssignment::Half(a, b) => (a.min(b), a.max(b)),
         }
     }
 
@@ -36,12 +44,8 @@ impl FloorAssignment {
     /// True if the two assignments have a floor in common (like comparing `floors()`,
     /// without allocating; the layout solver asks this per candidate position).
     pub fn shares_floor(&self, other: &FloorAssignment) -> bool {
-        let pair = |f: &FloorAssignment| match *f {
-            FloorAssignment::Single(a) => (a, a),
-            FloorAssignment::Half(a, b) => (a, b),
-        };
-        let ((a0, a1), (b0, b1)) = (pair(self), pair(other));
-        a0 == b0 || a0 == b1 || a1 == b0 || a1 == b1
+        let ((a0, a1), (b0, b1)) = (self.range(), other.range());
+        a0 <= b1 && b0 <= a1
     }
 
     /// Where this sits relative to the floor being viewed.
@@ -57,23 +61,22 @@ impl FloorAssignment {
 
     /// The highest floor the room is on.
     pub fn max_floor(&self) -> i32 {
-        match *self {
-            FloorAssignment::Single(f) => f,
-            FloorAssignment::Half(a, b) => a.max(b),
-        }
+        self.range().1
     }
 
+    /// Every floor this is on, lowest first.
     pub fn floors(&self) -> Vec<i32> {
-        match self {
-            FloorAssignment::Single(f) => vec![*f],
-            FloorAssignment::Half(a, b) => vec![*a, *b],
-        }
+        let (lo, hi) = self.range();
+        (lo..=hi).collect()
     }
 
     pub fn label(&self) -> String {
-        match self {
+        match *self {
             FloorAssignment::Single(f) => format!("Floor {}", f),
-            FloorAssignment::Half(a, b) => format!("Floor {}/{}", a, b),
+            FloorAssignment::Half(..) => {
+                let (lo, hi) = self.range();
+                if hi - lo == 1 { format!("Floor {}/{}", lo, hi) } else { format!("Floors {}–{}", lo, hi) }
+            }
         }
     }
 }
@@ -189,7 +192,7 @@ impl CaveData {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum DecorType {
     Table,
     Chair,
@@ -340,6 +343,9 @@ pub struct RoomDecor {
     /// Cover override; `None` means the type's default.
     #[serde(default)]
     pub cover: Option<super::cover::CoverKind>,
+    /// Light this item gives: its type's default, off, or its own.
+    #[serde(default)]
+    pub light: super::decor_light::DecorLightSetting,
 }
 
 /// Raw shape for backward-compatible deserialization (handles legacy `scale` field).
@@ -357,6 +363,8 @@ struct RoomDecorRaw {
     scale_y: Option<f32>,
     #[serde(default)]
     cover: Option<super::cover::CoverKind>,
+    #[serde(default)]
+    light: super::decor_light::DecorLightSetting,
 }
 
 fn default_one() -> f32 { 1.0 }
@@ -373,6 +381,7 @@ impl<'de> Deserialize<'de> for RoomDecor {
             scale_x: raw.scale_x.unwrap_or(raw.scale),
             scale_y: raw.scale_y.unwrap_or(raw.scale),
             cover: raw.cover,
+            light: raw.light,
         })
     }
 }
@@ -393,6 +402,7 @@ impl RoomDecor {
             scale_x: 1.0,
             scale_y: 1.0,
             cover: None,
+            light: Default::default(),
         }
     }
 }
@@ -644,6 +654,18 @@ impl Room {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_span_between_floors_is_on_every_floor_between() {
+        let stair = FloorAssignment::Half(2, 0);
+        assert!(stair.visible_on(0) && stair.visible_on(1) && stair.visible_on(2) && !stair.visible_on(3));
+        assert_eq!(stair.floors(), vec![0, 1, 2]);
+        assert!(stair.shares_floor(&FloorAssignment::Single(1)), "a floor-1 room is in the stairwell's way");
+        assert!(!stair.shares_floor(&FloorAssignment::Single(3)));
+        assert_eq!(stair.relation(3), FloorRel::Below);
+        assert_eq!(stair.label(), "Floors 0–2");
+        assert_eq!(FloorAssignment::Half(1, 2).label(), "Floor 1/2");
+    }
 
     #[test]
     fn floor_runs_merge_neighbouring_floor_cells() {

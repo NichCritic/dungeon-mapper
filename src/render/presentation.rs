@@ -27,8 +27,9 @@ pub fn render_player_view_snapshot(
     light_sources: &[crate::model::LightSource],
     ambient_light: f32,
     options: &RenderOptions,
+    ghosts: Option<(&SpatialLayout, i32)>,
 ) {
-    let audience = Audience::Players { visibility: snapshot, lights: light_sources, ambient: ambient_light };
+    let audience = Audience::Players { visibility: snapshot, lights: light_sources, ambient: ambient_light, ghosts };
     render_map(renderer, graph, layout, theme, options, &audience);
 }
 

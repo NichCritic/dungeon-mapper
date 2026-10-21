@@ -231,10 +231,10 @@ pub fn run_awareness_check(
 
     // Light levels
     let encounter_light = dungeon.layout.as_ref()
-        .map(|layout| room_light_level(encounter_room, &dungeon.light_sources, dungeon.ambient_light, layout))
+        .map(|layout| room_light_level(encounter_room, &dungeon.all_lights(), dungeon.ambient_light, layout))
         .unwrap_or(LightLevel::Dark);
     let party_light = dungeon.layout.as_ref()
-        .map(|layout| room_light_level(party_room, &dungeon.light_sources, dungeon.ambient_light, layout))
+        .map(|layout| room_light_level(party_room, &dungeon.all_lights(), dungeon.ambient_light, layout))
         .unwrap_or(LightLevel::Dark);
 
     // Roll stealth and compute PP for each monster

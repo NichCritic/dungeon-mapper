@@ -20,7 +20,7 @@ use crate::presentation::tokens::{self, TokenDrag, TokenStyle};
 use crate::util::{ViewTransform, GRID_PX};
 
 use std::collections::HashMap;
-use std::hash::Hasher;
+use std::hash::{Hash, Hasher};
 
 use crate::render::bg_cache::BackgroundRenderCache;
 
@@ -77,6 +77,8 @@ pub struct EncountersViewState {
     pub selected_token: Option<TokenKind>,
     /// In-progress token drag.
     token_drag: Option<TokenDrag>,
+    /// Floor shown (`None` = all floors); the app keeps it in step with the other views.
+    pub current_floor: Option<i32>,
 }
 
 impl Default for EncountersViewState {
@@ -90,14 +92,16 @@ impl Default for EncountersViewState {
             import_target_room: None,
             selected_token: None,
             token_drag: None,
+            current_floor: None,
         }
     }
 }
 
-/// The encounters view's cached render.
-pub fn cache_spec(layout: &SpatialLayout, graph: &DungeonGraph, theme: &Theme) -> CacheSpec {
+/// The encounters view's cached render (of `layout`: the whole map, or one floor's).
+pub fn cache_spec(layout: &SpatialLayout, graph: &DungeonGraph, theme: &Theme, floor: Option<i32>) -> CacheSpec {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     crate::render::bg_cache::map_render_hash(&mut h, layout, graph, theme, true);
+    floor.hash(&mut h);
     let options = RenderOptions { show_grid: true, show_labels: true, show_notes: false, show_secrets: false, show_decor: true, show_lighting: true };
     CacheSpec { hash: h.finish(), options, label: "Encounters" }
 }
@@ -124,7 +128,7 @@ pub fn encounters_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Enc
     handle_pan_zoom(&response, &mut state.view);
     let transform = ViewTransform::new(state.view.offset, state.view.zoom, rect);
 
-    let Some(layout) = &dungeon.layout else {
+    let Some(full_layout) = &dungeon.layout else {
         painter.text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
@@ -134,15 +138,27 @@ pub fn encounters_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Enc
         );
         return;
     };
+    let floor = state.current_floor;
+    let floor_layout;
+    let layout: &SpatialLayout = match floor {
+        Some(f) => {
+            floor_layout = full_layout.filtered_to_floor(&dungeon.graph, f);
+            &floor_layout
+        }
+        None => full_layout,
+    };
 
     // Rebuild cached render commands if inputs changed
-    let spec = cache_spec(layout, &dungeon.graph, &dungeon.theme);
+    let spec = cache_spec(layout, &dungeon.graph, &dungeon.theme, floor);
     let cache_ready = state.render_cache.ensure_spec(&spec, &dungeon.graph, layout, &dungeon.theme);
 
     if cache_ready {
         state.render_cache.paint(&painter, &transform);
     } else {
         crate::ui::canvas_common::paint_render_pending(ui, &painter, rect, state.render_cache.pending_label().unwrap_or("map"));
+    }
+    if let Some(f) = floor {
+        crate::ui::canvas_common::paint_floor_ghosts(&painter, &transform, full_layout, &dungeon.graph, f, |_| true, true);
     }
 
     // Draw room labels
@@ -218,6 +234,8 @@ pub fn encounters_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Enc
         tokens::prune_stale(&mut toks, dungeon);
         dungeon.tokens = toks;
     }
+    // Tokens on other floors sit out, and come back at the end
+    let floor_split = tokens::FloorSplit::take(&mut dungeon.tokens, floor, |t| t.on_floor(floor, &dungeon.graph, full_layout));
     let token_infos = tokens::resolve_tokens(dungeon, monster_db, None);
     tokens::render_tokens(&painter, ui.ctx(), &transform, &dungeon.tokens, &token_infos, &TokenStyle {
         show_names: true,
@@ -254,6 +272,7 @@ pub fn encounters_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Enc
             painter.add(egui::Shape::closed_line(crate::ui::canvas_common::room_screen_outline(rl, &transform), egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(100, 180, 255))));
         }
     }
+    floor_split.restore(&mut dungeon.tokens);
 }
 
 pub fn encounters_sidebar(
@@ -262,6 +281,8 @@ pub fn encounters_sidebar(
     monster_db: &MonsterDatabase,
     state: &mut EncountersViewState,
 ) {
+    crate::ui::canvas_common::floor_combo(ui, "enc_floor", &dungeon.graph, &mut state.current_floor);
+
     if monster_db.is_empty() {
         ui.colored_label(
             egui::Color32::from_rgb(255, 200, 100),

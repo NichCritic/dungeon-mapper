@@ -13,6 +13,7 @@ pub mod theme;
 pub mod token;
 pub mod dungeon;
 pub mod geometry;
+pub mod decor_light;
 
 pub use annotation::*;
 pub use campaign::Campaign;
@@ -27,3 +28,4 @@ pub use spatial::*;
 pub use theme::*;
 pub use token::*;
 pub use dungeon::{Dungeon, LightSource, SessionState};
+pub use decor_light::{DecorLight, DecorLightSetting, DecorLighting};

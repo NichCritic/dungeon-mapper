@@ -4,7 +4,7 @@ use std::sync::mpsc;
 use crate::model::{Campaign, Dungeon};
 
 /// Current save file format version. Increment when the data model changes.
-const CURRENT_VERSION: u32 = 9;
+const CURRENT_VERSION: u32 = 10;
 
 /// Versioned save file envelope (version 2+: campaign-based).
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -91,7 +91,11 @@ fn load_campaign(version: u32, value: &serde_json::Value) -> Result<Campaign, St
         // v6 → v7: added Connection.overlap_walls (#[serde(default)] = Both)
         // v7 → v8: added RoomLayout.rotation (default 0) and Connection.corridor_angle (default Orthogonal)
         // v8 → v9: added CorridorSegment.angle, the setting it was routed with (default Orthogonal)
-        2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 => serde_json::from_value(value.clone()).map_err(|e| e.to_string()),
+        // v9 → v10: decor lighting — Campaign.decor_lighting (default: braziers and fireplaces),
+        //           Dungeon.decor_lighting (None) and RoomDecor.light (Default); floors at the
+        //           table — MapToken.floor (None: the room's), SessionState.current_floor (None)
+        //           and SessionState.ghost_lower_floors (true)
+        2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 => serde_json::from_value(value.clone()).map_err(|e| e.to_string()),
         v => Err(format!(
             "Save file version {} is newer than this application supports (max: {})",
             v, CURRENT_VERSION
@@ -395,8 +399,9 @@ mod tests {
             kind: TokenKind::Monster(MonsterInstanceId { encounter_id: "e".into(), monster_index: 0, instance: 1 }),
             x: 3.5,
             y: 4.5,
+            floor: None,
         });
-        campaign.maps[0].tokens.push(MapToken { kind: TokenKind::Player("pc1".into()), x: 1.5, y: 1.5 });
+        campaign.maps[0].tokens.push(MapToken { kind: TokenKind::Player("pc1".into()), x: 1.5, y: 1.5, floor: None });
 
         let json = serialize_versioned(&campaign).unwrap();
         let raw: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -410,6 +415,43 @@ mod tests {
         let v3 = r#"{"version":3,"campaign":{"name":"Old","maps":[{"name":"M","graph":{"rooms":[],"connections":[],"graph_positions":{}}}]}}"#;
         let old = deserialize_versioned(v3).unwrap();
         assert!(old.maps[0].tokens.is_empty());
+    }
+
+    #[test]
+    fn test_version_10_decor_lighting_roundtrip_and_v9_loads() {
+        use crate::model::{DecorLight, DecorLightSetting, DecorLighting, DecorType, Room, RoomDecor};
+        let mut campaign = Campaign::new("Ten".to_string());
+        let candles = DecorLight { bright: 1.0, dim: 2.0, color: [255, 220, 160] };
+        campaign.decor_lighting.by_type.insert(DecorType::Altar, candles);
+        campaign.maps.push(crate::model::Dungeon::new("Dark".into()));
+        campaign.maps[1].decor_lighting = Some(DecorLighting { enabled: false, ..DecorLighting::default() });
+        let mut room = Room::new("Hall".to_string());
+        let mut brazier = RoomDecor::new(DecorType::Brazier, 1.0, 1.0);
+        brazier.light = DecorLightSetting::Off;
+        room.decor.push(brazier);
+        campaign.maps[0].graph.add_room(room);
+
+        let json = serialize_versioned(&campaign).unwrap();
+        let raw: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(raw["campaign"]["maps"][0].get("campaign_decor_lighting").is_none(), "saved once, on the campaign");
+        let loaded = deserialize_versioned(&json).unwrap();
+        assert_eq!(loaded.decor_lighting.by_type.get(&DecorType::Altar), Some(&candles));
+        assert_eq!(loaded.maps[0].decor_lighting, None, "the first map follows the campaign");
+        assert!(!loaded.maps[1].decor_lighting.as_ref().unwrap().enabled, "the second has its own, switched off");
+        assert_eq!(loaded.maps[0].graph.rooms[0].decor[0].light, DecorLightSetting::Off);
+
+        // A v9 file has none of it: braziers and fireplaces light by default
+        let mut v9: serde_json::Value = serde_json::from_str(&json).unwrap();
+        v9["version"] = serde_json::json!(9);
+        v9["campaign"].as_object_mut().unwrap().remove("decor_lighting");
+        for map in v9["campaign"]["maps"].as_array_mut().unwrap() {
+            map.as_object_mut().unwrap().remove("decor_lighting");
+        }
+        v9["campaign"]["maps"][0]["graph"]["rooms"][0]["decor"][0].as_object_mut().unwrap().remove("light");
+        let old = deserialize_versioned(&v9.to_string()).unwrap();
+        assert_eq!(old.decor_lighting, DecorLighting::default());
+        assert_eq!(old.maps[1].decor_lighting, None);
+        assert_eq!(old.maps[0].graph.rooms[0].decor[0].light, DecorLightSetting::Default);
     }
 
     #[test]

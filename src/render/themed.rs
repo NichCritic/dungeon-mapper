@@ -42,6 +42,9 @@ pub enum Audience<'a> {
         visibility: &'a dyn crate::presentation::VisibilityProvider,
         lights: &'a [LightSource],
         ambient: f32,
+        /// When play is on one floor: the whole map's layout and that floor, so the
+        /// rooms players have seen on the floors below can show faintly underneath.
+        ghosts: Option<(&'a SpatialLayout, i32)>,
     },
 }
 
@@ -83,7 +86,12 @@ pub fn render_map(
     let dimmed_floor = blend_toward(theme.floor_color, theme.bg_color, 0.4);
     let dimmed_theme = Theme { wall_color: blend_toward(theme.wall_color, theme.bg_color, 0.4), ..theme.clone() };
 
-    render_background(renderer, layout, theme);
+    // With ghosts the background reaches under the lower floors too
+    let ghosts = match *audience { Audience::Players { ghosts, .. } => ghosts, Audience::Dm => None };
+    render_background(renderer, ghosts.map_or(layout, |(full, _)| full), theme);
+    if let Some((full_layout, floor)) = ghosts {
+        render_floor_ghosts(renderer, graph, full_layout, floor, |room_id| audience.room(room_id) != Visibility::Hidden);
+    }
 
     // Rooms in z-order so containers render before children
     let room_order = layout.render_order(graph);
@@ -220,6 +228,39 @@ pub fn render_map(
     if let Audience::Players { lights, ambient, .. } = *audience {
         if options.show_lighting && (!lights.is_empty() || ambient < 1.0) {
             crate::render::presentation::render_lighting_overlay(renderer, layout, lights, ambient, &floor);
+        }
+    }
+}
+
+/// Faint silhouettes of the rooms on floors below `floor` that `show_room` accepts, and
+/// the corridors between them, drawn under the floor itself.
+fn render_floor_ghosts(
+    renderer: &mut dyn MapRenderer,
+    graph: &DungeonGraph,
+    layout: &SpatialLayout,
+    floor: i32,
+    show_room: impl Fn(&str) -> bool,
+) {
+    const GHOST: [u8; 4] = [50, 50, 60, 45];
+    let g = GRID_PX;
+    let below = |id: &str| graph.room_by_id(id).is_some_and(|r| r.floor.relation(floor) == FloorRel::Below) && show_room(id);
+    for rl in layout.rooms.iter().filter(|rl| below(&rl.room_id)) {
+        let circle = graph.room_by_id(&rl.room_id).is_some_and(|r| r.shape == RoomShape::Circle);
+        if circle {
+            let (cx, cy) = rl.center();
+            renderer.fill_circle(cx * g, cy * g, rl.width.min(rl.height) as f32 / 2.0 * g, GHOST);
+        } else {
+            let pts: Vec<(f32, f32)> = rl.corners().iter().map(|&(x, y)| (x * g, y * g)).collect();
+            renderer.fill_polygon(&pts, GHOST);
+        }
+    }
+    for c in &layout.corridors {
+        let Some(edge) = graph.connection_by_id(&c.connection_id) else { continue };
+        if graph.edge_floor_relation(edge, floor) != FloorRel::Below || !(below(&edge.source_room_id) || below(&edge.target_room_id)) {
+            continue;
+        }
+        for (x0, y0, x1, y1) in c.run_boxes() {
+            renderer.fill_rect(x0 as f32 * g, y0 as f32 * g, (x1 - x0) as f32 * g, (y1 - y0) as f32 * g, GHOST);
         }
     }
 }

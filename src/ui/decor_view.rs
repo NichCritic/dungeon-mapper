@@ -152,6 +152,10 @@ pub fn decor_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut DecorVie
     } else {
         crate::ui::canvas_common::paint_render_pending(ui, &painter, rect, state.render_cache.pending_label().unwrap_or("map"));
     }
+    // Lower floors as faint silhouettes under the selected one
+    if let Some(floor) = state.current_floor {
+        crate::ui::canvas_common::paint_floor_ghosts(&painter, &transform, layout, &dungeon.graph, floor, |_| true, true);
+    }
 
     // Live decor overlay (not cached, so dragging is smooth)
     let decor_color = egui::Color32::from_rgb(
@@ -733,6 +737,7 @@ pub fn decor_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Decor
             ui.separator();
             ui.label("Properties:");
 
+            let decor_lighting = dungeon.effective_decor_lighting().into_owned();
             if let Some(room) = dungeon.graph.room_by_id_mut(sel_room_id) {
                 if sel_idx < room.decor.len() {
                     let decor = &mut room.decor[sel_idx];
@@ -773,6 +778,7 @@ pub fn decor_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Decor
                                 }
                             });
                     }).response.on_hover_text("Most cover this object can grant; Full also blocks light");
+                    decor_light_setting_ui(ui, &mut decor.light, decor.decor_type, &decor_lighting);
                 }
             }
         }
@@ -896,6 +902,22 @@ pub fn decor_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Decor
             dungeon.light_sources.remove(idx);
         }
     }
+
+    // Which decor gives light: the campaign's default, and this map's own if it has one
+    ui.add_space(8.0);
+    egui::CollapsingHeader::new("Decor lighting").id_salt("decor_lighting").show(ui, |ui| {
+        ui.label("Campaign default");
+        let campaign = dungeon.campaign_decor_lighting.get_or_insert_with(Default::default);
+        decor_lighting_editor(ui, "campaign", campaign);
+        ui.add_space(6.0);
+        let mut own = dungeon.decor_lighting.is_some();
+        if ui.checkbox(&mut own, "This map uses its own settings").changed() {
+            dungeon.decor_lighting = own.then(|| dungeon.campaign_decor_lighting.clone().unwrap_or_default());
+        }
+        if let Some(lighting) = &mut dungeon.decor_lighting {
+            decor_lighting_editor(ui, "map", lighting);
+        }
+    });
 
     // Floor selector (always available)
     ui.add_space(16.0);
@@ -1078,6 +1100,84 @@ fn draw_decor_symbol(
 }
 
 /// Dim radius, explicit position, and carrier controls shared by both light lists.
+/// Bright and dim radii (in squares) and colour of one decor light.
+fn decor_light_editor(ui: &mut egui::Ui, light: &mut DecorLight) {
+    ui.horizontal(|ui| {
+        ui.add(egui::DragValue::new(&mut light.bright).range(0.0..=40.0).speed(0.25).suffix(" sq"))
+            .on_hover_text("Bright light radius");
+        ui.label("bright");
+        let bright = light.bright;
+        ui.add(egui::DragValue::new(&mut light.dim).range(bright..=60.0).speed(0.25).suffix(" sq"))
+            .on_hover_text("Dim light radius, measured from the object");
+        ui.label("dim");
+        ui.color_edit_button_srgb(&mut light.color);
+    });
+}
+
+/// Which decor types give light, and how much.
+fn decor_lighting_editor(ui: &mut egui::Ui, id: &str, lighting: &mut DecorLighting) {
+    ui.checkbox(&mut lighting.enabled, "Decor gives light")
+        .on_hover_text("Off: only objects with their own light setting give light");
+    ui.add_enabled_ui(lighting.enabled, |ui| {
+        let mut remove = None;
+        for (decor_type, light) in lighting.by_type.iter_mut() {
+            ui.horizontal(|ui| {
+                ui.label(decor_type.label());
+                if ui.small_button("X").on_hover_text("This type gives no light").clicked() {
+                    remove = Some(*decor_type);
+                }
+            });
+            ui.push_id((id, *decor_type), |ui| decor_light_editor(ui, light));
+        }
+        if let Some(t) = remove {
+            lighting.by_type.remove(&t);
+        }
+        egui::ComboBox::from_id_salt((id, "add_lit_type"))
+            .selected_text("Add a type…")
+            .show_ui(ui, |ui| {
+                for t in DecorType::ALL {
+                    if !lighting.by_type.contains_key(&t) && ui.selectable_label(false, t.label()).clicked() {
+                        lighting.by_type.insert(t, DecorLight::TORCH);
+                    }
+                }
+            });
+    });
+}
+
+/// One object's light: its type's default under the map's settings, off, or its own.
+fn decor_light_setting_ui(ui: &mut egui::Ui, setting: &mut DecorLightSetting, decor_type: DecorType, lighting: &DecorLighting) {
+    let inherited = lighting.for_type(decor_type);
+    let default_text = match inherited {
+        Some(l) => format!("Default ({}/{} sq)", l.bright, l.dim),
+        None => "Default (none)".to_string(),
+    };
+    ui.horizontal(|ui| {
+        ui.label("Light:");
+        let text = match setting {
+            DecorLightSetting::Default => default_text.clone(),
+            DecorLightSetting::Off => "Off".to_string(),
+            DecorLightSetting::Custom(_) => "Custom".to_string(),
+        };
+        egui::ComboBox::from_id_salt("decor_light")
+            .selected_text(text)
+            .show_ui(ui, |ui| {
+                if ui.selectable_label(*setting == DecorLightSetting::Default, &default_text).clicked() {
+                    *setting = DecorLightSetting::Default;
+                }
+                if ui.selectable_label(*setting == DecorLightSetting::Off, "Off").clicked() {
+                    *setting = DecorLightSetting::Off;
+                }
+                let custom = matches!(setting, DecorLightSetting::Custom(_));
+                if ui.selectable_label(custom, "Custom").clicked() && !custom {
+                    *setting = DecorLightSetting::Custom(inherited.unwrap_or(DecorLight::TORCH));
+                }
+            });
+    }).response.on_hover_text("Default follows the map's decor-lighting settings (Lighting → Decor lighting)");
+    if let DecorLightSetting::Custom(light) = setting {
+        decor_light_editor(ui, light);
+    }
+}
+
 fn light_extra_controls(ui: &mut egui::Ui, light: &mut crate::model::LightSource, party: &[crate::model::PlayerCharacter]) {
     ui.horizontal(|ui| {
         let mut dim = light.dim_radius();

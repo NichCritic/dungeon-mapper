@@ -258,7 +258,7 @@ fn pack_into_room(items: Vec<(TokenKind, f32)>, room: &RoomLayout) -> Vec<MapTok
             row_h = 0;
         }
         let (x, y) = in_room(room, cx as f32 + s as f32 / 2.0, cy as f32 + s as f32 / 2.0);
-        out.push(MapToken { kind, x, y });
+        out.push(MapToken { kind, x, y, floor: None });
         cx += s;
         row_h = row_h.max(s);
     }
@@ -315,7 +315,7 @@ pub fn ensure_player_token(tokens: &mut Vec<MapToken>, pc_id: &str, room: &RoomL
     }
     let (gx, gy) = spot.unwrap_or((room.x + margin, room.y + margin));
     let (x, y) = in_room(room, gx as f32 + 0.5, gy as f32 + 0.5);
-    tokens.push(MapToken { kind, x, y });
+    tokens.push(MapToken { kind, x, y, floor: None });
     true
 }
 
@@ -337,6 +337,66 @@ pub fn tokens_in_room(tokens: &[MapToken], room: &RoomLayout) -> Vec<usize> {
         .filter(|(_, t)| room.contains_point(t.x.floor() + 0.5, t.y.floor() + 0.5))
         .map(|(i, _)| i)
         .collect()
+}
+
+/// The tokens set aside while a view works on one floor. [`FloorSplit::take`] leaves
+/// only the floor's tokens in the list (so drawing, picking, dragging, cover and line
+/// of sight all ignore the rest); [`FloorSplit::restore`] puts the others back in their
+/// original places. Tokens placed or moved meanwhile are given the floor.
+pub struct FloorSplit {
+    floor: Option<i32>,
+    /// Set-aside tokens with their original index
+    off: Vec<(usize, MapToken)>,
+    /// The kept tokens' original index, kind and position
+    on: Vec<(usize, TokenKind, (f32, f32))>,
+}
+
+impl FloorSplit {
+    /// Keep only the tokens `on_floor` accepts (all of them when `floor` is `None`).
+    pub fn take(tokens: &mut Vec<MapToken>, floor: Option<i32>, on_floor: impl Fn(&MapToken) -> bool) -> Self {
+        let mut split = FloorSplit { floor, off: Vec::new(), on: Vec::new() };
+        if floor.is_none() {
+            return split;
+        }
+        for (i, t) in std::mem::take(tokens).into_iter().enumerate() {
+            if on_floor(&t) {
+                split.on.push((i, t.kind.clone(), (t.x, t.y)));
+                tokens.push(t);
+            } else {
+                split.off.push((i, t));
+            }
+        }
+        split
+    }
+
+    /// Put the set-aside tokens back where they were.
+    pub fn restore(self, tokens: &mut Vec<MapToken>) {
+        let Some(floor) = self.floor else { return };
+        let mut kept = std::mem::take(tokens);
+        let total = self.off.len() + self.on.len();
+        let mut off = self.off.into_iter().peekable();
+        let mut on = self.on.into_iter().peekable();
+        for slot in 0..total {
+            if off.peek().is_some_and(|(i, _)| *i == slot) {
+                tokens.push(off.next().unwrap().1);
+            } else if on.peek().is_some_and(|(i, _, _)| *i == slot) {
+                let (_, kind, pos) = on.next().unwrap();
+                // Deleted meanwhile if it's gone
+                if let Some(at) = kept.iter().position(|t| t.kind == kind) {
+                    let mut t = kept.remove(at);
+                    if (t.x, t.y) != pos {
+                        t.floor = Some(floor);
+                    }
+                    tokens.push(t);
+                }
+            }
+        }
+        // Placed meanwhile: on this floor
+        for mut t in kept {
+            t.floor.get_or_insert(floor);
+            tokens.push(t);
+        }
+    }
 }
 
 /// Drop tokens whose creature no longer exists: removed encounters/monster entries,
@@ -435,7 +495,7 @@ pub fn delete_selected(ui: &egui::Ui, tokens: &mut Vec<MapToken>, selected: &mut
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{EncounterMonster, EncounterType, MonsterRef};
+    use crate::model::{DungeonGraph, EncounterMonster, EncounterType, MonsterRef, SpatialLayout};
 
     fn room(x: i32, y: i32, w: u32, h: u32) -> RoomLayout {
         RoomLayout { room_id: "r".into(), x, y, width: w, height: h, violations: Vec::new(), wall_openings: Vec::new(), rotation: 0.0 }
@@ -452,6 +512,41 @@ mod tests {
             });
         }
         enc
+    }
+
+    #[test]
+    fn a_floor_split_puts_the_other_floors_back_in_place() {
+        let tok = |name: &str, x: f32, floor: i32| MapToken { kind: TokenKind::Player(name.into()), x, y: 0.5, floor: Some(floor) };
+        let mut tokens = vec![tok("a", 0.5, 1), tok("b", 1.5, 2), tok("c", 2.5, 1), tok("d", 3.5, 2)];
+        let split = FloorSplit::take(&mut tokens, Some(1), |t| t.floor == Some(1));
+        assert_eq!(tokens.iter().map(|t| t.x).collect::<Vec<_>>(), vec![0.5, 2.5], "only floor 1 while working");
+        // Move one, delete one, place a new one with no floor yet
+        tokens[0].x = 9.5;
+        tokens.remove(1);
+        tokens.push(MapToken { kind: TokenKind::Player("e".into()), x: 5.5, y: 0.5, floor: None });
+        split.restore(&mut tokens);
+        let names: Vec<_> = tokens.iter().map(|t| match &t.kind { TokenKind::Player(p) => p.as_str(), _ => "?" }).collect();
+        assert_eq!(names, vec!["a", "b", "d", "e"], "original order, the deleted one gone, the new one last");
+        assert_eq!(tokens[3].floor, Some(1), "a token placed on floor 1 is on floor 1");
+
+        let mut all = vec![tok("a", 0.5, 1), tok("b", 1.5, 2)];
+        FloorSplit::take(&mut all, None, |_| false).restore(&mut all);
+        assert_eq!(all.len(), 2, "viewing every floor sets nothing aside");
+    }
+
+    #[test]
+    fn a_token_without_a_floor_takes_its_rooms() {
+        let mut graph = DungeonGraph::new();
+        let mut upstairs = crate::model::Room::new("Up".into());
+        upstairs.floor = crate::model::FloorAssignment::Single(3);
+        let id = upstairs.id.clone();
+        graph.add_room(upstairs);
+        let layout = SpatialLayout { rooms: vec![RoomLayout { room_id: id, ..room(0, 0, 4, 4) }], ..SpatialLayout::new() };
+        let t = MapToken { kind: TokenKind::Player("p".into()), x: 1.5, y: 1.5, floor: None };
+        assert_eq!(t.floor_in(&graph, &layout), Some(3));
+        assert!(t.on_floor(Some(3), &graph, &layout) && !t.on_floor(Some(0), &graph, &layout));
+        let outside = MapToken { x: 20.5, ..t };
+        assert!(outside.on_floor(Some(0), &graph, &layout), "no room, no floor: shown on every floor");
     }
 
     #[test]
@@ -487,7 +582,7 @@ mod tests {
 
     #[test]
     fn snap_centers_by_parity() {
-        let mut t = MapToken { kind: TokenKind::Player("p".into()), x: 3.2, y: 7.9 };
+        let mut t = MapToken { kind: TokenKind::Player("p".into()), x: 3.2, y: 7.9, floor: None };
         snap(&mut t, 1.0);
         assert_eq!((t.x, t.y), (3.5, 7.5));
         snap(&mut t, 2.0);
@@ -505,10 +600,10 @@ mod tests {
         dungeon.encounters.push(enc);
         let mid = |i| crate::model::MonsterInstanceId { encounter_id: enc_id.clone(), monster_index: 0, instance: i };
         dungeon.tokens = vec![
-            MapToken { kind: TokenKind::Monster(mid(0)), x: 0.5, y: 0.5 },
-            MapToken { kind: TokenKind::Monster(mid(1)), x: 1.5, y: 0.5 },
-            MapToken { kind: TokenKind::Monster(mid(2)), x: 2.5, y: 0.5 },
-            MapToken { kind: TokenKind::Player("ghost".into()), x: 3.5, y: 0.5 },
+            MapToken { kind: TokenKind::Monster(mid(0)), x: 0.5, y: 0.5, floor: None },
+            MapToken { kind: TokenKind::Monster(mid(1)), x: 1.5, y: 0.5, floor: None },
+            MapToken { kind: TokenKind::Monster(mid(2)), x: 2.5, y: 0.5, floor: None },
+            MapToken { kind: TokenKind::Player("ghost".into()), x: 3.5, y: 0.5, floor: None },
         ];
         let mut tokens = dungeon.tokens.clone();
         prune_stale(&mut tokens, &dungeon);

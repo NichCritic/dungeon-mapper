@@ -181,6 +181,16 @@ fn merge_runs(mut shaded: Vec<((i32, i32), f32)>) -> Vec<ShadeRun> {
     runs
 }
 
+/// Whether a light shines on the floor `layout` covers (the whole map, or one floor's
+/// rooms): a carried light goes with its carrier, which must be among `tokens` (the
+/// ones in play there); any other light is in its room.
+pub fn light_in_play(light: &LightSource, tokens: &[crate::model::MapToken], layout: &SpatialLayout) -> bool {
+    match &light.carrier {
+        Some(kind) => tokens.iter().any(|t| t.kind == *kind),
+        None => layout.room_by_id(&light.room_id).is_some(),
+    }
+}
+
 /// Origin of a light: carried token, explicit position, or the room center.
 pub fn light_origin(light: &LightSource, dungeon: &Dungeon, layout: &SpatialLayout) -> Option<Pt> {
     if let Some(kind) = &light.carrier {
@@ -201,13 +211,8 @@ pub fn light_map_key(dungeon: &Dungeon, presentation: &PresentationState, occ: &
     let mut h = std::collections::hash_map::DefaultHasher::new();
     los::occluder_hash_static(occ).hash(&mut h);
     dungeon.ambient_light.to_bits().hash(&mut h);
-    for l in &dungeon.light_sources {
-        l.id.hash(&mut h);
-        l.room_id.hash(&mut h);
-        l.radius.to_bits().hash(&mut h);
-        l.dim_radius().to_bits().hash(&mut h);
-        if let Some((x, y)) = l.pos { x.to_bits().hash(&mut h); y.to_bits().hash(&mut h); }
-        l.carrier.hash(&mut h);
+    for l in &dungeon.all_lights() {
+        l.hash_into(&mut h);
     }
     for t in &dungeon.tokens {
         if let TokenKind::Player(pid) = &t.kind {
@@ -278,7 +283,10 @@ pub fn compute_light_map(
 
     // Lights
     let mut lights = Vec::new();
-    for light in &dungeon.light_sources {
+    for light in &dungeon.all_lights() {
+        if !light_in_play(light, &dungeon.tokens, layout) {
+            continue;
+        }
         let Some(origin) = light_origin(light, dungeon, layout) else { continue };
         let bright = light.radius.max(0.0);
         let dim = light.dim_radius().max(bright);
@@ -472,6 +480,32 @@ mod tests {
             ShadeRun { y: 0, x0: 3, x1: 4, alpha: 235.0 },
             ShadeRun { y: 1, x0: 0, x1: 2, alpha: 170.0 },
         ]);
+    }
+
+    #[test]
+    fn lights_on_other_floors_stay_there() {
+        // A brazier upstairs, directly over a room downstairs
+        let mut d = crate::model::Dungeon::new("t".into());
+        let (mut down, mut up) = (crate::model::Room::new("Down".into()), crate::model::Room::new("Up".into()));
+        up.floor = crate::model::FloorAssignment::Single(1);
+        up.decor.push(crate::model::RoomDecor::new(crate::model::DecorType::Brazier, 2.0, 2.0));
+        down.floor = crate::model::FloorAssignment::Single(0);
+        let (did, uid) = (down.id.clone(), up.id.clone());
+        d.graph.add_room(down);
+        d.graph.add_room(up);
+        let rl = |id: &str| RoomLayout { room_id: id.to_string(), x: 0, y: 0, width: 4, height: 4, violations: Vec::new(), wall_openings: Vec::new(), rotation: 0.0 };
+        d.layout = Some(SpatialLayout { rooms: vec![rl(&did), rl(&uid)], corridors: Vec::new(), bounds: Vec::new() });
+        let snap = PresentationSnapshot {
+            room_visibility: [(did.clone(), Visibility::Visible), (uid.clone(), Visibility::Visible)].into_iter().collect(),
+            doors_open: Default::default(),
+        };
+        let lit = |floor: i32| {
+            let layout = d.layout.as_ref().unwrap().filtered_to_floor(&d.graph, floor);
+            let occ = los::build_static_occluders(&d, &layout, &snap);
+            compute_light_map(&d, &layout, &snap, &occ, 0).level((1, 1))
+        };
+        assert_eq!(lit(1), CellLight::Bright, "the brazier lights its own floor");
+        assert_eq!(lit(0), CellLight::Dark, "and not the room below it");
     }
 
     #[test]

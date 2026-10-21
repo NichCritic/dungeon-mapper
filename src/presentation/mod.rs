@@ -74,6 +74,11 @@ pub struct PresentationState {
     pub dm_show_light: bool,
     /// Line-of-sight lighting on/off (off = the older room-based light wash).
     pub los_lighting: bool,
+    /// The floor being played on (`None` = all floors): the DM picks it, and the DM
+    /// canvas, player window and web image show only it.
+    pub current_floor: Option<i32>,
+    /// Ghost the players' already-seen rooms on lower floors under the current floor.
+    pub ghost_lower_floors: bool,
     /// What the player window is allowed to show.
     pub show_light_player: bool,
     pub show_vision_player: bool,
@@ -142,6 +147,8 @@ impl PresentationState {
             cover_attacker: None,
             dm_show_light: session.dm_show_light,
             los_lighting: session.los_lighting,
+            current_floor: session.current_floor,
+            ghost_lower_floors: session.ghost_lower_floors,
             show_light_player: session.show_light_player,
             show_vision_player: session.show_vision_player,
             show_cover_player: session.show_cover_player,
@@ -181,6 +188,8 @@ impl PresentationState {
             show_cover_player: self.show_cover_player,
             dm_show_light: self.dm_show_light,
             los_lighting: self.los_lighting,
+            current_floor: self.current_floor,
+            ghost_lower_floors: self.ghost_lower_floors,
         }
     }
 
@@ -372,7 +381,7 @@ mod tests {
             custom_monsters: Vec::new(),
             party: Vec::new(),
             annotations: Vec::new(),
-            light_sources: Vec::new(),
+            light_sources: Vec::new(), decor_lighting: None, campaign_decor_lighting: Default::default(),
             ambient_light: 0.0,
             aoe_markers: Vec::new(),
             tokens: Vec::new(),

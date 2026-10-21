@@ -1701,6 +1701,8 @@ fn draw_rooms(
 ) {
     // Rooms in z-order so containers render before children
     let room_order = layout.render_order(graph);
+    // Viewing every floor of a multi-floor map: badge each room with its floor
+    let badge_floors = state.current_floor.is_none() && collect_floors(graph).len() > 1;
     for ri in room_order {
         let rl = &layout.rooms[ri];
         // Floor filtering: dim lower floors, hide higher floors
@@ -1836,6 +1838,21 @@ fn draw_rooms(
                 egui::FontId::monospace(11.0 * transform.zoom),
                 label_color,
             );
+            if badge_floors {
+                let text = match room.floor {
+                    FloorAssignment::Single(f) => format!("F{f}"),
+                    FloorAssignment::Half(..) => {
+                        let (lo, hi) = room.floor.range();
+                        format!("F{lo}–{hi}")
+                    }
+                };
+                let font = egui::FontId::proportional((10.0 * transform.zoom).clamp(8.0, 14.0));
+                let galley = painter.layout_no_wrap(text, font, egui::Color32::WHITE);
+                let at = rect.left_top() + egui::vec2(3.0, 3.0);
+                let bg = egui::Rect::from_min_size(at, galley.size() + egui::vec2(6.0, 2.0));
+                painter.rect_filled(bg, 3.0, egui::Color32::from_rgba_unmultiplied(40, 70, 120, 200));
+                painter.galley(at + egui::vec2(3.0, 1.0), galley, egui::Color32::WHITE);
+            }
 
             // Draw elevation sections
             let room_px_x = rl.x as f32 * GRID_PX;

@@ -53,6 +53,8 @@ pub enum Tab {
 pub struct DungeonApp {
     pub campaign: Campaign,
     pub dungeon: Dungeon,
+    /// The floor every view shows (`None` = all floors); saved in the map's session.
+    pub current_floor: Option<i32>,
     pub active_tab: Tab,
     pub graph_state: GraphEditorState,
     pub spatial_state: SpatialViewState,
@@ -181,6 +183,7 @@ impl Default for DungeonApp {
 
         Self {
             campaign,
+            current_floor: dungeon.session.current_floor,
             dungeon,
             active_tab: Tab::Graph,
             graph_state: GraphEditorState::default(),
@@ -244,21 +247,28 @@ impl Default for DungeonApp {
 }
 
 impl DungeonApp {
-    /// Sync the campaign party into the working dungeon (before frame processing).
+    /// Sync campaign-wide data (the party, decor lighting) into the working dungeon
+    /// (before frame processing).
     fn sync_party_to_dungeon(&mut self) {
         self.dungeon.party = self.campaign.party.clone();
+        self.dungeon.campaign_decor_lighting = Some(self.campaign.decor_lighting.clone());
     }
 
-    /// Sync the working dungeon's party back to campaign (after frame processing).
+    /// Sync campaign-wide data edited through the working dungeon back to the campaign
+    /// (after frame processing).
     fn sync_party_from_dungeon(&mut self) {
         self.campaign.party = self.dungeon.party.clone();
+        if let Some(l) = &self.dungeon.campaign_decor_lighting {
+            self.campaign.decor_lighting = l.clone();
+        }
     }
 
     /// Sync the current working dungeon back into the campaign's map list.
     fn sync_dungeon_to_campaign(&mut self) {
         self.campaign.maps[self.campaign.active_map] = self.dungeon.clone();
-        // Clear per-map party (it lives on campaign)
+        // Clear per-map party and decor-lighting defaults (they live on campaign)
         self.campaign.maps[self.campaign.active_map].party.clear();
+        self.campaign.maps[self.campaign.active_map].campaign_decor_lighting = None;
         // Bump version for conflict detection
         self.campaign.version += 1;
     }
@@ -267,6 +277,35 @@ impl DungeonApp {
     fn load_dungeon_from_campaign(&mut self) {
         self.dungeon = self.campaign.active_dungeon().clone();
         self.dungeon.party = self.campaign.party.clone();
+        self.dungeon.campaign_decor_lighting = Some(self.campaign.decor_lighting.clone());
+        self.current_floor = self.dungeon.session.current_floor;
+    }
+
+    /// Every view shows the same floor: hand each the shared one at the start of a frame.
+    fn sync_floor_to_views(&mut self) {
+        let f = self.current_floor;
+        self.spatial_state.current_floor = f;
+        self.decor_state.current_floor = f;
+        self.encounters_state.current_floor = f;
+        self.styled_state.current_floor = f;
+        if let Some(p) = &mut self.presentation {
+            p.current_floor = f;
+        }
+    }
+
+    /// Take back a floor change made this frame (only the view on screen can make one).
+    fn sync_floor_from_views(&mut self) {
+        self.current_floor = if self.presenting {
+            self.presentation.as_ref().map_or(self.current_floor, |p| p.current_floor)
+        } else {
+            match self.active_tab {
+                Tab::Graph => self.current_floor,
+                Tab::Spatial => self.spatial_state.current_floor,
+                Tab::Decor => self.decor_state.current_floor,
+                Tab::Encounters => self.encounters_state.current_floor,
+                Tab::Styled => self.styled_state.current_floor,
+            }
+        };
     }
 
     /// Switch to a different map in the campaign.
@@ -296,6 +335,7 @@ impl DungeonApp {
         if let Some(pres) = &self.presentation {
             self.dungeon.session = pres.snapshot_session(&self.dungeon);
         }
+        self.dungeon.session.current_floor = self.current_floor;
     }
 
     /// Load a campaign from JSON string (used by cloud sync download/open).
@@ -592,14 +632,27 @@ impl DungeonApp {
         } else {
             (&self.dungeon, self.presentation.as_ref()?)
         };
-        let layout = dungeon.layout.clone()?;
+        let full_layout = dungeon.layout.clone()?;
+        // Players see the floor being played on (or every floor)
+        let floor = pres.current_floor;
+        let layout = match floor {
+            Some(f) => full_layout.filtered_to_floor(&dungeon.graph, f),
+            None => full_layout.clone(),
+        };
+        let floor_tokens: Vec<crate::model::MapToken> = dungeon.tokens.iter()
+            .filter(|t| t.on_floor(floor, &dungeon.graph, &full_layout))
+            .cloned()
+            .collect();
         // The radial renderer has no notion of carriers, so pin each light to where it
         // actually is (carried token, explicit position, or room center).
-        let resolved_lights: Vec<crate::model::LightSource> = dungeon.light_sources.iter().map(|l| {
-            let mut l = l.clone();
-            l.pos = crate::presentation::lighting::light_origin(&l, dungeon, &layout);
-            l
-        }).collect();
+        let resolved_lights: Vec<crate::model::LightSource> = dungeon.all_lights().into_iter()
+            .filter(|l| crate::presentation::lighting::light_in_play(l, &floor_tokens, &layout))
+            .map(|mut l| {
+                l.pos = crate::presentation::lighting::light_origin(&l, dungeon, &layout);
+                l
+            })
+            .collect();
+        let ghosts = floor.filter(|_| pres.ghost_lower_floors).map(|f| (full_layout, f));
         let snapshot = crate::presentation::PresentationSnapshot {
             room_visibility: pres.room_visibility.clone(),
             doors_open: pres.doors_open.clone(),
@@ -641,6 +694,7 @@ impl DungeonApp {
                 &resolved_lights,
                 ambient_light,
                 &options,
+                ghosts.as_ref().map(|(l, f)| (l, *f)),
             );
 
             // Encode to PNG in memory
@@ -672,12 +726,10 @@ impl DungeonApp {
         for conn_id in &presentation.doors_open {
             conn_id.hash(&mut h);
         }
-        self.dungeon.light_sources.len().hash(&mut h);
-        for light in &self.dungeon.light_sources {
-            light.id.hash(&mut h);
-            light.radius.to_bits().hash(&mut h);
-            light.intensity.to_bits().hash(&mut h);
-            light.room_id.hash(&mut h);
+        let lights = self.dungeon.all_lights();
+        lights.len().hash(&mut h);
+        for light in &lights {
+            light.hash_into(&mut h);
         }
         self.dungeon.ambient_light.to_bits().hash(&mut h);
         presentation.encounter_positions.len().hash(&mut h);
@@ -800,6 +852,7 @@ impl DungeonApp {
             let party = std::mem::take(&mut self.campaign.maps[active].party);
             self.campaign.maps[active] = self.dungeon.clone();
             self.campaign.maps[active].party = party;
+            self.campaign.maps[active].campaign_decor_lighting = None;
         }
         let mut campaign = std::mem::replace(&mut self.campaign, Campaign::new(String::new()));
         self.note_vault.sync(&mut campaign);
@@ -888,6 +941,7 @@ impl eframe::App for DungeonApp {
 
         // Sync campaign party into working dungeon at frame start
         self.sync_party_to_dungeon();
+        self.sync_floor_to_views();
 
         self.poll_background_tasks();
         self.show_import_dialogs(ctx);
@@ -1657,9 +1711,15 @@ impl DungeonApp {
                     stale_renders.push("Bestiary");
                 }
                 if let Some(layout) = &self.dungeon.layout {
-                    let enc_hash = crate::ui::encounters_view::cache_spec(layout, &self.dungeon.graph, &self.dungeon.theme).hash;
+                    let enc_hash = match self.current_floor {
+                        Some(f) => crate::ui::encounters_view::cache_spec(&layout.filtered_to_floor(&self.dungeon.graph, f), &self.dungeon.graph, &self.dungeon.theme, Some(f)).hash,
+                        None => crate::ui::encounters_view::cache_spec(layout, &self.dungeon.graph, &self.dungeon.theme, None).hash,
+                    };
                     if !self.encounters_state.render_cache.is_current(enc_hash) && !self.encounters_state.render_cache.has_failed(enc_hash) { stale_renders.push("Encounters"); }
-                    let pres_hash = crate::ui::presentation_view::cache_spec(layout, &self.dungeon.graph, &self.dungeon.theme).hash;
+                    let pres_hash = match self.current_floor {
+                        Some(f) => crate::ui::presentation_view::cache_spec(&layout.filtered_to_floor(&self.dungeon.graph, f), &self.dungeon.graph, &self.dungeon.theme, Some(f)).hash,
+                        None => crate::ui::presentation_view::cache_spec(layout, &self.dungeon.graph, &self.dungeon.theme, None).hash,
+                    };
                     if !self.presentation_view_state.render_cache.is_current(pres_hash) && !self.presentation_view_state.render_cache.has_failed(pres_hash) { stale_renders.push("Presentation"); }
                     let styled_hash = crate::ui::styled_view::cache_spec(layout, &self.dungeon.graph, &self.dungeon.theme, self.styled_state.show_grid, self.styled_state.current_floor).hash;
                     if !self.styled_state.render_cache.is_current(styled_hash) && !self.styled_state.render_cache.has_failed(styled_hash) { stale_renders.push("Styled"); }
@@ -2127,6 +2187,7 @@ impl DungeonApp {
     fn end_frame(&mut self, ctx: &egui::Context) {
         // Sync party changes back to campaign
         self.sync_party_from_dungeon();
+        self.sync_floor_from_views();
 
         // Track state changes for undo/redo
         let pointer_down = ctx.input(|i| i.pointer.any_down());
@@ -2252,8 +2313,8 @@ impl DungeonApp {
         let styled_filtered = self.styled_state.current_floor.is_some();
         let decor_filtered = self.decor_state.current_floor.is_some();
         let caches = [
-            (crate::ui::encounters_view::cache_spec(layout, graph, theme), &mut self.encounters_state.render_cache, false),
-            (crate::ui::presentation_view::cache_spec(layout, graph, theme), &mut self.presentation_view_state.render_cache, false),
+            (crate::ui::encounters_view::cache_spec(layout, graph, theme, None), &mut self.encounters_state.render_cache, self.current_floor.is_some()),
+            (crate::ui::presentation_view::cache_spec(layout, graph, theme, None), &mut self.presentation_view_state.render_cache, self.current_floor.is_some()),
             (crate::ui::styled_view::cache_spec(layout, graph, theme, self.styled_state.show_grid, self.styled_state.current_floor), &mut self.styled_state.render_cache, styled_filtered),
             (crate::ui::decor_view::cache_spec(layout, graph, theme, self.decor_state.current_floor), &mut self.decor_state.render_cache, decor_filtered),
         ];

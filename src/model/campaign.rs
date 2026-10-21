@@ -17,6 +17,9 @@ pub struct Campaign {
     /// Monotonically increasing version counter, bumped on each save.
     #[serde(default)]
     pub version: u64,
+    /// Which decor gives light, for every map that doesn't set its own.
+    #[serde(default)]
+    pub decor_lighting: super::DecorLighting,
 }
 
 impl Campaign {
@@ -27,6 +30,7 @@ impl Campaign {
             active_map: 0,
             party: Vec::new(),
             version: 0,
+            decor_lighting: Default::default(),
         }
     }
 
@@ -40,6 +44,7 @@ impl Campaign {
             active_map: 0,
             party,
             version: 0,
+            decor_lighting: Default::default(),
         }
     }
 

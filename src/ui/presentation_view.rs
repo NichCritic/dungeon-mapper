@@ -71,11 +71,13 @@ impl Default for PresentationViewState {
     }
 }
 
-/// The DM presentation canvas's cached render (the full map, secrets and notes too).
-pub fn cache_spec(layout: &SpatialLayout, graph: &DungeonGraph, theme: &Theme) -> CacheSpec {
-    use std::hash::Hasher;
+/// The DM presentation canvas's cached render (the whole floor being played, or the
+/// whole map, secrets and notes too).
+pub fn cache_spec(layout: &SpatialLayout, graph: &DungeonGraph, theme: &Theme, floor: Option<i32>) -> CacheSpec {
+    use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     crate::render::bg_cache::map_render_hash(&mut h, layout, graph, theme, true);
+    floor.hash(&mut h);
     let options = RenderOptions { show_grid: true, show_labels: true, show_notes: true, show_secrets: true, show_decor: true, show_lighting: true };
     CacheSpec { hash: h.finish(), options, label: "Presentation" }
 }
@@ -1100,7 +1102,7 @@ pub fn presentation_view(
     view_state.canvas_size = rect.size();
     let transform = ViewTransform::new(view_state.view.offset, view_state.view.zoom, rect);
 
-    let Some(layout) = &dungeon.layout else {
+    let Some(full_layout) = &dungeon.layout else {
         painter.text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
@@ -1110,15 +1112,29 @@ pub fn presentation_view(
         );
         return;
     };
+    // Play happens on one floor at a time: everything below works from that floor's
+    // rooms and corridors (or the whole map when none is picked)
+    let floor = presentation.current_floor;
+    let floor_layout;
+    let layout: &SpatialLayout = match floor {
+        Some(f) => {
+            floor_layout = full_layout.filtered_to_floor(&dungeon.graph, f);
+            &floor_layout
+        }
+        None => full_layout,
+    };
 
-    // Rebuild cached render commands for the full map (DM sees everything)
-    let spec = cache_spec(layout, &dungeon.graph, &dungeon.theme);
+    // Rebuild cached render commands (DM sees everything on the floor)
+    let spec = cache_spec(layout, &dungeon.graph, &dungeon.theme, floor);
     let cache_ready = view_state.render_cache.ensure_spec(&spec, &dungeon.graph, layout, &dungeon.theme);
 
     if cache_ready {
         view_state.render_cache.paint(&painter, &transform);
     } else {
         crate::ui::canvas_common::paint_render_pending(ui, &painter, rect, view_state.render_cache.pending_label().unwrap_or("map"));
+    }
+    if let Some(f) = floor {
+        crate::ui::canvas_common::paint_floor_ghosts(&painter, &transform, full_layout, &dungeon.graph, f, |_| true, true);
     }
 
     // Draw text overlay (labels/notes visible to DM)
@@ -1150,7 +1166,6 @@ pub fn presentation_view(
         tokens::prune_stale(&mut toks, dungeon);
         dungeon.tokens = toks;
     }
-    let token_infos = tokens::resolve_tokens(dungeon, monster_db, presentation.combat_tracker.as_ref());
     // Tracker rows can ask the map to jump to a token
     let center_req: Option<MonsterInstanceId> = ui.ctx().memory_mut(|m| {
         let id = egui::Id::new("center_on_token");
@@ -1163,8 +1178,15 @@ pub fn presentation_view(
         if let Some(tok) = dungeon.tokens.iter().find(|t| t.kind == kind) {
             view_state.view.center_on(tok.x * GRID_PX, tok.y * GRID_PX, rect.size());
             view_state.selected_token = Some(kind);
+            // A token on another floor brings its floor up (from the next frame)
+            if !tok.on_floor(floor, &dungeon.graph, full_layout) {
+                presentation.current_floor = tok.floor_in(&dungeon.graph, full_layout);
+            }
         }
     }
+    // Tokens on other floors sit out this frame, and come back at the end of it
+    let floor_split = tokens::FloorSplit::take(&mut dungeon.tokens, floor, |t| t.on_floor(floor, &dungeon.graph, full_layout));
+    let token_infos = tokens::resolve_tokens(dungeon, monster_db, presentation.combat_tracker.as_ref());
     // Line-of-sight geometry for lighting and cover. Static geometry is cached; while a
     // token is being dragged the light map and heatmap are frozen and refresh on release.
     let dragging = view_state.token_drag.is_some();
@@ -1590,6 +1612,7 @@ pub fn presentation_view(
             }
         }
     });
+    floor_split.restore(&mut dungeon.tokens);
 }
 
 /// Compute the zoom level that makes one grid square appear as 1 physical
@@ -2515,6 +2538,34 @@ pub fn presentation_sidebar(
 ) {
     ui.heading("Presentation Mode");
     ui.separator();
+
+    // Which floor is in play: the DM canvas, player window and web image show only it
+    let floors = crate::ui::spatial_view::collect_floors(&dungeon.graph);
+    if floors.len() > 1 {
+        ui.horizontal(|ui| {
+            ui.label("Floor:");
+            let at = presentation.current_floor.and_then(|f| floors.iter().position(|x| *x == f));
+            if ui.add_enabled(at.is_some_and(|i| i > 0), egui::Button::new("▼").small()).on_hover_text("Floor below").clicked() {
+                presentation.current_floor = at.map(|i| floors[i - 1]);
+            }
+            let text = presentation.current_floor.map_or("All floors".to_string(), |f| format!("Floor {f}"));
+            egui::ComboBox::from_id_salt("pres_floor")
+                .selected_text(text)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut presentation.current_floor, None, "All floors");
+                    for f in &floors {
+                        ui.selectable_value(&mut presentation.current_floor, Some(*f), format!("Floor {f}"));
+                    }
+                });
+            let up_ok = match at { Some(i) => i + 1 < floors.len(), None => true };
+            if ui.add_enabled(up_ok, egui::Button::new("▲").small()).on_hover_text("Floor above").clicked() {
+                presentation.current_floor = Some(match at { Some(i) => floors[i + 1], None => floors[0] });
+            }
+        });
+        ui.checkbox(&mut presentation.ghost_lower_floors, "Players see lower floors faintly")
+            .on_hover_text("Only rooms they have already seen, as faint outlines under the current floor");
+        ui.separator();
+    }
 
     // Quick actions
     ui.horizontal(|ui| {

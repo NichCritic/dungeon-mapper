@@ -110,6 +110,86 @@ pub fn room_screen_outline(rl: &crate::model::RoomLayout, transform: &crate::uti
         .collect()
 }
 
+/// "Floor: [All floors / Floor n]" for a map with more than one floor (nothing otherwise).
+pub fn floor_combo(ui: &mut egui::Ui, id: &str, graph: &crate::model::DungeonGraph, current: &mut Option<i32>) {
+    let floors = crate::ui::spatial_view::collect_floors(graph);
+    if floors.len() < 2 {
+        return;
+    }
+    ui.horizontal(|ui| {
+        ui.label("Floor:");
+        egui::ComboBox::from_id_salt(id)
+            .selected_text(current.map_or("All floors".to_string(), |f| format!("Floor {f}")))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(current, None, "All floors");
+                for f in floors {
+                    ui.selectable_value(current, Some(f), format!("Floor {f}"));
+                }
+            });
+    });
+}
+
+/// Faint silhouettes of the rooms and corridors on floors below `floor`, so a floor
+/// can be read against the ones it sits on. `show_room` picks which rooms (by id) to
+/// draw — players only see the ones they've found — and a corridor shows when either
+/// of its rooms does. `labels` adds the room names.
+pub fn paint_floor_ghosts(
+    painter: &egui::Painter,
+    transform: &crate::util::ViewTransform,
+    layout: &crate::model::SpatialLayout,
+    graph: &crate::model::DungeonGraph,
+    floor: i32,
+    show_room: impl Fn(&str) -> bool,
+    labels: bool,
+) {
+    use crate::model::FloorRel;
+    use crate::util::{grid_to_world, GRID_PX};
+    let ghost_fill = egui::Color32::from_rgba_unmultiplied(50, 50, 60, 70);
+    let ghost_stroke = egui::Stroke::new(1.5_f32, egui::Color32::from_rgba_unmultiplied(70, 70, 80, 90));
+    let below = |room_id: &str| graph.room_by_id(room_id).is_some_and(|r| r.floor.relation(floor) == FloorRel::Below);
+    for rl in &layout.rooms {
+        let Some(room) = graph.room_by_id(&rl.room_id) else { continue };
+        if !below(&rl.room_id) || !show_room(&rl.room_id) {
+            continue;
+        }
+        match room.shape {
+            crate::model::RoomShape::Circle if !rl.is_rotated() => {
+                let min = transform.world_to_screen(egui::pos2(rl.x as f32 * GRID_PX, rl.y as f32 * GRID_PX));
+                let max = transform.world_to_screen(egui::pos2((rl.x + rl.width as i32) as f32 * GRID_PX, (rl.y + rl.height as i32) as f32 * GRID_PX));
+                let r = egui::Rect::from_min_max(min, max);
+                let radius = r.width().min(r.height()) / 2.0;
+                painter.circle_filled(r.center(), radius, ghost_fill);
+                painter.circle_stroke(r.center(), radius, ghost_stroke);
+            }
+            _ => {
+                let outline = room_screen_outline(rl, transform);
+                painter.add(egui::Shape::convex_polygon(outline.clone(), ghost_fill, egui::Stroke::NONE));
+                painter.add(egui::Shape::closed_line(outline, ghost_stroke));
+            }
+        }
+        if labels {
+            let (cx, cy) = crate::util::room_center_px(rl);
+            let font = egui::FontId::monospace(10.0 * transform.zoom);
+            let label = truncate_to_fit(painter, &room.label, &font, rl.width as f32 * GRID_PX * transform.zoom);
+            painter.text(transform.world_to_screen(egui::pos2(cx, cy)), egui::Align2::CENTER_CENTER, &label, font,
+                egui::Color32::from_rgba_unmultiplied(80, 80, 90, 100));
+        }
+    }
+    for corridor in &layout.corridors {
+        let Some(edge) = graph.connection_by_id(&corridor.connection_id) else { continue };
+        if graph.edge_floor_relation(edge, floor) != FloorRel::Below
+            || !(show_room(&edge.source_room_id) || show_room(&edge.target_room_id))
+        {
+            continue;
+        }
+        for (min_x, min_y, max_x, max_y) in corridor.run_boxes() {
+            let smin = transform.world_to_screen(egui::pos2(grid_to_world(min_x), grid_to_world(min_y)));
+            let smax = transform.world_to_screen(egui::pos2(grid_to_world(max_x), grid_to_world(max_y)));
+            painter.rect_filled(egui::Rect::from_min_max(smin, smax), 0.0, ghost_fill);
+        }
+    }
+}
+
 /// Truncate text with "..." if it exceeds `max_width` pixels.
 pub fn truncate_to_fit(
     painter: &egui::Painter,

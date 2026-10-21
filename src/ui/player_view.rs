@@ -49,15 +49,16 @@ fn player_input_hash(
     for conn_id in &presentation.doors_open {
         conn_id.hash(&mut h);
     }
-    dungeon.light_sources.len().hash(&mut h);
-    for light in &dungeon.light_sources {
-        light.id.hash(&mut h);
-        light.radius.to_bits().hash(&mut h);
-        light.intensity.to_bits().hash(&mut h);
+    let lights = dungeon.all_lights();
+    lights.len().hash(&mut h);
+    for light in &lights {
+        light.hash_into(&mut h);
     }
     dungeon.ambient_light.to_bits().hash(&mut h);
     presentation.show_labels_player.hash(&mut h);
     presentation.los_lighting.hash(&mut h);
+    presentation.current_floor.hash(&mut h);
+    presentation.ghost_lower_floors.hash(&mut h);
     h.finish()
 }
 
@@ -94,7 +95,7 @@ pub fn player_viewport(
         let base_transform = ViewTransform::new(state.view.offset, state.view.zoom, rect);
         let transform = base_transform.clone().with_rotation(rotation_rad);
 
-        let Some(layout) = &dungeon.layout else {
+        let Some(full_layout) = &dungeon.layout else {
             painter.text(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
@@ -104,6 +105,20 @@ pub fn player_viewport(
             );
             return;
         };
+        // Players see the floor the DM is playing on (or every floor)
+        let floor = presentation.current_floor;
+        let floor_layout;
+        let layout: &SpatialLayout = match floor {
+            Some(f) => {
+                floor_layout = full_layout.filtered_to_floor(&dungeon.graph, f);
+                &floor_layout
+            }
+            None => full_layout,
+        };
+        let floor_tokens: Vec<crate::model::MapToken> = dungeon.tokens.iter()
+            .filter(|t| t.on_floor(floor, &dungeon.graph, full_layout))
+            .cloned()
+            .collect();
 
         // Rebuild if inputs changed
         let hash = player_input_hash(layout, &dungeon.theme, presentation, dungeon);
@@ -125,12 +140,17 @@ pub fn player_viewport(
                 room_visibility: presentation.room_visibility.clone(),
                 doors_open: presentation.doors_open.clone(),
             };
-            let lights = dungeon.light_sources.clone();
+            let lights: Vec<_> = dungeon.all_lights().into_iter()
+                .filter(|l| crate::presentation::lighting::light_in_play(l, &floor_tokens, layout))
+                .collect();
             let ambient = dungeon.ambient_light;
+            // Lower floors players have seen, faintly, if the DM allows it
+            let ghosts = floor.filter(|_| presentation.ghost_lower_floors).map(|f| (full_layout.clone(), f));
             move || {
                 let mut recorder = crate::render::recording::RecordingRenderer::new();
                 crate::render::presentation::render_player_view_snapshot(
                     &mut recorder, &graph, &layout_c, &theme, &pres_snapshot, &lights, ambient, &options,
+                    ghosts.as_ref().map(|(l, f)| (l, *f)),
                 );
                 recorder.commands
             }
@@ -173,6 +193,9 @@ pub fn player_viewport(
             let mut vis_tokens = Vec::new();
             let mut vis_infos = Vec::new();
             for (tok, info) in dungeon.tokens.iter().zip(&infos) {
+                if !tok.on_floor(floor, &dungeon.graph, full_layout) {
+                    continue;
+                }
                 let visible = match &tok.kind {
                     TokenKind::Player(_) => true,
                     TokenKind::Monster(_) => {

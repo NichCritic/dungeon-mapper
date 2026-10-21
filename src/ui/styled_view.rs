@@ -6,7 +6,7 @@ use crate::render::themed::RenderOptions;
 use crate::render::bg_cache::CacheSpec;
 use crate::ui::canvas_common::{handle_pan_zoom, truncate_to_fit, ViewState, COLOR_PLACEHOLDER_TEXT};
 use crate::ui::spatial_view::collect_floors;
-use crate::util::{grid_to_world, ViewTransform, GRID_PX};
+use crate::util::{ViewTransform, GRID_PX};
 
 use crate::render::bg_cache::BackgroundRenderCache;
 
@@ -85,72 +85,9 @@ pub fn styled_view(ui: &mut egui::Ui, dungeon: &Dungeon, state: &mut StyledViewS
             crate::ui::canvas_common::paint_render_pending(ui, &painter, rect, state.render_cache.pending_label().unwrap_or("map"));
         }
 
-        // Draw lower-floor room/corridor silhouettes as dark semi-transparent shapes
+        // Lower floors as faint silhouettes under the selected one
         if let Some(floor) = state.current_floor {
-            let ghost_fill = egui::Color32::from_rgba_unmultiplied(50, 50, 60, 70);
-            let ghost_stroke = egui::Stroke::new(1.5_f32, egui::Color32::from_rgba_unmultiplied(70, 70, 80, 90));
-            // Lower-floor rooms
-            for rl in &layout.rooms {
-                if let Some(room) = dungeon.graph.room_by_id(&rl.room_id) {
-                    if room.floor.relation(floor) == FloorRel::Below {
-                        let min = transform.world_to_screen(egui::pos2(
-                            rl.x as f32 * GRID_PX,
-                            rl.y as f32 * GRID_PX,
-                        ));
-                        let max = transform.world_to_screen(egui::pos2(
-                            (rl.x + rl.width as i32) as f32 * GRID_PX,
-                            (rl.y + rl.height as i32) as f32 * GRID_PX,
-                        ));
-                        let r = egui::Rect::from_min_max(min, max);
-                        match room.shape {
-                            crate::model::RoomShape::Circle => {
-                                let center = r.center();
-                                let radius = r.width().min(r.height()) / 2.0;
-                                painter.circle_filled(center, radius, ghost_fill);
-                                painter.circle_stroke(center, radius, ghost_stroke);
-                            }
-                            _ => {
-                                let outline = crate::ui::canvas_common::room_screen_outline(rl, &transform);
-                                painter.add(egui::Shape::convex_polygon(outline.clone(), ghost_fill, egui::Stroke::NONE));
-                                painter.add(egui::Shape::closed_line(outline, ghost_stroke));
-                            }
-                        }
-                        // Ghost label
-                        let (cx, cy) = crate::util::room_center_px(rl);
-                        let screen = transform.world_to_screen(egui::pos2(cx, cy));
-                        let max_width = rl.width as f32 * GRID_PX * transform.zoom;
-                        let font = egui::FontId::monospace(10.0 * transform.zoom);
-                        let label = truncate_to_fit(&painter, &room.label, &font, max_width);
-                        painter.text(
-                            screen,
-                            egui::Align2::CENTER_CENTER,
-                            &label,
-                            font,
-                            egui::Color32::from_rgba_unmultiplied(80, 80, 90, 100),
-                        );
-                    }
-                }
-            }
-            // Lower-floor corridors
-            for corridor in &layout.corridors {
-                if let Some(edge) = dungeon.graph.connection_by_id(&corridor.connection_id) {
-                    if dungeon.graph.edge_floor_relation(edge, floor) != FloorRel::Below { continue; }
-
-                    for (min_x, min_y, max_x, max_y) in corridor.run_boxes() {
-                        let smin = transform.world_to_screen(egui::pos2(
-                            grid_to_world(min_x), grid_to_world(min_y),
-                        ));
-                        let smax = transform.world_to_screen(egui::pos2(
-                            grid_to_world(max_x), grid_to_world(max_y),
-                        ));
-                        painter.rect_filled(
-                            egui::Rect::from_min_max(smin, smax),
-                            0.0,
-                            ghost_fill,
-                        );
-                    }
-                }
-            }
+            crate::ui::canvas_common::paint_floor_ghosts(&painter, &transform, layout, &dungeon.graph, floor, |_| true, true);
         }
 
         // Live text overlay (labels, notes, secret door markers)
