@@ -700,138 +700,7 @@ fn on_drag(
         match &state.drag_target {
             DragTarget::Room(room_id) => {
                 let room_id = room_id.clone();
-
-                // Find which connections are attached to this room
-                let connected_ids: Vec<(String, bool, bool)> = dungeon.graph.connections
-                    .iter()
-                    .filter_map(|e| {
-                        let is_src = e.source_room_id == room_id;
-                        let is_tgt = e.target_room_id == room_id;
-                        if is_src || is_tgt {
-                            Some((e.connection.id.clone(), is_src, is_tgt))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-
-                // Collect children to move along with this room (recursive)
-                let mut children_to_move: Vec<String> = Vec::new();
-                {
-                    let mut stack = vec![room_id.clone()];
-                    while let Some(rid) = stack.pop() {
-                        for child_id in dungeon.graph.children_of(&rid) {
-                            children_to_move.push(child_id.to_string());
-                            stack.push(child_id.to_string());
-                        }
-                    }
-                }
-
-                // Also collect connections for children (for waypoint/exit shifting)
-                let mut child_connected_ids: Vec<(String, String, bool, bool)> = Vec::new(); // (conn_id, room_id, is_src, is_tgt)
-                for child_id in &children_to_move {
-                    for e in &dungeon.graph.connections {
-                        let is_src = e.source_room_id == *child_id;
-                        let is_tgt = e.target_room_id == *child_id;
-                        if is_src || is_tgt {
-                            child_connected_ids.push((e.connection.id.clone(), child_id.clone(), is_src, is_tgt));
-                        }
-                    }
-                }
-
-                if let Some(layout) = &mut dungeon.layout {
-                    // Move the room
-                    if let Some(rl) = layout.room_by_id_mut(&room_id) {
-                        rl.x += grid_steps_x;
-                        rl.y += grid_steps_y;
-                    }
-
-                    // Move all children along with the container
-                    for child_id in &children_to_move {
-                        if let Some(rl) = layout.room_by_id_mut(child_id) {
-                            rl.x += grid_steps_x;
-                            rl.y += grid_steps_y;
-                        }
-                    }
-
-                    // Shift pinned waypoints for children's corridors
-                    for corridor in &mut layout.corridors {
-                        for (conn_id, _, is_src, is_tgt) in &child_connected_ids {
-                            if corridor.connection_id != *conn_id { continue; }
-                            if !corridor.pinned_waypoints.is_empty() {
-                                if *is_src {
-                                    corridor.pinned_waypoints.first_mut().unwrap().x += grid_steps_x;
-                                    corridor.pinned_waypoints.first_mut().unwrap().y += grid_steps_y;
-                                }
-                                if *is_tgt {
-                                    corridor.pinned_waypoints.last_mut().unwrap().x += grid_steps_x;
-                                    corridor.pinned_waypoints.last_mut().unwrap().y += grid_steps_y;
-                                }
-                            }
-                        }
-                    }
-
-                    // Clamp child rooms to stay within parent bounds
-                    if let Some(parent_id) = dungeon.graph.parent_of(&room_id) {
-                        let padding = dungeon.graph.containment_group(parent_id)
-                            .map(|g| g.containment_padding as i32)
-                            .unwrap_or(1);
-                        let parent_bounds = layout.room_by_id(parent_id).map(|p| (p.x, p.y, p.width, p.height));
-                        if let (Some((px, py, pw, ph)), Some(rl)) = (parent_bounds, layout.room_by_id_mut(&room_id)) {
-                            let min_x = px + padding;
-                            let min_y = py + padding;
-                            let max_x = px + pw as i32 - padding - rl.width as i32;
-                            let max_y = py + ph as i32 - padding - rl.height as i32;
-                            rl.x = rl.x.clamp(min_x, max_x);
-                            rl.y = rl.y.clamp(min_y, max_y);
-                        }
-                    }
-
-                    // Shift pinned waypoints for connected corridors
-                    for corridor in &mut layout.corridors {
-                        for (conn_id, is_src, is_tgt) in &connected_ids {
-                            if corridor.connection_id != *conn_id {
-                                continue;
-                            }
-                            if !corridor.pinned_waypoints.is_empty() {
-                                // Shift the start waypoint if this room is the source
-                                if *is_src {
-                                    corridor.pinned_waypoints.first_mut().unwrap().x += grid_steps_x;
-                                    corridor.pinned_waypoints.first_mut().unwrap().y += grid_steps_y;
-                                }
-                                // Shift the end waypoint if this room is the target
-                                if *is_tgt {
-                                    corridor.pinned_waypoints.last_mut().unwrap().x += grid_steps_x;
-                                    corridor.pinned_waypoints.last_mut().unwrap().y += grid_steps_y;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Shift exit positions for connected edges (room + children)
-                let all_exit_shifts: Vec<(String, bool, bool)> = connected_ids.iter()
-                    .map(|(c, s, t)| (c.clone(), *s, *t))
-                    .chain(child_connected_ids.iter().map(|(c, _, s, t)| (c.clone(), *s, *t)))
-                    .collect();
-                for (conn_id, is_src, is_tgt) in &all_exit_shifts {
-                    if let Some(edge) = dungeon.graph.connections.iter_mut()
-                        .find(|e| e.connection.id == *conn_id)
-                    {
-                        if *is_src {
-                            if let Some(ref mut exit) = edge.source_exit {
-                                exit.x += grid_steps_x as f32;
-                                exit.y += grid_steps_y as f32;
-                            }
-                        }
-                        if *is_tgt {
-                            if let Some(ref mut exit) = edge.target_exit {
-                                exit.x += grid_steps_x as f32;
-                                exit.y += grid_steps_y as f32;
-                            }
-                        }
-                    }
-                }
+                move_room_by(dungeon, &room_id, grid_steps_x, grid_steps_y);
             }
             DragTarget::Waypoint(ci, wi) => {
                 let ci = *ci;
@@ -1033,6 +902,145 @@ fn on_drag_stop(
 }
 
 
+/// Move a placed room by whole grid squares, as dragging it does: the rooms it
+/// contains move with it, a contained room stays inside its container, and pinned
+/// corridor ends and exits on its connections shift along. Corridors are re-routed
+/// separately ([`reroute_room`]) once the move is finished.
+pub(crate) fn move_room_by(dungeon: &mut Dungeon, room_id: &str, dx: i32, dy: i32) {
+    let room_id = room_id.to_string();
+    // Find which connections are attached to this room
+    let connected_ids: Vec<(String, bool, bool)> = dungeon.graph.connections
+        .iter()
+        .filter_map(|e| {
+            let is_src = e.source_room_id == room_id;
+            let is_tgt = e.target_room_id == room_id;
+            if is_src || is_tgt {
+                Some((e.connection.id.clone(), is_src, is_tgt))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Collect children to move along with this room (recursive)
+    let mut children_to_move: Vec<String> = Vec::new();
+    {
+        let mut stack = vec![room_id.clone()];
+        while let Some(rid) = stack.pop() {
+            for child_id in dungeon.graph.children_of(&rid) {
+                children_to_move.push(child_id.to_string());
+                stack.push(child_id.to_string());
+            }
+        }
+    }
+
+    // Also collect connections for children (for waypoint/exit shifting)
+    let mut child_connected_ids: Vec<(String, String, bool, bool)> = Vec::new(); // (conn_id, room_id, is_src, is_tgt)
+    for child_id in &children_to_move {
+        for e in &dungeon.graph.connections {
+            let is_src = e.source_room_id == *child_id;
+            let is_tgt = e.target_room_id == *child_id;
+            if is_src || is_tgt {
+                child_connected_ids.push((e.connection.id.clone(), child_id.clone(), is_src, is_tgt));
+            }
+        }
+    }
+
+    if let Some(layout) = &mut dungeon.layout {
+        // Move the room
+        if let Some(rl) = layout.room_by_id_mut(&room_id) {
+            rl.x += dx;
+            rl.y += dy;
+        }
+
+        // Move all children along with the container
+        for child_id in &children_to_move {
+            if let Some(rl) = layout.room_by_id_mut(child_id) {
+                rl.x += dx;
+                rl.y += dy;
+            }
+        }
+
+        // Shift pinned waypoints for children's corridors
+        for corridor in &mut layout.corridors {
+            for (conn_id, _, is_src, is_tgt) in &child_connected_ids {
+                if corridor.connection_id != *conn_id { continue; }
+                if !corridor.pinned_waypoints.is_empty() {
+                    if *is_src {
+                        corridor.pinned_waypoints.first_mut().unwrap().x += dx;
+                        corridor.pinned_waypoints.first_mut().unwrap().y += dy;
+                    }
+                    if *is_tgt {
+                        corridor.pinned_waypoints.last_mut().unwrap().x += dx;
+                        corridor.pinned_waypoints.last_mut().unwrap().y += dy;
+                    }
+                }
+            }
+        }
+
+        // Clamp child rooms to stay within parent bounds
+        if let Some(parent_id) = dungeon.graph.parent_of(&room_id) {
+            let padding = dungeon.graph.containment_group(parent_id)
+                .map(|g| g.containment_padding as i32)
+                .unwrap_or(1);
+            let parent_bounds = layout.room_by_id(parent_id).map(|p| (p.x, p.y, p.width, p.height));
+            if let (Some((px, py, pw, ph)), Some(rl)) = (parent_bounds, layout.room_by_id_mut(&room_id)) {
+                let min_x = px + padding;
+                let min_y = py + padding;
+                let max_x = px + pw as i32 - padding - rl.width as i32;
+                let max_y = py + ph as i32 - padding - rl.height as i32;
+                rl.x = rl.x.clamp(min_x, max_x);
+                rl.y = rl.y.clamp(min_y, max_y);
+            }
+        }
+
+        // Shift pinned waypoints for connected corridors
+        for corridor in &mut layout.corridors {
+            for (conn_id, is_src, is_tgt) in &connected_ids {
+                if corridor.connection_id != *conn_id {
+                    continue;
+                }
+                if !corridor.pinned_waypoints.is_empty() {
+                    // Shift the start waypoint if this room is the source
+                    if *is_src {
+                        corridor.pinned_waypoints.first_mut().unwrap().x += dx;
+                        corridor.pinned_waypoints.first_mut().unwrap().y += dy;
+                    }
+                    // Shift the end waypoint if this room is the target
+                    if *is_tgt {
+                        corridor.pinned_waypoints.last_mut().unwrap().x += dx;
+                        corridor.pinned_waypoints.last_mut().unwrap().y += dy;
+                    }
+                }
+            }
+        }
+    }
+
+    // Shift exit positions for connected edges (room + children)
+    let all_exit_shifts: Vec<(String, bool, bool)> = connected_ids.iter()
+        .map(|(c, s, t)| (c.clone(), *s, *t))
+        .chain(child_connected_ids.iter().map(|(c, _, s, t)| (c.clone(), *s, *t)))
+        .collect();
+    for (conn_id, is_src, is_tgt) in &all_exit_shifts {
+        if let Some(edge) = dungeon.graph.connections.iter_mut()
+            .find(|e| e.connection.id == *conn_id)
+        {
+            if *is_src {
+                if let Some(ref mut exit) = edge.source_exit {
+                    exit.x += dx as f32;
+                    exit.y += dy as f32;
+                }
+            }
+            if *is_tgt {
+                if let Some(ref mut exit) = edge.target_exit {
+                    exit.x += dx as f32;
+                    exit.y += dy as f32;
+                }
+            }
+        }
+    }
+}
+
 /// Paint the selected cave's cells: left button digs (floor), right button fills (wall).
 /// A stroke must start inside the cave; it then paints every cell the pointer passes
 /// over, interpolating between frames. Returns true when the pointer was used for
@@ -1165,7 +1173,7 @@ fn rotation_handle_pos(rl: &RoomLayout) -> (f32, f32) {
 }
 
 /// Re-route the corridors of a room that moved or turned.
-fn reroute_room(dungeon: &mut Dungeon, room_id: &str) {
+pub(crate) fn reroute_room(dungeon: &mut Dungeon, room_id: &str) {
     if let Some(layout) = &mut dungeon.layout {
         let affected = std::collections::HashSet::from([room_id.to_string()]);
         layout.corridors = crate::solver::corridor::route_corridors_for_rooms(&dungeon.graph, layout, &affected);
@@ -2646,7 +2654,7 @@ pub fn spatial_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Spa
     }
 }
 
-fn duplicate_group(dungeon: &mut Dungeon, room_ids: &[String], group_idx: usize) {
+pub(crate) fn duplicate_group(dungeon: &mut Dungeon, room_ids: &[String], group_idx: usize) {
     use std::collections::HashMap;
 
     let room_id_set: std::collections::HashSet<&String> = room_ids.iter().collect();
@@ -2757,12 +2765,12 @@ fn duplicate_group(dungeon: &mut Dungeon, room_ids: &[String], group_idx: usize)
     dungeon.graph.groups.push(new_group);
 }
 
-fn rotate_group(dungeon: &mut Dungeon, room_ids: &[String]) {
+pub(crate) fn rotate_group(dungeon: &mut Dungeon, room_ids: &[String]) {
     // 90° about the group's center; room footprints swap width and height
     transform_group(dungeon, room_ids, true, |(cx, cy), (x, y)| (cx + (y - cy), cy - (x - cx)));
 }
 
-fn flip_group(dungeon: &mut Dungeon, room_ids: &[String], horizontal: bool) {
+pub(crate) fn flip_group(dungeon: &mut Dungeon, room_ids: &[String], horizontal: bool) {
     transform_group(dungeon, room_ids, false, move |(cx, cy), (x, y)| {
         if horizontal { (2.0 * cx - x, y) } else { (x, 2.0 * cy - y) }
     });

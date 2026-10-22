@@ -8,6 +8,8 @@
 
 mod encounters;
 mod http;
+mod layout;
+mod lighting;
 pub mod tools;
 
 use std::net::TcpListener;

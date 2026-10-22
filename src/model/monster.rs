@@ -248,6 +248,7 @@ impl HitPoints {
     pub fn display(&self) -> String {
         match self {
             HitPoints::Unknown => "—".to_string(),
+            HitPoints::Formula { average, formula } if formula.is_empty() => average.to_string(),
             HitPoints::Formula { average, formula } => format!("{} ({})", average, formula),
             HitPoints::Special { special } => special.clone(),
         }

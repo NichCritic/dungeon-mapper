@@ -981,7 +981,12 @@ impl DungeonApp {
         }
         for call in calls {
             // One at a time: a map change must land before the next call runs.
-            if let Some(pending) = crate::mcp::tools::handle(&mut self.claude_tools(), call) {
+            let pending = crate::mcp::tools::handle(&mut self.claude_tools(), call);
+            // Place what Claude added straight away, whichever view is open, so it
+            // shows up on the map (the views only lay out the map while on screen),
+            // and so the change and its placement undo together.
+            self.place_new_rooms();
+            if let Some(pending) = pending {
                 use crate::mcp::tools::{log_activity, map_opened, AppAction};
                 let reply = match pending.action {
                     AppAction::OpenMap(idx) => {
@@ -994,6 +999,34 @@ impl DungeonApp {
                         log_activity(&mut self.claude.activity, format!("created map {}", self.dungeon.name));
                         map_opened(&self.claude_tools())
                     }
+                    AppAction::RemoveOpenMap => {
+                        let name = self.dungeon.name.clone();
+                        self.remove_open_map();
+                        log_activity(&mut self.claude.activity, format!("removed map {}", name));
+                        map_opened(&self.claude_tools())
+                    }
+                    AppAction::Undo | AppAction::Redo => {
+                        let undo = pending.action == AppAction::Undo;
+                        let done = if undo { self.history.undo(&mut self.dungeon) } else { self.history.redo(&mut self.dungeon) };
+                        if done {
+                            self.after_history_restore(ctx);
+                            log_activity(&mut self.claude.activity, if undo { "undid a change".into() } else { "redid a change".into() });
+                            crate::mcp::ToolOutput::json(&serde_json::json!({ "done": if undo { "undo" } else { "redo" } }))
+                        } else {
+                            crate::mcp::ToolOutput::error(if undo { "Nothing to undo." } else { "Nothing to redo." })
+                        }
+                    }
+                    AppAction::RecomputeLayout(gap) => {
+                        if let Some(g) = gap {
+                            self.spatial_state.density_gap = g;
+                        }
+                        self.solve_layout_full();
+                        log_activity(&mut self.claude.activity, "laid the map out again".into());
+                        match &self.layout_error {
+                            Some(e) => crate::mcp::ToolOutput::error(e.clone()),
+                            None => crate::mcp::ToolOutput::json(&serde_json::json!({ "laid_out": self.dungeon.graph.rooms.len() })),
+                        }
+                    }
                     AppAction::Save => match self.save_to_current_file() {
                         Ok(path) => {
                             log_activity(&mut self.claude.activity, "saved the campaign".into());
@@ -1004,8 +1037,20 @@ impl DungeonApp {
                 };
                 let _ = pending.reply.send(reply);
             }
+            // Each call is its own undo step, rather than merging with quick follow-ups.
+            self.history.checkpoint(&self.dungeon);
         }
         ctx.request_repaint();
+    }
+
+    /// Lay out rooms the graph gained since the last layout, as opening a map view would.
+    fn place_new_rooms(&mut self) {
+        if !self.presenting
+            && self.graph_hash() != self.last_graph_snapshot
+            && (self.dungeon.layout.is_some() || !self.dungeon.graph.rooms.is_empty())
+        {
+            self.solve_layout_incremental();
+        }
     }
 
     /// Start saving the campaign to the file it was opened from or last saved to.
@@ -1024,7 +1069,8 @@ impl DungeonApp {
     /// The app state Claude's tools work on.
     fn claude_tools(&mut self) -> crate::mcp::tools::ToolCtx<'_> {
         crate::mcp::tools::ToolCtx {
-            campaign: &self.campaign,
+            campaign: &mut self.campaign,
+            combat_stats: &mut self.combat_stats_cache,
             monsters: &self.monster_db,
             bestiary_loading: self.pending_monster_db.is_some(),
             activity: &mut self.claude.activity,
@@ -1600,19 +1646,7 @@ impl DungeonApp {
                     }
                     if self.campaign.maps.len() > 1 {
                         if ui.button("Remove Current Map").clicked() {
-                            self.sync_party_from_dungeon();
-                            self.sync_dungeon_to_campaign();
-                            let idx = self.campaign.active_map;
-                            self.campaign.remove_map(idx);
-                            self.load_dungeon_from_campaign();
-                            self.graph_state = GraphEditorState::default();
-                            self.spatial_state = SpatialViewState::default();
-                            self.decor_state = DecorViewState::default();
-                            self.styled_state = StyledViewState::default();
-                            self.presenting = false;
-                            self.presentation = None;
-                            self.last_graph_snapshot = self.graph_hash();
-                            self.history.reset(&self.dungeon);
+                            self.remove_open_map();
                             ui.close_menu();
                         }
                     }
@@ -1740,6 +1774,23 @@ impl DungeonApp {
                 self.change_map(idx);
             }
         }
+    }
+
+    /// Delete the open map from the campaign and open the one that takes its place.
+    fn remove_open_map(&mut self) {
+        self.sync_party_from_dungeon();
+        self.sync_dungeon_to_campaign();
+        let idx = self.campaign.active_map;
+        self.campaign.remove_map(idx);
+        self.load_dungeon_from_campaign();
+        self.graph_state = GraphEditorState::default();
+        self.spatial_state = SpatialViewState::default();
+        self.decor_state = DecorViewState::default();
+        self.styled_state = StyledViewState::default();
+        self.presenting = false;
+        self.presentation = None;
+        self.last_graph_snapshot = self.graph_hash();
+        self.history.reset(&self.dungeon);
     }
 
     /// Add an empty map to the campaign and open it (ending any presentation).

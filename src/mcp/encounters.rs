@@ -8,7 +8,8 @@ use crate::model::monster::{
     alignment_display, cr_to_numeric, damage_list_display, entry_to_text, size_label, strip_5e_markup, Feature,
 };
 use crate::model::{
-    CustomMonster, Encounter, EncounterMonster, EncounterType, Hazard, Monster, MonsterRef, SaveAbility,
+    ArmorClass, ChallengeRating, CustomMonster, Encounter, EncounterMonster, EncounterType, Hazard, HitPoints,
+    MergeConfig, Monster, MonsterRef, MonsterType, SaveAbility, SpeedValue,
 };
 use crate::data::monster_db::SOURCES_2024;
 
@@ -49,6 +50,30 @@ pub fn definitions() -> Vec<Value> {
     });
     let mut update_fields = encounter_fields.clone();
     update_fields["encounter"] = encounter.clone();
+    let features = json!({ "type": "array", "items": { "type": "object", "properties": {
+        "name": { "type": "string" }, "text": { "type": "string" } }, "required": ["name", "text"] } });
+    let custom_fields = json!({
+        "size": { "type": "string", "enum": ["Tiny", "Small", "Medium", "Large", "Huge", "Gargantuan"] },
+        "type": { "type": "string", "description": "e.g. undead, fiend (swarm of Tiny beasts)" },
+        "ac": { "type": "integer" },
+        "hp": { "type": "integer", "description": "Average hit points" },
+        "hp_formula": { "type": "string", "description": "e.g. 4d8 + 8. Giving hp without it drops the old formula" },
+        "speed": { "type": "object", "description": "Feet per mode; 0 removes it", "properties": {
+            "walk": { "type": "integer" }, "fly": { "type": "integer" }, "swim": { "type": "integer" },
+            "climb": { "type": "integer" }, "burrow": { "type": "integer" } } },
+        "abilities": { "type": "object", "properties": {
+            "str": { "type": "integer" }, "dex": { "type": "integer" }, "con": { "type": "integer" },
+            "int": { "type": "integer" }, "wis": { "type": "integer" }, "cha": { "type": "integer" } } },
+        "cr": cr.clone(),
+        "traits": features.clone(), "actions": features.clone(), "reactions": features.clone(), "legendary": features,
+    });
+    let mut custom_create = custom_fields.clone();
+    custom_create["name"] = json!({ "type": "string" });
+    custom_create["based_on"] = json!({ "type": "string", "description": "A bestiary monster to start from" });
+    custom_create["based_on_source"] = json!({ "type": "string", "description": "Its source book, when it's in several" });
+    let mut custom_update = custom_fields;
+    custom_update["monster"] = json!({ "type": "string", "description": "The custom creature's name or id" });
+    custom_update["name"] = json!({ "type": "string", "description": "A new name" });
     vec![
         tool("search_monsters",
             "Search the bestiary (and this campaign's custom creatures). Returns name, source book, CR, XP, type, size, AC and HP. Sorted by CR.",
@@ -69,7 +94,23 @@ pub fn definitions() -> Vec<Value> {
             "Change an encounter: rename, move to another room, replace its monsters, notes, wandering or hazard. Only the fields given change.",
             update_fields, &["encounter"]),
         tool("delete_encounter", "Remove an encounter (and its tokens on the map).",
-            json!({ "encounter": encounter }), &["encounter"]),
+            json!({ "encounter": encounter.clone() }), &["encounter"]),
+        tool("create_custom_monster",
+            "Make a custom creature for this campaign, from scratch or as a copy of a bestiary monster (based_on) with changes. It can then be used in encounters by name.",
+            custom_create, &["name"]),
+        tool("update_custom_monster", "Change one of the campaign's custom creatures. Only the fields given change; feature lists given replace the old ones.",
+            custom_update, &["monster"]),
+        tool("merge_monsters",
+            "Blend two monsters into a new custom creature, as the Monster Workshop does (higher numbers win; feature lists are combined).",
+            json!({
+                "a": { "type": "string" }, "a_source": { "type": "string" },
+                "b": { "type": "string" }, "b_source": { "type": "string" },
+                "name": { "type": "string", "description": "Name for the result" },
+            }), &["a", "b"]),
+        tool("simulate_encounter",
+            "Fight the party against an encounter many times (the Encounters view's Monte Carlo simulator) and report how often each side wins. A rough guide: everyone makes their best attack at a random enemy; no spells or tactics.",
+            json!({ "encounter": encounter, "runs": { "type": "integer", "minimum": 10, "maximum": 5000 } }),
+            &["encounter"]),
     ]
 }
 
@@ -81,6 +122,10 @@ pub fn run(ctx: &mut ToolCtx, tool: &str, args: &Value) -> Option<Result<Value, 
         "create_encounter" => create_encounter(ctx, args),
         "update_encounter" => update_encounter(ctx, args),
         "delete_encounter" => delete_encounter(ctx, args),
+        "create_custom_monster" => create_custom_monster(ctx, args),
+        "update_custom_monster" => update_custom_monster(ctx, args),
+        "merge_monsters" => merge_monsters(ctx, args),
+        "simulate_encounter" => simulate_encounter(ctx, args),
         _ => return None,
     })
 }
@@ -115,6 +160,16 @@ fn find_monster<'a>(
             return Ok((MonsterRef::Custom { id: c.id.clone() }, &c.monster, Vec::new()));
         }
     }
+    find_in_bestiary(ctx, name, source)
+}
+
+/// A bestiary monster by name, as [`find_monster`] picks it (custom creatures aside).
+fn find_in_bestiary<'a>(
+    ctx: &'a ToolCtx,
+    name: &str,
+    source: Option<&str>,
+) -> Result<(MonsterRef, &'a Monster, Vec<String>), String> {
+    let name = name.trim();
     bestiary_ready(ctx)?;
     let mut found: Vec<&Monster> = ctx.monsters.all().iter()
         .filter(|m| m.name.eq_ignore_ascii_case(name))
@@ -477,4 +532,168 @@ fn delete_encounter(ctx: &mut ToolCtx, args: &Value) -> Result<Value, String> {
     let e = ctx.dungeon.encounters.remove(i);
     crate::presentation::tokens::remove_encounter_tokens(&mut ctx.dungeon.tokens, &e.id);
     Ok(json!({ "deleted": e.name, "room": label_of(ctx.dungeon, &e.home_room_id) }))
+}
+
+// ------------------------------------------------------------------ custom creatures
+
+fn resolve_custom(ctx: &ToolCtx, m: &str) -> Result<usize, String> {
+    let list = &ctx.dungeon.custom_monsters;
+    list.iter().position(|c| c.id == m)
+        .or_else(|| list.iter().position(|c| c.monster.name.eq_ignore_ascii_case(m.trim())))
+        .ok_or_else(|| format!("No custom creature '{}' in this campaign.", m))
+}
+
+fn features_arg(v: &Value, key: &str) -> Result<Option<Vec<crate::model::monster::Feature>>, String> {
+    let Some(list) = v.get(key).filter(|x| !x.is_null()) else { return Ok(None) };
+    let list = list.as_array().ok_or(format!("'{}' must be a list of {{name, text}}", key))?;
+    list.iter().map(|f| {
+        Ok(Feature { name: req_str(f, "name")?.to_string(), entries: vec![json!(req_str(f, "text")?)] })
+    }).collect::<Result<Vec<_>, String>>().map(Some)
+}
+
+/// Apply stat-block fields onto `m`.
+fn apply_monster_fields(m: &mut Monster, args: &Value) -> Result<(), String> {
+    if let Some(n) = opt_str(args, "name").map(str::trim).filter(|n| !n.is_empty()) {
+        m.name = n.to_string();
+    }
+    if let Some(size) = opt_str(args, "size") {
+        let code = ["T", "S", "M", "L", "H", "G"].into_iter()
+            .find(|c| size_label(c).eq_ignore_ascii_case(size.trim()) || c.eq_ignore_ascii_case(size.trim()))
+            .ok_or_else(|| format!("Unknown size '{}'", size))?;
+        m.size = vec![code.to_string()];
+    }
+    if let Some(t) = opt_str(args, "type") {
+        m.monster_type = MonsterType::Simple(t.trim().to_string());
+    }
+    if let Some(ac) = args.get("ac").filter(|v| !v.is_null()) {
+        let ac = ac.as_u64().filter(|n| *n <= 40).ok_or("'ac' must be a number up to 40")?;
+        m.ac = vec![ArmorClass::Simple(ac as u8)];
+    }
+    let hp = args.get("hp").filter(|v| !v.is_null()).map(|v| v.as_i64().ok_or("'hp' must be a number")).transpose()?;
+    let formula = opt_str(args, "hp_formula");
+    if hp.is_some() || formula.is_some() {
+        let (old_avg, old_formula) = match &m.hp {
+            HitPoints::Formula { average, formula } => (*average, formula.clone()),
+            _ => (1, String::new()),
+        };
+        // New hit points without new dice would leave a formula that no longer adds up.
+        let formula = match (formula, hp) {
+            (Some(f), _) => f.trim().to_string(),
+            (None, Some(_)) => String::new(),
+            (None, None) => old_formula,
+        };
+        m.hp = HitPoints::Formula { average: hp.map_or(old_avg, |h| h.max(1) as i32), formula };
+    }
+    if let Some(speed) = args.get("speed").and_then(Value::as_object) {
+        for (mode, v) in speed {
+            let feet = v.as_u64().ok_or("speeds must be whole numbers of feet")? as u32;
+            let value = if feet == 0 { SpeedValue::None } else { SpeedValue::Simple(feet) };
+            match mode.as_str() {
+                "walk" => m.speed.walk = value,
+                "fly" => m.speed.fly = value,
+                "swim" => m.speed.swim = value,
+                "climb" => m.speed.climb = value,
+                "burrow" => m.speed.burrow = value,
+                other => return Err(format!("Unknown speed '{}'", other)),
+            }
+        }
+    }
+    if let Some(ab) = args.get("abilities").and_then(Value::as_object) {
+        for (name, v) in ab {
+            let score = v.as_u64().filter(|n| (1..=30).contains(n)).ok_or("ability scores must be 1 to 30")? as u8;
+            match name.to_lowercase().as_str() {
+                "str" => m.str_score = score,
+                "dex" => m.dex_score = score,
+                "con" => m.con_score = score,
+                "int" => m.int_score = score,
+                "wis" => m.wis_score = score,
+                "cha" => m.cha_score = score,
+                other => return Err(format!("Unknown ability '{}'", other)),
+            }
+        }
+    }
+    match args.get("cr") {
+        Some(Value::String(c)) => m.cr = ChallengeRating::Simple(c.trim().to_string()),
+        Some(Value::Number(n)) => m.cr = ChallengeRating::Simple(n.to_string()),
+        _ => {}
+    }
+    if let Some(f) = features_arg(args, "traits")? { m.traits = f; }
+    if let Some(f) = features_arg(args, "actions")? { m.action = f; }
+    if let Some(f) = features_arg(args, "reactions")? { m.reaction = f; }
+    if let Some(f) = features_arg(args, "legendary")? { m.legendary = f; }
+    Ok(())
+}
+
+fn create_custom_monster(ctx: &mut ToolCtx, args: &Value) -> Result<Value, String> {
+    let name = req_str(args, "name")?.trim();
+    if name.is_empty() {
+        return Err("A creature needs a name".into());
+    }
+    let (mut monster, based_on) = match opt_str(args, "based_on") {
+        Some(base) => {
+            let (_, m, _) = find_in_bestiary(ctx, base, opt_str(args, "based_on_source"))?;
+            (m.clone(), Some((m.source.clone(), m.name.clone())))
+        }
+        None => {
+            let blank = json!({ "name": name, "source": "custom", "size": ["M"], "type": "humanoid", "cr": "0",
+                "str": 10, "dex": 10, "con": 10, "int": 10, "wis": 10, "cha": 10,
+                "ac": [10], "hp": { "average": 1, "formula": "1d8" }, "speed": { "walk": 30 } });
+            (serde_json::from_value(blank).map_err(|e| e.to_string())?, None)
+        }
+    };
+    apply_monster_fields(&mut monster, args)?;
+    monster.name = name.to_string();
+    let block = stat_block(&monster, "custom");
+    ctx.dungeon.custom_monsters.push(CustomMonster { id: uuid::Uuid::new_v4().to_string(), based_on, monster });
+    Ok(json!({ "stat_block": block }))
+}
+
+fn update_custom_monster(ctx: &mut ToolCtx, args: &Value) -> Result<Value, String> {
+    let i = resolve_custom(ctx, req_str(args, "monster")?)?;
+    let mut monster = ctx.dungeon.custom_monsters[i].monster.clone();
+    apply_monster_fields(&mut monster, args)?;
+    let block = stat_block(&monster, "custom");
+    let c = &mut ctx.dungeon.custom_monsters[i];
+    c.monster = monster;
+    ctx.combat_stats.invalidate_custom(&c.id);
+    Ok(json!({ "stat_block": block }))
+}
+
+fn merge_monsters(ctx: &mut ToolCtx, args: &Value) -> Result<Value, String> {
+    let (_, a, _) = find_monster(ctx, req_str(args, "a")?, opt_str(args, "a_source"))?;
+    let (_, b, _) = find_monster(ctx, req_str(args, "b")?, opt_str(args, "b_source"))?;
+    let mut merged = crate::model::merge_monsters(a, b, &MergeConfig::default());
+    if let Some(name) = opt_str(args, "name").map(str::trim).filter(|n| !n.is_empty()) {
+        merged.name = name.to_string();
+    }
+    let block = stat_block(&merged, "custom");
+    ctx.dungeon.custom_monsters.push(CustomMonster { id: uuid::Uuid::new_v4().to_string(), based_on: None, monster: merged });
+    Ok(json!({ "stat_block": block }))
+}
+
+fn simulate_encounter(ctx: &mut ToolCtx, args: &Value) -> Result<Value, String> {
+    use crate::presentation::combat_sim;
+    let i = resolve_encounter(ctx, req_str(args, "encounter")?)?;
+    if ctx.dungeon.party.is_empty() {
+        return Err("The campaign has no party yet (the user sets one up when presenting), so there's no one to fight.".into());
+    }
+    let runs = args.get("runs").and_then(Value::as_u64).map_or(1000, |n| n.clamp(10, 5000)) as u32;
+    let encounter = ctx.dungeon.encounters[i].clone();
+    let party = combat_sim::build_combatants_from_party(&ctx.dungeon.party, 0);
+    let monsters = combat_sim::build_combatants_from_encounter(
+        &encounter, ctx.monsters, &ctx.dungeon.custom_monsters, ctx.combat_stats, 1, None,
+    );
+    if monsters.is_empty() {
+        return Err("That encounter has no monsters to fight.".into());
+    }
+    let r = combat_sim::run_monte_carlo(&party, &monsters, runs, "Party".into(), encounter.name.clone());
+    let pct = |n: u32| (n as f32 * 1000.0 / r.num_sims as f32).round() / 10.0;
+    Ok(json!({
+        "encounter": encounter.name,
+        "runs": r.num_sims,
+        "party_wins_percent": pct(r.side_a_wins),
+        "monsters_win_percent": pct(r.side_b_wins),
+        "draws_percent": pct(r.draws),
+        "average_rounds": (r.avg_rounds * 10.0).round() / 10.0,
+    }))
 }

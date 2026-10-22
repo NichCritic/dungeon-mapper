@@ -62,7 +62,7 @@ fn mixed_label(ui: &mut egui::Ui, all_same: bool) {
 /// Resize a room's placed footprint in place (the automatic layout update never
 /// resizes placed rooms, so an explicit size edit applies it directly). Cave cells are
 /// laid out for the old footprint, so they regenerate.
-fn resize_placed_room(dungeon: &mut Dungeon, room_id: &str, w: Option<u32>, h: Option<u32>) {
+pub(crate) fn resize_placed_room(dungeon: &mut Dungeon, room_id: &str, w: Option<u32>, h: Option<u32>) {
     let Some(rl) = dungeon.layout.as_mut().and_then(|l| l.room_by_id_mut(room_id)) else { return };
     let before = (rl.width, rl.height);
     rl.width = w.unwrap_or(rl.width).max(1);
@@ -735,8 +735,9 @@ fn room_properties(ui: &mut egui::Ui, room: &mut Room, focus_label: &mut bool) {
         room.decor.remove(idx);
     }
     ui.horizontal(|ui| {
-        // Use a static-ish default for the combo box
-        let mut new_type = DecorType::Table;
+        // The chosen type lives in egui memory: a local alone resets every frame
+        let type_id = egui::Id::new("add_decor_type_choice");
+        let mut new_type = ui.ctx().data(|d| d.get_temp::<DecorType>(type_id)).unwrap_or(DecorType::Table);
         egui::ComboBox::from_id_salt("add_decor_type")
             .selected_text(new_type.label())
             .width(90.0)
@@ -745,6 +746,7 @@ fn room_properties(ui: &mut egui::Ui, room: &mut Room, focus_label: &mut bool) {
                     ui.selectable_value(&mut new_type, dt, dt.label());
                 }
             });
+        ui.ctx().data_mut(|d| d.insert_temp(type_id, new_type));
         if ui.button("Add").clicked() {
             let (w, h) = room.grid_size();
             let decor = RoomDecor::new(new_type, w as f32 / 2.0, h as f32 / 2.0);

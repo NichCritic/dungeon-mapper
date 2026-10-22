@@ -7,10 +7,10 @@ use std::path::Path;
 
 use serde_json::{json, Value};
 
-use super::{encounters, McpCall, ToolOutput};
+use super::{encounters, layout, lighting, McpCall, ToolOutput};
 use crate::app::Tab;
 use crate::model::{
-    Campaign, Connection, ConnectionType, CoverKind, DecorLight, DecorLightSetting, DecorType, Dungeon,
+    CaveAlgorithm, Campaign, Connection, ConnectionType, CorridorAngle, CoverKind, OverlapWalls, DecorLight, DecorLightSetting, DecorType, Dungeon,
     FloorAssignment, Room, RoomDecor, RoomEnvironment, RoomShape, RoomTag, SizeHint,
 };
 use crate::notes::{NoteBind, NoteVault};
@@ -23,7 +23,8 @@ use crate::ui::styled_view::StyledViewState;
 
 /// The parts of the app the tools work on, borrowed for one call.
 pub struct ToolCtx<'a> {
-    pub campaign: &'a Campaign,
+    pub campaign: &'a mut Campaign,
+    pub combat_stats: &'a mut crate::model::combat_stats::CombatStatsCache,
     pub monsters: &'a crate::data::MonsterDatabase,
     /// The bestiary loads in the background at startup.
     pub bestiary_loading: bool,
@@ -49,7 +50,12 @@ pub struct ToolCtx<'a> {
 pub enum AppAction {
     OpenMap(usize),
     CreateMap(String),
+    RemoveOpenMap,
     Save,
+    Undo,
+    Redo,
+    /// Lay the whole map out again, with this density gap if given.
+    RecomputeLayout(Option<u32>),
 }
 
 /// Something for the app to do before replying to the call that asked for it.
@@ -69,7 +75,7 @@ const RENDER_MAX_PX: f32 = 1568.0;
 
 // ------------------------------------------------------------------ definitions
 
-fn names<T: Debug>(all: &[T]) -> Vec<String> {
+pub(super) fn names<T: Debug>(all: &[T]) -> Vec<String> {
     all.iter().map(|v| format!("{:?}", v)).collect()
 }
 
@@ -96,6 +102,15 @@ pub fn definitions() -> Vec<Value> {
         "floor": floor,
         "tags": { "type": "array", "items": { "type": "string" }, "description": format!("Replaces the room's tags. Known: {}; anything else is a custom tag.", names(&TAGS).join(", ")) },
         "environment": { "type": "string", "enum": names(&RoomEnvironment::ALL) },
+        "open_walls": { "type": "object", "description": "Rectangular rooms: walls left open (no wall drawn)", "properties": {
+            "north": { "type": "boolean" }, "south": { "type": "boolean" }, "east": { "type": "boolean" }, "west": { "type": "boolean" } } },
+        "allow_rotation": { "type": "boolean", "description": "Let the layout turn a non-square room 90° to fit" },
+        "cave": { "type": "object", "description": "Cave rooms: how the cave is generated. Any change regenerates it.", "properties": {
+            "algorithm": { "type": "string", "enum": names(&CaveAlgorithm::ALL) },
+            "density": { "type": "number", "description": "0.3 to 0.7: how much rock" },
+            "smoothing": { "type": "integer", "description": "1 to 10 passes (CellularAutomata)" },
+            "new_seed": { "type": "boolean", "description": "A fresh random cave" },
+            "regenerate": { "type": "boolean" } } },
     });
     let with = |base: &Value, extra: Value| {
         let mut m = base.as_object().cloned().unwrap_or_default();
@@ -138,7 +153,7 @@ pub fn definitions() -> Vec<Value> {
             "Everything about one room: size, shape, floor, tags, position on the map, decor (with ids), elevation sections, connections, encounters, containment, and its full note.",
             json!({ "room": room }), &["room"]),
         tool("render_map",
-            "A picture of the map as laid out (the DM's view, secrets shown unless players=true). Defaults to the floor the user is looking at.",
+            "A picture of the map as laid out (the DM's view, secrets shown unless players=true). Defaults to the floor the user is looking at. Decor light shows; placed light sources don't (they show when presenting).",
             json!({
                 "floor": { "type": "integer", "description": "Floor to draw; omit for the current one" },
                 "all_floors": { "type": "boolean", "description": "Draw every floor at once" },
@@ -151,7 +166,7 @@ pub fn definitions() -> Vec<Value> {
                 "connect_to": room,
                 "connection_type": connection_type,
             })), &["label"]),
-        tool("update_room", "Change a room's label, size, shape, floor, tags or environment. Only the fields given change.",
+        tool("update_room", "Change a room: label, size, shape, floor, tags, environment, open walls, rotation allowance or cave generation. Only the fields given change. To move or turn it on the map use move_room.",
             with(&room_fields, json!({ "room": room, "label": { "type": "string" } })), &["room"]),
         tool("delete_room", "Delete a room and its connections. Its note stays in the vault.",
             json!({ "room": room }), &["room"]),
@@ -162,12 +177,18 @@ pub fn definitions() -> Vec<Value> {
                 "corridor_width": { "type": "integer", "minimum": 1, "description": "Grid squares; default 2" },
                 "double_door": { "type": "boolean" },
             }), &["from", "to"]),
-        tool("update_connection", "Change a connection's type, label, corridor width or door. An empty label clears it.",
+        tool("update_connection", "Change a connection. Only the fields given change; an empty label clears it. Its corridor is re-routed.",
             json!({
                 "connection": { "type": "string", "description": "Connection id" },
                 "type": connection_type, "label": { "type": "string" },
                 "corridor_width": { "type": "integer", "minimum": 1 },
                 "double_door": { "type": "boolean" },
+                "corridor_angle": { "type": "string", "enum": names(&CorridorAngle::ALL), "description": "Orthogonal runs only, 45° diagonals too, or any angle" },
+                "min_length": { "type": ["integer", "null"], "description": "Shortest corridor in squares; null for no limit" },
+                "max_length": { "type": ["integer", "null"], "description": "Longest corridor in squares; null for no limit" },
+                "keep_walls": { "type": "boolean", "description": "Flush connections: keep the shared wall" },
+                "overlap_walls": { "type": "string", "enum": names(&OverlapWalls::ALL), "description": "Overlapping rooms: which outline keeps its walls inside the overlap (Source/Target room, Neither = merged, Both)" },
+                "clear_exits": { "type": "boolean", "description": "Forget hand-placed exits so the corridor picks its own" },
             }), &["connection"]),
         tool("delete_connection", "Remove a connection between two rooms.",
             json!({ "connection": { "type": "string", "description": "Connection id" } }), &["connection"]),
@@ -195,6 +216,23 @@ pub fn definitions() -> Vec<Value> {
         tool("create_map",
             "Add a new, empty map to the campaign and open it. Not while the user is presenting.",
             json!({ "name": { "type": "string" } }), &["name"]),
+        tool("rename_map", "Rename the open map.", json!({ "name": { "type": "string" } }), &["name"]),
+        tool("rename_campaign", "Rename the campaign.", json!({ "name": { "type": "string" } }), &["name"]),
+        tool("remove_map",
+            "Delete the open map from the campaign (there must be another). Name it to confirm. Only when the user asks.",
+            json!({ "map": { "type": "string", "description": "The open map's name" } }), &["map"]),
+        tool("delete_note", "Delete a note.",
+            json!({ "about": note_about.clone(), "name": note_name.clone() }), &["about"]),
+        tool("undo", "Undo the last change to the map (yours or the user's), as Ctrl+Z does.", json!({}), &[]),
+        tool("redo", "Redo the last undone change, as Ctrl+Y does.", json!({}), &[]),
+        tool("recompute_layout",
+            "Lay out the whole map again from scratch (the Spatial view's Recompute All). This moves every room, so only when the user asks for it.",
+            json!({ "density_gap": { "type": "integer", "minimum": 0, "maximum": 6, "description": "Space between rooms" } }), &[]),
+        tool("batch",
+            "Run several tool calls in order, in one go (and one undo step). Stops at the first failure; calls before it stay done. Can't include map switching, saving, undo/redo, rendering or layout recomputes.",
+            json!({ "calls": { "type": "array", "items": { "type": "object", "properties": {
+                "tool": { "type": "string" }, "args": { "type": "object" } }, "required": ["tool"] } } }),
+            &["calls"]),
         tool("save", "Save the campaign to its file, as Ctrl+S does. Only works once the user has saved it somewhere.",
             json!({}), &[]),
         tool("switch_map",
@@ -206,6 +244,8 @@ pub fn definitions() -> Vec<Value> {
     ]
     .into_iter()
     .chain(encounters::definitions())
+    .chain(layout::definitions())
+    .chain(lighting::definitions())
     .collect()
 }
 
@@ -279,6 +319,24 @@ fn describe(ctx: &ToolCtx, tool: &str, args: &Value, result: &Value) -> Option<S
         "update_encounter" => format!("changed encounter {}", s(&result["name"])),
         "delete_encounter" => format!("removed encounter {}", s(&result["deleted"])),
         "focus_room" => format!("selected {}", s(&result["selected"])),
+        "rename_map" => format!("renamed the map to {}", s(&result["to"])),
+        "rename_campaign" => format!("renamed the campaign to {}", s(&result["to"])),
+        "delete_note" => format!("deleted note {}", s(&result["deleted"])),
+        "move_room" => format!("moved {}", s(&result["room"])),
+        "create_group" => format!("grouped {}", s(&result["label"])),
+        "update_group" => format!("changed group {}", s(&result["label"])),
+        "delete_group" => format!("removed group {}", s(&result["deleted"])),
+        "transform_group" => format!("{} group {}", opt_str(args, "action").unwrap_or("changed").replace('_', " "), opt_str(args, "group").unwrap_or("?")),
+        "add_section" | "update_section" | "remove_section" => format!("changed the elevation in {}", room()),
+        "add_bounds" => format!("added bounds {}", s(&result["label"])),
+        "remove_bounds" => format!("removed bounds {}", s(&result["removed"])),
+        "set_ambient_light" => "changed the ambient light".into(),
+        "add_light" => format!("added a light in {}", s(&result["room"])),
+        "update_light" => format!("changed a light in {}", s(&result["room"])),
+        "remove_light" => format!("removed a light from {}", s(&result["removed_light_in"])),
+        "set_decor_lighting" => "changed decor lighting".into(),
+        "set_theme" => "changed the map style".into(),
+        "create_custom_monster" | "update_custom_monster" | "merge_monsters" => "edited a custom creature".into(),
         "set_floor" => match result["current_floor"].as_i64() {
             Some(f) => format!("showed floor {}", f),
             None => "showed all floors".into(),
@@ -302,7 +360,10 @@ fn execute(ctx: &mut ToolCtx, tool: &str, args: &Value) -> Result<Value, String>
 }
 
 fn run(ctx: &mut ToolCtx, tool: &str, args: &Value) -> Result<Value, String> {
-    if let Some(result) = encounters::run(ctx, tool, args) {
+    if let Some(result) = encounters::run(ctx, tool, args)
+        .or_else(|| layout::run(ctx, tool, args))
+        .or_else(|| lighting::run(ctx, tool, args))
+    {
         return result;
     }
     match tool {
@@ -329,6 +390,14 @@ fn run(ctx: &mut ToolCtx, tool: &str, args: &Value) -> Result<Value, String> {
         "switch_map" => switch_map(ctx, args),
         "create_map" => create_map(ctx, args),
         "save" => save(ctx),
+        "rename_map" => rename_map(ctx, args),
+        "rename_campaign" => rename_campaign(ctx, args),
+        "remove_map" => remove_map(ctx, args),
+        "delete_note" => delete_note(ctx, args),
+        "undo" => app_only(ctx, AppAction::Undo),
+        "redo" => app_only(ctx, AppAction::Redo),
+        "recompute_layout" => recompute_layout(ctx, args),
+        "batch" => batch(ctx, args),
         _ => Err(format!("Unknown tool: {}", tool)),
     }
 }
@@ -350,7 +419,7 @@ pub(super) fn opt_f32(args: &Value, key: &str) -> Result<Option<f32>, String> {
     }
 }
 
-fn opt_u32(args: &Value, key: &str) -> Result<Option<u32>, String> {
+pub(super) fn opt_u32(args: &Value, key: &str) -> Result<Option<u32>, String> {
     match args.get(key) {
         None | Some(Value::Null) => Ok(None),
         Some(v) => v
@@ -369,7 +438,7 @@ pub(super) fn opt_bool(args: &Value, key: &str) -> Result<Option<bool>, String> 
 }
 
 /// Match an enum by name, ignoring case, spaces, dashes and underscores.
-fn parse_enum<T: Copy + Debug>(all: &[T], s: &str, what: &str) -> Result<T, String> {
+pub(super) fn parse_enum<T: Copy + Debug>(all: &[T], s: &str, what: &str) -> Result<T, String> {
     let squash = |s: &str| s.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase();
     let want = squash(s);
     all.iter()
@@ -492,6 +561,21 @@ fn connection_summary(d: &Dungeon, edge: &crate::model::StoredEdge) -> Value {
     if c.double_door {
         v["double_door"] = json!(true);
     }
+    if c.corridor_angle != CorridorAngle::Orthogonal {
+        v["corridor_angle"] = json!(format!("{:?}", c.corridor_angle));
+    }
+    if let Some(n) = c.min_length {
+        v["min_length"] = json!(n);
+    }
+    if let Some(n) = c.max_length {
+        v["max_length"] = json!(n);
+    }
+    if c.keep_walls {
+        v["keep_walls"] = json!(true);
+    }
+    if c.overlap_walls != OverlapWalls::Both {
+        v["overlap_walls"] = json!(format!("{:?}", c.overlap_walls));
+    }
     v
 }
 
@@ -522,7 +606,9 @@ fn overview(ctx: &ToolCtx) -> Value {
         "laid_out": d.layout.is_some(),
         "rooms": d.graph.rooms.iter().map(|r| room_summary(d, r)).collect::<Vec<_>>(),
         "connections": d.graph.connections.iter().map(|e| connection_summary(d, e)).collect::<Vec<_>>(),
+        "bounds": d.layout.as_ref().map(|l| l.bounds.iter().map(|b| b.label.clone()).collect::<Vec<_>>()),
         "groups": d.graph.groups.iter().map(|g| json!({
+            "id": g.id,
             "label": g.label,
             "rooms": g.room_ids.iter().map(|id| label_of(d, id)).collect::<Vec<_>>(),
             "container": g.parent_room_id.as_deref().map(|id| label_of(d, id)),
@@ -594,6 +680,14 @@ fn room_detail(ctx: &ToolCtx, id: &str) -> Value {
     v["size_hint"] = json!(format!("{:?}", room.size_hint));
     v["environment"] = json!(format!("{:?}", room.environment));
     v["open_walls"] = serde_json::to_value(room.open_walls).unwrap_or_default();
+    v["allow_rotation"] = json!(room.allow_rotation);
+    if let Some(cave) = &room.cave_data {
+        v["cave"] = json!({
+            "algorithm": format!("{:?}", cave.algorithm),
+            "density": cave.density,
+            "smoothing": cave.smoothing_iterations,
+        });
+    }
     v["decor"] = serde_json::to_value(&room.decor).unwrap_or_default();
     if !room.sections.is_empty() {
         v["elevation_sections"] = serde_json::to_value(&room.sections).unwrap_or_default();
@@ -646,6 +740,41 @@ fn apply_room_fields(room: &mut Room, args: &Value) -> Result<(), String> {
     }
     if let Some(s) = opt_str(args, "environment") {
         room.environment = parse_enum(&RoomEnvironment::ALL, s, "environment")?;
+    }
+    if let Some(walls) = args.get("open_walls").filter(|v| !v.is_null()) {
+        let w = &mut room.open_walls;
+        for (key, field) in [("north", &mut w.north), ("south", &mut w.south), ("east", &mut w.east), ("west", &mut w.west)] {
+            if let Some(b) = opt_bool(walls, key)? {
+                *field = b;
+            }
+        }
+    }
+    if let Some(b) = opt_bool(args, "allow_rotation")? {
+        room.allow_rotation = b;
+    }
+    // Like the sidebar: leaving the cave shape drops the cave; becoming one makes it
+    // (the app generates the cells).
+    if room.shape != RoomShape::Cave {
+        room.cave_data = None;
+    }
+    if let Some(cave_args) = args.get("cave").filter(|v| !v.is_null()) {
+        let cave = room.cave_data.as_mut()
+            .ok_or("Only cave rooms have cave settings; set shape to Cave too (cave settings apply once it's generated)")?;
+        if let Some(a) = opt_str(cave_args, "algorithm") {
+            cave.algorithm = parse_enum(&CaveAlgorithm::ALL, a, "cave algorithm")?;
+        }
+        if let Some(d) = opt_f32(cave_args, "density")? {
+            cave.density = d.clamp(0.3, 0.7);
+        }
+        if let Some(n) = opt_u32(cave_args, "smoothing")? {
+            cave.smoothing_iterations = n.clamp(1, 10);
+        }
+        if opt_bool(cave_args, "new_seed")? == Some(true) {
+            cave.seed = rand::random();
+        }
+        // Any change (or an explicit regenerate) redraws the cave.
+        cave.cells.clear();
+        cave.generation += 1;
     }
     Ok(())
 }
@@ -720,8 +849,16 @@ fn update_room(ctx: &mut ToolCtx, args: &Value) -> Result<Value, String> {
     if let Some(label) = opt_str(args, "label").map(str::trim).filter(|l| !l.is_empty()) {
         room.label = label.to_string();
     }
+    let old_size = ctx.dungeon.graph.room_by_id(&id).map(|r| r.grid_size());
+    let new_size = room.grid_size();
     if let Some(r) = ctx.dungeon.graph.room_by_id_mut(&id) {
         *r = room;
+    }
+    // The layout never resizes a placed room by itself; apply it as the sidebar does.
+    if old_size != Some(new_size) {
+        crate::ui::sidebar::resize_placed_room(ctx.dungeon, &id, Some(new_size.0), Some(new_size.1));
+        crate::ui::spatial_view::reroute_room(ctx.dungeon, &id);
+        ctx.spatial.cave_contours_dirty = true;
     }
     Ok(room_summary(ctx.dungeon, ctx.dungeon.graph.room_by_id(&id).unwrap()))
 }
@@ -796,9 +933,39 @@ fn update_connection(ctx: &mut ToolCtx, args: &Value) -> Result<Value, String> {
     let kind = opt_str(args, "type").map(|s| parse_enum(&ConnectionType::ALL, s, "connection type")).transpose()?;
     let width = opt_u32(args, "corridor_width")?;
     let double = opt_bool(args, "double_door")?;
+    let angle = opt_str(args, "corridor_angle").map(|s| parse_enum(&CorridorAngle::ALL, s, "corridor angle")).transpose()?;
+    let overlap = opt_str(args, "overlap_walls").map(|s| parse_enum(&OverlapWalls::ALL, s, "overlap walls")).transpose()?;
+    let keep_walls = opt_bool(args, "keep_walls")?;
+    let clear_exits = opt_bool(args, "clear_exits")? == Some(true);
+    let length = |key: &str| match args.get(key) {
+        None => Ok(None),
+        Some(Value::Null) => Ok(Some(None)),
+        Some(_) => opt_u32(args, key).map(Some),
+    };
+    let (min_length, max_length) = (length("min_length")?, length("max_length")?);
     let edge = ctx.dungeon.graph.connection_by_id_mut(id)
         .ok_or_else(|| format!("No connection '{}'. get_overview lists them.", id))?;
+    if clear_exits {
+        edge.source_exit = None;
+        edge.target_exit = None;
+    }
+    let rooms = [edge.source_room_id.clone(), edge.target_room_id.clone()];
     let c = &mut edge.connection;
+    if let Some(a) = angle {
+        c.corridor_angle = a;
+    }
+    if let Some(o) = overlap {
+        c.overlap_walls = o;
+    }
+    if let Some(k) = keep_walls {
+        c.keep_walls = k;
+    }
+    if let Some(n) = min_length {
+        c.min_length = n;
+    }
+    if let Some(n) = max_length {
+        c.max_length = n;
+    }
     if let Some(k) = kind {
         c.connection_type = k;
     }
@@ -810,6 +977,9 @@ fn update_connection(ctx: &mut ToolCtx, args: &Value) -> Result<Value, String> {
     }
     if let Some(b) = double {
         c.double_door = b;
+    }
+    for room in &rooms {
+        crate::ui::spatial_view::reroute_room(ctx.dungeon, room);
     }
     Ok(connection_summary(ctx.dungeon, ctx.dungeon.graph.connection_by_id(id).unwrap()))
 }
@@ -1062,6 +1232,102 @@ fn create_map(ctx: &mut ToolCtx, args: &Value) -> Result<Value, String> {
     Ok(Value::Null)
 }
 
+/// A tool the app carries out itself (undo, redo).
+fn app_only(ctx: &mut ToolCtx, action: AppAction) -> Result<Value, String> {
+    ctx.app_action = Some(action);
+    Ok(Value::Null)
+}
+
+fn rename_map(ctx: &mut ToolCtx, args: &Value) -> Result<Value, String> {
+    let name = req_str(args, "name")?.trim();
+    if name.is_empty() {
+        return Err("A map needs a name".into());
+    }
+    let old = std::mem::replace(&mut ctx.dungeon.name, name.to_string());
+    Ok(json!({ "renamed": old, "to": name }))
+}
+
+fn rename_campaign(ctx: &mut ToolCtx, args: &Value) -> Result<Value, String> {
+    let name = req_str(args, "name")?.trim();
+    if name.is_empty() {
+        return Err("A campaign needs a name".into());
+    }
+    let old = std::mem::replace(&mut ctx.campaign.name, name.to_string());
+    Ok(json!({ "renamed": old, "to": name }))
+}
+
+fn remove_map(ctx: &mut ToolCtx, args: &Value) -> Result<Value, String> {
+    let name = req_str(args, "map")?;
+    if !name.trim().eq_ignore_ascii_case(&ctx.dungeon.name) {
+        return Err(format!("'{}' isn't the open map ({}). Switch to the map first, then name it to remove it.", name, ctx.dungeon.name));
+    }
+    if ctx.campaign.maps.len() < 2 {
+        return Err("This is the campaign's only map; it can't be removed.".into());
+    }
+    if ctx.presenting {
+        return Err("The user is presenting; ask them to stop first.".into());
+    }
+    app_only(ctx, AppAction::RemoveOpenMap)
+}
+
+fn recompute_layout(ctx: &mut ToolCtx, args: &Value) -> Result<Value, String> {
+    if ctx.presenting {
+        return Err("The user is presenting; ask them to stop first.".into());
+    }
+    let gap = match args.get("density_gap") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(v.as_u64().filter(|n| *n <= 6).ok_or("'density_gap' must be 0 to 6")? as u32),
+    };
+    app_only(ctx, AppAction::RecomputeLayout(gap))
+}
+
+/// Tools a batch can't run: they need the app between calls, or reply later.
+const NOT_IN_BATCH: [&str; 11] = [
+    "batch", "render_map", "switch_map", "create_map", "remove_map", "save", "undo", "redo",
+    "recompute_layout", "simulate_encounter", "focus_room",
+];
+
+fn batch(ctx: &mut ToolCtx, args: &Value) -> Result<Value, String> {
+    let calls = args.get("calls").and_then(Value::as_array).ok_or("'calls' must be a list of {tool, args}")?;
+    if let Some(bad) = calls.iter().filter_map(|c| c.get("tool").and_then(Value::as_str)).find(|t| NOT_IN_BATCH.contains(t)) {
+        return Err(format!("{} can't run inside a batch; call it on its own.", bad));
+    }
+    let mut results = Vec::new();
+    for (i, call) in calls.iter().enumerate() {
+        let tool = req_str(call, "tool")?;
+        let empty = json!({});
+        let call_args = call.get("args").unwrap_or(&empty);
+        match execute(ctx, tool, call_args) {
+            Ok(v) => results.push(json!({ "tool": tool, "result": v })),
+            Err(e) => {
+                return Ok(json!({
+                    "results": results,
+                    "failed": { "index": i, "tool": tool, "error": e },
+                    "note": format!("Stopped at call {}; the {} before it were made.", i, i),
+                }));
+            }
+        }
+    }
+    Ok(json!({ "results": results }))
+}
+
+fn delete_note(ctx: &mut ToolCtx, args: &Value) -> Result<Value, String> {
+    let (bind, title, _) = note_target(ctx, args)?;
+    let id = match &bind {
+        Some(b) => ctx.notes.note_id_for(b),
+        None => ctx.notes.resolve_wiki(&title),
+    }
+    .map(str::to_string)
+    .ok_or_else(|| format!("There's no note for {}.", title))?;
+    ctx.notes.delete(&id);
+    if let Some(NoteBind::Room(room_id)) = &bind {
+        if let Some(room) = ctx.dungeon.graph.room_by_id_mut(room_id) {
+            room.note_excerpt.clear();
+        }
+    }
+    Ok(json!({ "deleted": id }))
+}
+
 fn save(ctx: &mut ToolCtx) -> Result<Value, String> {
     if ctx.current_file.is_none() {
         return Err("The campaign has never been saved, so it has no file yet. Ask the user to save it (File ▸ Save As); after that this tool works.".into());
@@ -1165,6 +1431,7 @@ mod tests {
         app_action: Option<AppAction>,
         monsters: crate::data::MonsterDatabase,
         activity: Vec<(std::time::Instant, String)>,
+        combat_stats: crate::model::combat_stats::CombatStatsCache,
     }
 
     impl Fixture {
@@ -1184,12 +1451,14 @@ mod tests {
                 app_action: None,
                 monsters: crate::data::MonsterDatabase::empty(),
                 activity: Vec::new(),
+                combat_stats: crate::model::combat_stats::CombatStatsCache::new(),
             }
         }
 
         fn call(&mut self, tool: &str, args: Value) -> Result<Value, String> {
             let mut ctx = ToolCtx {
-                campaign: &self.campaign,
+                campaign: &mut self.campaign,
+                combat_stats: &mut self.combat_stats,
                 monsters: &self.monsters,
                 bestiary_loading: false,
                 activity: &mut self.activity,
@@ -1324,7 +1593,8 @@ mod tests {
 
     fn render(f: &mut Fixture) -> Result<RenderJob, String> {
         let ctx = ToolCtx {
-            campaign: &f.campaign,
+            campaign: &mut f.campaign,
+            combat_stats: &mut f.combat_stats,
             monsters: &f.monsters,
             bestiary_loading: false,
             activity: &mut f.activity,
@@ -1471,6 +1741,231 @@ mod tests {
         let mut f = Fixture::new();
         assert!(f.call("save", json!({})).unwrap_err().contains("Save As"));
         assert_eq!(f.app_action, None);
+    }
+
+    /// Lay the fixture's map out, as opening the Spatial view would.
+    fn lay_out(f: &mut Fixture) {
+        f.dungeon.layout = Some(crate::solver::layout::solve_layout(&mut f.dungeon.graph, 2, None).unwrap());
+    }
+
+    #[test]
+    fn resizing_a_placed_room_changes_its_footprint() {
+        let mut f = Fixture::new();
+        f.call("add_room", json!({ "label": "Hall" })).unwrap();
+        lay_out(&mut f);
+        f.call("update_room", json!({ "room": "Hall", "width": 7, "height": 3, "allow_rotation": true,
+            "open_walls": { "north": true } })).unwrap();
+        let rl = f.dungeon.layout.as_ref().unwrap().room_by_id(&f.dungeon.graph.rooms[0].id).unwrap();
+        assert_eq!((rl.width, rl.height), (7, 3));
+        let room = &f.dungeon.graph.rooms[0];
+        assert!(room.allow_rotation && room.open_walls.north && !room.open_walls.south);
+    }
+
+    #[test]
+    fn cave_settings_regenerate_the_cave() {
+        let mut f = Fixture::new();
+        f.call("add_room", json!({ "label": "Grotto", "shape": "Cave" })).unwrap();
+        let e = f.call("update_room", json!({ "room": "Grotto", "cave": { "density": 0.5 } })).unwrap_err();
+        assert!(e.contains("cave"), "no cave data until generated: {}", e);
+        f.dungeon.graph.rooms[0].cave_data = Some(crate::model::CaveData {
+            cells: vec![true; 16], seed: 1, algorithm: CaveAlgorithm::CellularAutomata, density: 0.45,
+            smoothing_iterations: 4, generation: 0, contour_segments: Vec::new(),
+        });
+        f.call("update_room", json!({ "room": "Grotto", "cave": { "algorithm": "drunkards walk", "density": 0.9, "new_seed": true } })).unwrap();
+        let cave = f.dungeon.graph.rooms[0].cave_data.as_ref().unwrap();
+        assert_eq!(cave.algorithm, CaveAlgorithm::DrunkardsWalk);
+        assert_eq!(cave.density, 0.7, "clamped like the slider");
+        assert!(cave.cells.is_empty() && cave.generation == 1, "cleared so the app regenerates it");
+        f.call("update_room", json!({ "room": "Grotto", "shape": "Rectangle" })).unwrap();
+        assert!(f.dungeon.graph.rooms[0].cave_data.is_none());
+    }
+
+    #[test]
+    fn connection_settings_round_trip() {
+        let mut f = Fixture::new();
+        f.call("add_room", json!({ "label": "A" })).unwrap();
+        let r = f.call("add_room", json!({ "label": "B", "connect_to": "A" })).unwrap();
+        let id = r["connection"].as_str().unwrap().to_string();
+        f.dungeon.graph.connections[0].source_exit = Some(crate::model::ExitPos { x: 1.0, y: 0.0 });
+        let c = f.call("update_connection", json!({ "connection": id, "corridor_angle": "Diagonal",
+            "min_length": 3, "max_length": 8, "keep_walls": true, "overlap_walls": "Neither", "clear_exits": true })).unwrap();
+        assert_eq!((c["corridor_angle"].as_str(), c["min_length"].as_u64(), c["overlap_walls"].as_str()), (Some("Diagonal"), Some(3), Some("Neither")));
+        assert!(f.dungeon.graph.connections[0].source_exit.is_none());
+        f.call("update_connection", json!({ "connection": id, "max_length": null })).unwrap();
+        assert_eq!(f.dungeon.graph.connections[0].connection.max_length, None);
+        assert_eq!(f.dungeon.graph.connections[0].connection.min_length, Some(3), "untouched");
+    }
+
+    #[test]
+    fn moving_a_container_carries_its_rooms() {
+        let mut f = Fixture::new();
+        f.call("add_room", json!({ "label": "Hall", "size_hint": "Huge" })).unwrap();
+        f.call("add_room", json!({ "label": "Dais", "size_hint": "Small" })).unwrap();
+        f.call("create_group", json!({ "label": "Inside", "rooms": ["Dais"], "container": "Hall", "padding": 1 })).unwrap();
+        lay_out(&mut f);
+        let pos = |f: &Fixture, label: &str| {
+            let id = resolve_room(&f.dungeon, label).unwrap();
+            let rl = f.dungeon.layout.as_ref().unwrap().room_by_id(&id).unwrap();
+            (rl.x, rl.y, rl.rotation)
+        };
+        let (hx, hy, _) = pos(&f, "Hall");
+        let (dx, dy, _) = pos(&f, "Dais");
+        let r = f.call("move_room", json!({ "room": "Hall", "x": hx + 10, "y": hy - 2, "rotation": 270 })).unwrap();
+        assert_eq!(r["rotation"], -90.0, "normalised to ±180");
+        assert_eq!(pos(&f, "Dais"), (dx + 10, dy - 2, 0.0), "the room inside moves along");
+
+        let e = f.call("update_group", json!({ "group": "inside", "container": "Dais" })).unwrap_err();
+        assert!(e.contains("inside"), "{}", e);
+        assert_eq!(f.dungeon.graph.groups[0].parent_room_id.as_deref(), Some(resolve_room(&f.dungeon, "Hall").unwrap().as_str()), "unchanged");
+    }
+
+    #[test]
+    fn nesting_a_placed_room_moves_it_inside_its_container() {
+        let mut f = Fixture::new();
+        f.call("add_room", json!({ "label": "Hall", "width": 10, "height": 10 })).unwrap();
+        f.call("add_room", json!({ "label": "Circle", "size_hint": "Medium" })).unwrap();
+        f.call("add_room", json!({ "label": "Giant", "width": 12, "height": 12 })).unwrap();
+        lay_out(&mut f);
+        let g = f.call("create_group", json!({ "label": "In", "rooms": ["Circle", "Giant"], "container": "Hall", "padding": 1 })).unwrap();
+        assert_eq!(g["moved_inside_container"], json!(["Circle"]));
+        assert_eq!(g["too_big_for_container"], json!(["Giant"]));
+        let layout = f.dungeon.layout.as_ref().unwrap();
+        let hall = layout.room_by_id(&resolve_room(&f.dungeon, "Hall").unwrap()).unwrap();
+        let circle = layout.room_by_id(&resolve_room(&f.dungeon, "Circle").unwrap()).unwrap();
+        assert!(circle.x >= hall.x + 1 && circle.y >= hall.y + 1
+            && circle.x + circle.width as i32 <= hall.x + hall.width as i32 - 1
+            && circle.y + circle.height as i32 <= hall.y + hall.height as i32 - 1);
+    }
+
+    #[test]
+    fn groups_sections_and_bounds() {
+        let mut f = Fixture::new();
+        for label in ["A", "B", "C"] {
+            f.call("add_room", json!({ "label": label })).unwrap();
+        }
+        let g = f.call("create_group", json!({ "label": "Wing", "rooms": ["A", "B"], "max_width": 12 })).unwrap();
+        assert_eq!(g["rooms"], json!(["A", "B"]));
+        let g = f.call("update_group", json!({ "group": "wing", "add_rooms": ["C"], "remove_rooms": ["A"], "max_width": null })).unwrap();
+        assert_eq!((g["rooms"].clone(), g["max_width"].clone()), (json!(["B", "C"]), Value::Null));
+        lay_out(&mut f);
+        f.call("transform_group", json!({ "group": "Wing", "action": "duplicate" })).unwrap();
+        assert_eq!(f.dungeon.graph.rooms.len(), 5);
+        f.call("delete_group", json!({ "group": "Wing" })).unwrap();
+
+        let s = f.call("add_section", json!({ "room": "A", "elevation": "raised", "x": 1, "y": 1, "width": 2, "length": 2, "height": 5 })).unwrap();
+        let sid = s["id"].as_str().unwrap().to_string();
+        assert!(f.call("update_section", json!({ "room": "A", "section": sid, "width": 9 })).unwrap_err().contains("fit"));
+        f.call("update_section", json!({ "room": "A", "section": sid, "elevation": "Water", "opaque": true })).unwrap();
+        assert_eq!(f.dungeon.graph.rooms[0].sections[0].elevation, crate::model::ElevationType::Water);
+        f.call("remove_section", json!({ "room": "A", "section": sid })).unwrap();
+        assert!(f.dungeon.graph.rooms[0].sections.is_empty());
+
+        f.call("add_bounds", json!({ "label": "Keep walls" })).unwrap();
+        assert_eq!(f.call("get_overview", json!({})).unwrap()["bounds"], json!(["Keep walls"]));
+        f.call("remove_bounds", json!({ "bounds": "keep walls" })).unwrap();
+        assert!(f.dungeon.layout.as_ref().unwrap().bounds.is_empty());
+    }
+
+    #[test]
+    fn lights_decor_lighting_and_theme() {
+        let mut f = Fixture::new();
+        f.dungeon.party.push(crate::model::PlayerCharacter::new("Ryn".into()));
+        f.dungeon.campaign_decor_lighting = Some(crate::model::DecorLighting::default());
+        f.call("add_room", json!({ "label": "Crypt" })).unwrap();
+        let l = f.call("add_light", json!({ "room": "Crypt", "bright": 2, "x": 1.5, "y": 2.5, "carried_by": "ryn" })).unwrap();
+        assert_eq!(l["dim"], 4.0);
+        let id = l["id"].as_str().unwrap().to_string();
+        assert!(f.call("add_light", json!({ "room": "Crypt", "bright": 2, "carried_by": "Nobody" })).is_err());
+        let l = f.call("update_light", json!({ "light": id, "centre": true, "carried_by": null, "intensity": 3 })).unwrap();
+        assert_eq!((l["position"].as_str(), l["intensity"].as_f64()), (Some("room centre"), Some(1.0)));
+        f.call("remove_light", json!({ "light": id })).unwrap();
+        assert!(f.dungeon.light_sources.is_empty());
+        f.call("set_ambient_light", json!({ "level": 0.3 })).unwrap();
+
+        // The map gets its own settings, starting from the campaign's.
+        f.call("set_decor_lighting", json!({ "scope": "map", "set": { "Altar": { "bright": 1 } }, "remove": ["Fireplace"] })).unwrap();
+        let map = f.dungeon.decor_lighting.as_ref().unwrap();
+        assert!(map.by_type.contains_key(&DecorType::Brazier) && map.by_type.contains_key(&DecorType::Altar));
+        assert!(!map.by_type.contains_key(&DecorType::Fireplace));
+        assert_eq!(map.by_type[&DecorType::Altar].dim, 2.0);
+        f.call("set_decor_lighting", json!({ "scope": "map", "follow_campaign": true })).unwrap();
+        assert!(f.dungeon.decor_lighting.is_none());
+        f.call("set_decor_lighting", json!({ "scope": "campaign", "enabled": false })).unwrap();
+        assert!(!f.dungeon.campaign_decor_lighting.as_ref().unwrap().enabled);
+
+        f.call("set_theme", json!({ "shading_radius": 9, "shading_style": "Stippled", "exterior_shading": false })).unwrap();
+        assert_eq!(f.dungeon.theme.shading_radius, 3.0);
+        assert!(f.call("set_theme", json!({ "corridor_chamfer": "wavy" })).is_err());
+    }
+
+    #[test]
+    fn custom_creatures_and_simulation() {
+        let mut f = Fixture::new();
+        f.monsters = bestiary();
+        let made = f.call("create_custom_monster", json!({ "name": "Bog Goblin", "based_on": "Goblin Warrior",
+            "hp": 15, "speed": { "swim": 30 }, "abilities": { "str": 14 },
+            "traits": [{ "name": "Mud Step", "text": "Ignores difficult terrain from mud." }] })).unwrap();
+        let block = made["stat_block"].as_str().unwrap();
+        assert!(block.contains("HP 15,") && block.contains("swim 30 ft.") && block.contains("STR 14 (+2)") && block.contains("Mud Step"), "{}", block);
+        assert_eq!(f.dungeon.custom_monsters[0].based_on, Some(("XMM".into(), "Goblin Warrior".into())));
+        f.call("update_custom_monster", json!({ "monster": "bog goblin", "cr": "1/2" })).unwrap();
+        assert_eq!(f.dungeon.custom_monsters[0].monster.cr.cr_string(), "1/2");
+        f.call("update_custom_monster", json!({ "monster": "bog goblin", "hp": 40 })).unwrap();
+        assert_eq!(f.dungeon.custom_monsters[0].monster.hp.display(), "40");
+        f.call("update_custom_monster", json!({ "monster": "bog goblin", "hp": 13, "hp_formula": "3d8" })).unwrap();
+        assert_eq!(f.dungeon.custom_monsters[0].monster.hp.display(), "13 (3d8)");
+        f.call("merge_monsters", json!({ "a": "Ghoul", "b": "Goblin Boss", "name": "Ghoul Boss" })).unwrap();
+        assert_eq!(f.dungeon.custom_monsters[1].monster.name, "Ghoul Boss");
+
+        f.call("add_room", json!({ "label": "Bog" })).unwrap();
+        f.call("create_encounter", json!({ "room": "Bog", "name": "Mudfight", "monsters": [{ "name": "Bog Goblin", "count": 2 }] })).unwrap();
+        assert!(f.call("simulate_encounter", json!({ "encounter": "Mudfight" })).unwrap_err().contains("party"));
+        f.dungeon.party.push(crate::model::PlayerCharacter::new("Ryn".into()));
+        let sim = f.call("simulate_encounter", json!({ "encounter": "Mudfight", "runs": 50 })).unwrap();
+        let total = sim["party_wins_percent"].as_f64().unwrap() + sim["monsters_win_percent"].as_f64().unwrap() + sim["draws_percent"].as_f64().unwrap();
+        assert!((total - 100.0).abs() < 0.5, "{}", sim);
+    }
+
+    #[test]
+    fn batches_run_in_order_and_stop_at_a_failure() {
+        let mut f = Fixture::new();
+        let r = f.call("batch", json!({ "calls": [
+            { "tool": "add_room", "args": { "label": "Gate" } },
+            { "tool": "add_room", "args": { "label": "Yard", "connect_to": "Gate" } },
+            { "tool": "add_decor", "args": { "room": "Yard", "type": "Well", "x": 2, "y": 2 } },
+        ] })).unwrap();
+        assert_eq!(r["results"].as_array().unwrap().len(), 3);
+        assert_eq!(f.dungeon.graph.rooms.len(), 2);
+
+        let r = f.call("batch", json!({ "calls": [
+            { "tool": "add_room", "args": { "label": "Tower" } },
+            { "tool": "add_decor", "args": { "room": "Nowhere", "type": "Well", "x": 0, "y": 0 } },
+            { "tool": "add_room", "args": { "label": "Never" } },
+        ] })).unwrap();
+        assert_eq!(r["failed"]["index"], 1);
+        assert_eq!(f.dungeon.graph.rooms.len(), 3, "the call before the failure stays, the one after never runs");
+        assert!(f.call("batch", json!({ "calls": [{ "tool": "undo" }] })).unwrap_err().contains("undo"));
+        assert_eq!(f.activity.len(), 4, "each change in a batch is logged");
+    }
+
+    #[test]
+    fn renaming_removing_maps_and_deleting_notes() {
+        let mut f = Fixture::new();
+        f.call("rename_map", json!({ "name": "Sunken Keep" })).unwrap();
+        f.call("rename_campaign", json!({ "name": "Tides" })).unwrap();
+        assert_eq!((f.dungeon.name.as_str(), f.campaign.name.as_str()), ("Sunken Keep", "Tides"));
+        f.campaign.maps = vec![Dungeon::new("Sunken Keep".into())];
+        assert!(f.call("remove_map", json!({ "map": "Sunken Keep" })).unwrap_err().contains("only map"));
+        f.campaign.maps.push(Dungeon::new("Caves".into()));
+        assert!(f.call("remove_map", json!({ "map": "Caves" })).unwrap_err().contains("isn't the open map"));
+        f.call("remove_map", json!({ "map": "sunken keep" })).unwrap();
+        assert_eq!(f.app_action, Some(AppAction::RemoveOpenMap));
+
+        f.call("add_room", json!({ "label": "Vault" })).unwrap();
+        f.call("write_note", json!({ "about": "room", "name": "Vault", "body": "Gold." })).unwrap();
+        f.call("delete_note", json!({ "about": "room", "name": "Vault" })).unwrap();
+        assert_eq!(f.call("read_note", json!({ "about": "room", "name": "Vault" })).unwrap()["exists"], false);
+        assert!(f.dungeon.graph.rooms[0].note_excerpt.is_empty());
     }
 
     #[test]

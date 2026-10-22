@@ -104,6 +104,18 @@ impl UndoHistory {
         self.pending_change = false;
     }
 
+    /// End the current undo step now if the map has changed since the last one,
+    /// instead of waiting for edits to settle. Used after each change Claude makes,
+    /// so each one undoes on its own.
+    pub fn checkpoint(&mut self, dungeon: &Dungeon) {
+        let hash = Self::hash_dungeon(dungeon);
+        if hash != self.committed_hash {
+            self.commit(dungeon, hash);
+        }
+        self.prev_frame_hash = hash;
+        self.drag_dirty = false;
+    }
+
     /// Undo the last change. Returns true if state was restored.
     pub fn undo(&mut self, dungeon: &mut Dungeon) -> bool {
         let current_hash = Self::hash_dungeon(dungeon);
@@ -197,6 +209,22 @@ impl UndoHistory {
 mod tests {
     use super::*;
     use crate::model::Dungeon;
+
+    #[test]
+    fn checkpoints_split_quick_changes_into_separate_steps() {
+        let mut d = Dungeon::new("A".into());
+        let mut h = UndoHistory::new(&d);
+        d.name = "B".into();
+        h.checkpoint(&d);
+        d.name = "C".into();
+        h.checkpoint(&d);
+        h.checkpoint(&d); // nothing new: no empty step
+        assert!(h.undo(&mut d));
+        assert_eq!(d.name, "B");
+        assert!(h.undo(&mut d));
+        assert_eq!(d.name, "A");
+        assert!(!h.undo(&mut d));
+    }
 
     #[test]
     fn test_undo_redo_basic() {
