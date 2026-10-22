@@ -7,7 +7,7 @@ use std::path::Path;
 
 use serde_json::{json, Value};
 
-use super::{McpCall, ToolOutput};
+use super::{encounters, McpCall, ToolOutput};
 use crate::app::Tab;
 use crate::model::{
     Campaign, Connection, ConnectionType, CoverKind, DecorLight, DecorLightSetting, DecorType, Dungeon,
@@ -21,9 +21,14 @@ use crate::ui::presentation_view::PresentationViewState;
 use crate::ui::spatial_view::SpatialViewState;
 use crate::ui::styled_view::StyledViewState;
 
-/// The parts of the app the tools work on, borrowed for one batch of calls.
+/// The parts of the app the tools work on, borrowed for one call.
 pub struct ToolCtx<'a> {
     pub campaign: &'a Campaign,
+    pub monsters: &'a crate::data::MonsterDatabase,
+    /// The bestiary loads in the background at startup.
+    pub bestiary_loading: bool,
+    /// What Claude has changed, newest last, for the status bar and the Claude menu.
+    pub activity: &'a mut Vec<(std::time::Instant, String)>,
     pub dungeon: &'a mut Dungeon,
     pub notes: &'a mut NoteVault,
     pub current_floor: &'a mut Option<i32>,
@@ -36,19 +41,20 @@ pub struct ToolCtx<'a> {
     pub encounters: &'a mut EncountersViewState,
     pub styled: &'a mut StyledViewState,
     pub presentation: &'a mut PresentationViewState,
-    /// Set by switch_map and create_map: the app makes the change, then answers the call.
-    pub map_change: Option<MapChange>,
+    /// Set by tools only the app can carry out; it does so, then answers the call.
+    pub app_action: Option<AppAction>,
 }
 
 #[derive(Debug, PartialEq)]
-pub enum MapChange {
-    Open(usize),
-    Create(String),
+pub enum AppAction {
+    OpenMap(usize),
+    CreateMap(String),
+    Save,
 }
 
-/// A map change for the app to make before replying to the call that asked for it.
-pub struct PendingMapChange {
-    pub change: MapChange,
+/// Something for the app to do before replying to the call that asked for it.
+pub struct PendingAction {
+    pub action: AppAction,
     pub reply: std::sync::mpsc::Sender<ToolOutput>,
 }
 
@@ -67,7 +73,7 @@ fn names<T: Debug>(all: &[T]) -> Vec<String> {
     all.iter().map(|v| format!("{:?}", v)).collect()
 }
 
-fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> Value {
+pub(super) fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> Value {
     json!({
         "name": name,
         "description": description,
@@ -189,6 +195,8 @@ pub fn definitions() -> Vec<Value> {
         tool("create_map",
             "Add a new, empty map to the campaign and open it. Not while the user is presenting.",
             json!({ "name": { "type": "string" } }), &["name"]),
+        tool("save", "Save the campaign to its file, as Ctrl+S does. Only works once the user has saved it somewhere.",
+            json!({}), &[]),
         tool("switch_map",
             "Open another map of the campaign in the app (every other tool works on the open map). Returns the new map's overview.",
             json!({ "map": {
@@ -196,13 +204,16 @@ pub fn definitions() -> Vec<Value> {
                 "oneOf": [{ "type": "string" }, { "type": "integer" }],
             } }), &["map"]),
     ]
+    .into_iter()
+    .chain(encounters::definitions())
+    .collect()
 }
 
 // ------------------------------------------------------------------ dispatch
 
 /// Answer one call. Map renders go to a background thread so the UI doesn't stall; a
-/// map change is handed back for the app to make and answer.
-pub fn handle(ctx: &mut ToolCtx, call: McpCall) -> Option<PendingMapChange> {
+/// map change or save is handed back for the app to make and answer.
+pub fn handle(ctx: &mut ToolCtx, call: McpCall) -> Option<PendingAction> {
     if call.tool == "render_map" {
         match render_job(ctx, &call.args) {
             Ok(job) => {
@@ -216,12 +227,12 @@ pub fn handle(ctx: &mut ToolCtx, call: McpCall) -> Option<PendingMapChange> {
         }
         return None;
     }
-    let output = match run(ctx, &call.tool, &call.args) {
+    let output = match execute(ctx, &call.tool, &call.args) {
         Ok(v) => ToolOutput::json(&v),
         Err(e) => ToolOutput::error(e),
     };
-    if let Some(change) = ctx.map_change.take() {
-        return Some(PendingMapChange { change, reply: call.reply });
+    if let Some(action) = ctx.app_action.take() {
+        return Some(PendingAction { action, reply: call.reply });
     }
     let _ = call.reply.send(output);
     None
@@ -232,7 +243,68 @@ pub fn map_opened(ctx: &ToolCtx) -> ToolOutput {
     ToolOutput::json(&json!({ "opened": ctx.dungeon.name, "overview": overview(ctx) }))
 }
 
+/// Keep a short log of what Claude did.
+pub fn log_activity(log: &mut Vec<(std::time::Instant, String)>, what: String) {
+    log.push((std::time::Instant::now(), what));
+    if log.len() > 50 {
+        log.remove(0);
+    }
+}
+
+/// A few words on what a call changed, for the activity log; `None` for reads.
+fn describe(ctx: &ToolCtx, tool: &str, args: &Value, result: &Value) -> Option<String> {
+    let s = |v: &Value| v.as_str().unwrap_or("?").to_string();
+    let room = || {
+        opt_str(args, "room")
+            .and_then(|r| resolve_room(ctx.dungeon, r).ok())
+            .map_or("?".to_string(), |id| label_of(ctx.dungeon, &id))
+    };
+    Some(match tool {
+        "add_room" => format!("added room {}", s(&result["room"]["label"])),
+        "update_room" => format!("changed room {}", s(&result["label"])),
+        "delete_room" => format!("deleted room {}", s(&result["deleted"])),
+        "connect_rooms" => format!("connected {} to {}", s(&result["from"]), s(&result["to"])),
+        "update_connection" => format!("changed the {}–{} connection", s(&result["from"]), s(&result["to"])),
+        "delete_connection" => format!("removed the {}–{} connection", s(&result["deleted"]["from"]), s(&result["deleted"]["to"])),
+        "add_decor" => format!("placed a {} in {}", s(&result["decor_type"]), room()),
+        "update_decor" => format!("changed a {} in {}", s(&result["decor_type"]), room()),
+        "remove_decor" => format!("removed a {} from {}", s(&result["removed"]), room()),
+        "write_note" => match opt_str(args, "about") {
+            Some("room") => format!("wrote notes for {}", room_or_name(ctx, args)),
+            Some("page") => format!("wrote page {}", opt_str(args, "name").unwrap_or("?")),
+            Some(about) => format!("wrote the {} note", about),
+            None => return None,
+        },
+        "create_encounter" => format!("added encounter {} to {}", s(&result["name"]), s(&result["room"])),
+        "update_encounter" => format!("changed encounter {}", s(&result["name"])),
+        "delete_encounter" => format!("removed encounter {}", s(&result["deleted"])),
+        "focus_room" => format!("selected {}", s(&result["selected"])),
+        "set_floor" => match result["current_floor"].as_i64() {
+            Some(f) => format!("showed floor {}", f),
+            None => "showed all floors".into(),
+        },
+        _ => return None,
+    })
+}
+
+fn room_or_name(ctx: &ToolCtx, args: &Value) -> String {
+    let name = opt_str(args, "name").unwrap_or("?");
+    resolve_room(ctx.dungeon, name).map_or(name.to_string(), |id| label_of(ctx.dungeon, &id))
+}
+
+/// Run a tool and log what it changed.
+fn execute(ctx: &mut ToolCtx, tool: &str, args: &Value) -> Result<Value, String> {
+    let result = run(ctx, tool, args)?;
+    if let Some(what) = describe(ctx, tool, args, &result) {
+        log_activity(ctx.activity, what);
+    }
+    Ok(result)
+}
+
 fn run(ctx: &mut ToolCtx, tool: &str, args: &Value) -> Result<Value, String> {
+    if let Some(result) = encounters::run(ctx, tool, args) {
+        return result;
+    }
     match tool {
         "get_overview" => Ok(overview(ctx)),
         "get_selection" => Ok(selection(ctx)),
@@ -256,21 +328,22 @@ fn run(ctx: &mut ToolCtx, tool: &str, args: &Value) -> Result<Value, String> {
         "set_floor" => set_floor(ctx, args),
         "switch_map" => switch_map(ctx, args),
         "create_map" => create_map(ctx, args),
+        "save" => save(ctx),
         _ => Err(format!("Unknown tool: {}", tool)),
     }
 }
 
 // ------------------------------------------------------------------ arguments
 
-fn req_str<'v>(args: &'v Value, key: &str) -> Result<&'v str, String> {
+pub(super) fn req_str<'v>(args: &'v Value, key: &str) -> Result<&'v str, String> {
     args.get(key).and_then(Value::as_str).ok_or_else(|| format!("Missing '{}'", key))
 }
 
-fn opt_str<'v>(args: &'v Value, key: &str) -> Option<&'v str> {
+pub(super) fn opt_str<'v>(args: &'v Value, key: &str) -> Option<&'v str> {
     args.get(key).and_then(Value::as_str)
 }
 
-fn opt_f32(args: &Value, key: &str) -> Result<Option<f32>, String> {
+pub(super) fn opt_f32(args: &Value, key: &str) -> Result<Option<f32>, String> {
     match args.get(key) {
         None | Some(Value::Null) => Ok(None),
         Some(v) => v.as_f64().map(|n| Some(n as f32)).ok_or_else(|| format!("'{}' must be a number", key)),
@@ -288,7 +361,7 @@ fn opt_u32(args: &Value, key: &str) -> Result<Option<u32>, String> {
     }
 }
 
-fn opt_bool(args: &Value, key: &str) -> Result<Option<bool>, String> {
+pub(super) fn opt_bool(args: &Value, key: &str) -> Result<Option<bool>, String> {
     match args.get(key) {
         None | Some(Value::Null) => Ok(None),
         Some(v) => v.as_bool().map(Some).ok_or_else(|| format!("'{}' must be true or false", key)),
@@ -352,7 +425,7 @@ fn parse_light(v: &Value) -> Result<DecorLightSetting, String> {
 }
 
 /// A room by id, or by its label when exactly one room has it.
-fn resolve_room(d: &Dungeon, r: &str) -> Result<String, String> {
+pub(super) fn resolve_room(d: &Dungeon, r: &str) -> Result<String, String> {
     if let Some(room) = d.graph.room_by_id(r) {
         return Ok(room.id.clone());
     }
@@ -381,7 +454,7 @@ fn floor_json(f: &FloorAssignment) -> Value {
     }
 }
 
-fn label_of(d: &Dungeon, id: &str) -> String {
+pub(super) fn label_of(d: &Dungeon, id: &str) -> String {
     d.graph.room_by_id(id).map(|r| r.label.clone()).unwrap_or_else(|| id.to_string())
 }
 
@@ -455,7 +528,15 @@ fn overview(ctx: &ToolCtx) -> Value {
             "container": g.parent_room_id.as_deref().map(|id| label_of(d, id)),
         })).collect::<Vec<_>>(),
         "encounters": d.encounters.iter().map(|e| json!({
-            "id": e.id, "name": e.name, "room": label_of(d, &e.home_room_id),
+            "id": e.id,
+            "name": e.name,
+            "room": label_of(d, &e.home_room_id),
+            "monsters": encounters::monster_line(ctx, e),
+            "total_xp": encounters::total_xp(ctx, e),
+        })).collect::<Vec<_>>(),
+        "party": d.party.iter().map(|p| json!({
+            "name": p.name, "class": p.class, "ac": p.ac, "max_hp": p.max_hp,
+            "passive_perception": p.passive_perception,
         })).collect::<Vec<_>>(),
     })
 }
@@ -524,8 +605,10 @@ fn room_detail(ctx: &ToolCtx, id: &str) -> Value {
         .filter(|e| e.source_room_id == id || e.target_room_id == id)
         .map(|e| connection_summary(d, e))
         .collect::<Vec<_>>());
-    v["encounters"] = serde_json::to_value(d.encounters.iter().filter(|e| e.home_room_id == id).collect::<Vec<_>>())
-        .unwrap_or_default();
+    v["encounters"] = json!(d.encounters.iter()
+        .filter(|e| e.home_room_id == id)
+        .map(|e| encounters::encounter_summary(ctx, e))
+        .collect::<Vec<_>>());
     if let Some(parent) = d.graph.parent_of(id) {
         v["inside"] = json!(label_of(d, parent));
     }
@@ -963,7 +1046,7 @@ fn switch_map(ctx: &mut ToolCtx, args: &Value) -> Result<Value, String> {
     if index == active {
         return Ok(json!({ "already_open": name_of(index) }));
     }
-    ctx.map_change = Some(MapChange::Open(index));
+    ctx.app_action = Some(AppAction::OpenMap(index));
     Ok(Value::Null)
 }
 
@@ -975,7 +1058,15 @@ fn create_map(ctx: &mut ToolCtx, args: &Value) -> Result<Value, String> {
     if ctx.presenting {
         return Err("The user is presenting; a new map would end the presentation. Ask them to stop presenting first.".into());
     }
-    ctx.map_change = Some(MapChange::Create(name.to_string()));
+    ctx.app_action = Some(AppAction::CreateMap(name.to_string()));
+    Ok(Value::Null)
+}
+
+fn save(ctx: &mut ToolCtx) -> Result<Value, String> {
+    if ctx.current_file.is_none() {
+        return Err("The campaign has never been saved, so it has no file yet. Ask the user to save it (File ▸ Save As); after that this tool works.".into());
+    }
+    ctx.app_action = Some(AppAction::Save);
     Ok(Value::Null)
 }
 
@@ -1070,8 +1161,10 @@ mod tests {
         encounters: EncountersViewState,
         styled: StyledViewState,
         presentation: PresentationViewState,
-        /// The map change the last call asked the app for.
-        map_change: Option<MapChange>,
+        /// What the last call asked the app to do.
+        app_action: Option<AppAction>,
+        monsters: crate::data::MonsterDatabase,
+        activity: Vec<(std::time::Instant, String)>,
     }
 
     impl Fixture {
@@ -1088,13 +1181,18 @@ mod tests {
                 encounters: EncountersViewState::default(),
                 styled: StyledViewState::default(),
                 presentation: PresentationViewState::default(),
-                map_change: None,
+                app_action: None,
+                monsters: crate::data::MonsterDatabase::empty(),
+                activity: Vec::new(),
             }
         }
 
         fn call(&mut self, tool: &str, args: Value) -> Result<Value, String> {
             let mut ctx = ToolCtx {
                 campaign: &self.campaign,
+                monsters: &self.monsters,
+                bestiary_loading: false,
+                activity: &mut self.activity,
                 dungeon: &mut self.dungeon,
                 notes: &mut self.notes,
                 current_floor: &mut self.floor,
@@ -1107,10 +1205,10 @@ mod tests {
                 encounters: &mut self.encounters,
                 styled: &mut self.styled,
                 presentation: &mut self.presentation,
-                map_change: None,
+                app_action: None,
             };
-            let result = run(&mut ctx, tool, &args);
-            self.map_change = ctx.map_change.take();
+            let result = execute(&mut ctx, tool, &args);
+            self.app_action = ctx.app_action.take();
             result
         }
     }
@@ -1227,6 +1325,9 @@ mod tests {
     fn render(f: &mut Fixture) -> Result<RenderJob, String> {
         let ctx = ToolCtx {
             campaign: &f.campaign,
+            monsters: &f.monsters,
+            bestiary_loading: false,
+            activity: &mut f.activity,
             dungeon: &mut f.dungeon,
             notes: &mut f.notes,
             current_floor: &mut f.floor,
@@ -1239,7 +1340,7 @@ mod tests {
             encounters: &mut f.encounters,
             styled: &mut f.styled,
             presentation: &mut f.presentation,
-            map_change: None,
+            app_action: None,
         };
         render_job(&ctx, &json!({}))
     }
@@ -1252,18 +1353,124 @@ mod tests {
 
         let r = f.call("switch_map", json!({ "map": "keep (RENAMED)" })).unwrap();
         assert_eq!(r["already_open"], "Keep (renamed)", "the open map goes by its working name");
-        assert_eq!(f.map_change, None);
+        assert_eq!(f.app_action, None);
 
         f.call("switch_map", json!({ "map": "sewers" })).unwrap();
-        assert_eq!(f.map_change, Some(MapChange::Open(1)));
+        assert_eq!(f.app_action, Some(AppAction::OpenMap(1)));
         f.call("switch_map", json!({ "map": 2 })).unwrap();
-        assert_eq!(f.map_change, Some(MapChange::Open(2)));
+        assert_eq!(f.app_action, Some(AppAction::OpenMap(2)));
         f.call("create_map", json!({ "name": " Crypt " })).unwrap();
-        assert_eq!(f.map_change, Some(MapChange::Create("Crypt".into())));
+        assert_eq!(f.app_action, Some(AppAction::CreateMap("Crypt".into())));
 
         let e = f.call("switch_map", json!({ "map": "Crypt" })).unwrap_err();
         assert!(e.contains("Sewers (1)"), "lists the maps: {}", e);
         assert!(f.call("switch_map", json!({ "map": 3 })).is_err());
+    }
+
+    fn bestiary() -> crate::data::MonsterDatabase {
+        let monster = |v: Value| serde_json::from_value::<crate::model::Monster>(v).unwrap();
+        crate::data::MonsterDatabase::from_list(vec![
+            monster(json!({ "name": "Goblin", "source": "MM", "size": ["S"], "type": "humanoid", "cr": "1/4" })),
+            monster(json!({
+                "name": "Goblin Warrior", "source": "XMM", "size": ["S"], "type": "fey", "cr": "1/4",
+                "ac": [15], "hp": { "average": 10, "formula": "3d6" }, "environment": ["forest"],
+                "action": [{ "name": "Scimitar", "entries": ["{@atkr m} {@hit 4}, reach 5 ft."] }],
+            })),
+            monster(json!({ "name": "Goblin", "source": "XMM", "size": ["S"], "type": "fey", "cr": "1/4" })),
+            monster(json!({ "name": "Goblin Boss", "source": "XMM", "size": ["S"], "type": "fey", "cr": "1" })),
+            monster(json!({ "name": "Ghoul", "source": "XMM", "size": ["M"], "type": "undead", "cr": "1" })),
+        ])
+    }
+
+    #[test]
+    fn encounters_are_built_from_the_bestiary() {
+        let mut f = Fixture::new();
+        f.monsters = bestiary();
+        f.call("add_room", json!({ "label": "Den" })).unwrap();
+        let e = f.call("create_encounter", json!({
+            "room": "Den", "name": "Ambush", "notes": "They flee at half strength.",
+            "monsters": [{ "name": "goblin", "count": 4 }, { "name": "Goblin", "source": "MM" }, { "name": "Goblin Boss" }],
+        })).unwrap();
+        // The 2024 Goblin wins unless a book is named.
+        assert_eq!(e["monsters"][0]["source"], "XMM");
+        assert_eq!(e["monsters"][1]["source"], "MM");
+        assert_eq!(e["total_xp"], 4 * 50 + 50 + 200);
+
+        let overview = f.call("get_overview", json!({})).unwrap();
+        assert_eq!(overview["encounters"][0]["monsters"], "4× Goblin, 1× Goblin, 1× Goblin Boss");
+        let room = f.call("get_room", json!({ "room": "Den" })).unwrap();
+        assert_eq!(room["encounters"][0]["name"], "Ambush");
+
+        let err = f.call("create_encounter", json!({ "room": "Den", "name": "X", "monsters": [{ "name": "Gobbo" }] }));
+        assert!(err.is_err());
+        let err = f.call("create_encounter", json!({ "room": "Den", "name": "X", "monsters": [{ "name": "Goblin King" }] })).unwrap_err();
+        assert!(err.contains("Goblin Boss"), "suggests near names: {}", err);
+        assert_eq!(f.dungeon.encounters.len(), 1, "a failed create adds nothing");
+    }
+
+    #[test]
+    fn changing_or_removing_an_encounter_drops_its_stale_tokens() {
+        use crate::model::{MapToken, MonsterInstanceId, TokenKind};
+        let mut f = Fixture::new();
+        f.monsters = bestiary();
+        f.call("add_room", json!({ "label": "Den" })).unwrap();
+        f.call("add_room", json!({ "label": "Crypt" })).unwrap();
+        let e = f.call("create_encounter", json!({ "room": "Den", "name": "Pack", "monsters": [{ "name": "Ghoul", "count": 3 }] })).unwrap();
+        let id = e["id"].as_str().unwrap().to_string();
+        for instance in 0..3 {
+            f.dungeon.tokens.push(MapToken {
+                kind: TokenKind::Monster(MonsterInstanceId { encounter_id: id.clone(), monster_index: 0, instance }),
+                x: 0.5, y: 0.5, floor: None,
+            });
+        }
+        let e = f.call("update_encounter", json!({
+            "encounter": "pack", "room": "Crypt", "wandering": true, "wander_range": 2,
+            "monsters": [{ "name": "Ghoul", "count": 1 }],
+            "hazard": { "damage": "1d6", "save_dc": 12, "save_ability": "con", "condition": "Poisoned" },
+        })).unwrap();
+        assert_eq!(e["room"], "Crypt");
+        assert_eq!(e["wandering"]["range"], 2);
+        assert_eq!(f.dungeon.encounters[0].hazard.as_ref().unwrap().save_ability, crate::model::SaveAbility::Con);
+        assert_eq!(f.dungeon.tokens.len(), 1, "tokens past the new count go");
+
+        f.call("update_encounter", json!({ "encounter": "Pack", "hazard": null })).unwrap();
+        assert!(f.dungeon.encounters[0].hazard.is_none());
+        f.call("delete_encounter", json!({ "encounter": "Pack" })).unwrap();
+        assert!(f.dungeon.encounters.is_empty() && f.dungeon.tokens.is_empty());
+    }
+
+    #[test]
+    fn monsters_can_be_searched_and_read() {
+        let mut f = Fixture::new();
+        f.monsters = bestiary();
+        let r = f.call("search_monsters", json!({ "type": "fey", "cr_min": "1/4", "cr_max": 1 })).unwrap();
+        let names: Vec<&str> = r["monsters"].as_array().unwrap().iter().map(|m| m["name"].as_str().unwrap()).collect();
+        assert_eq!(names, ["Goblin", "Goblin Warrior", "Goblin Boss"], "sorted by CR, then name");
+        let r = f.call("search_monsters", json!({ "environment": "forest" })).unwrap();
+        assert_eq!(r["total"], 1);
+
+        let block = f.call("get_monster", json!({ "name": "goblin warrior" })).unwrap();
+        let text = block["stat_block"].as_str().unwrap();
+        assert!(text.contains("AC 15, HP 10 (3d6)") && text.contains("- Scimitar. ") && text.contains("+4"), "{}", text);
+        let both = f.call("get_monster", json!({ "name": "Goblin" })).unwrap();
+        assert_eq!(both["also_in"], json!(["MM"]));
+    }
+
+    #[test]
+    fn writes_are_logged_and_reads_are_not() {
+        let mut f = Fixture::new();
+        f.call("add_room", json!({ "label": "Hall" })).unwrap();
+        f.call("get_overview", json!({})).unwrap();
+        f.call("write_note", json!({ "about": "room", "name": "hall", "body": "x" })).unwrap();
+        let log: Vec<&str> = f.activity.iter().map(|(_, s)| s.as_str()).collect();
+        assert_eq!(log, ["added room Hall", "wrote notes for Hall"]);
+    }
+
+    #[test]
+    fn save_needs_a_file() {
+        let mut f = Fixture::new();
+        assert!(f.call("save", json!({})).unwrap_err().contains("Save As"));
+        assert_eq!(f.app_action, None);
     }
 
     #[test]

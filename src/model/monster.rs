@@ -509,7 +509,7 @@ pub fn strip_5e_markup(text: &str) -> String {
 }
 
 /// Convert a JSON entry value to plain text.
-fn entry_to_text(entry: &serde_json::Value) -> String {
+pub fn entry_to_text(entry: &serde_json::Value) -> String {
     match entry {
         serde_json::Value::String(s) => strip_5e_markup(s),
         serde_json::Value::Object(obj) => {

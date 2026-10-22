@@ -982,20 +982,52 @@ impl DungeonApp {
         for call in calls {
             // One at a time: a map change must land before the next call runs.
             if let Some(pending) = crate::mcp::tools::handle(&mut self.claude_tools(), call) {
-                match pending.change {
-                    crate::mcp::tools::MapChange::Open(idx) => self.change_map(idx),
-                    crate::mcp::tools::MapChange::Create(name) => self.create_map(name),
-                }
-                let _ = pending.reply.send(crate::mcp::tools::map_opened(&self.claude_tools()));
+                use crate::mcp::tools::{log_activity, map_opened, AppAction};
+                let reply = match pending.action {
+                    AppAction::OpenMap(idx) => {
+                        self.change_map(idx);
+                        log_activity(&mut self.claude.activity, format!("opened map {}", self.dungeon.name));
+                        map_opened(&self.claude_tools())
+                    }
+                    AppAction::CreateMap(name) => {
+                        self.create_map(name);
+                        log_activity(&mut self.claude.activity, format!("created map {}", self.dungeon.name));
+                        map_opened(&self.claude_tools())
+                    }
+                    AppAction::Save => match self.save_to_current_file() {
+                        Ok(path) => {
+                            log_activity(&mut self.claude.activity, "saved the campaign".into());
+                            crate::mcp::ToolOutput::json(&serde_json::json!({ "saving_to": path.display().to_string() }))
+                        }
+                        Err(e) => crate::mcp::ToolOutput::error(e),
+                    },
+                };
+                let _ = pending.reply.send(reply);
             }
         }
         ctx.request_repaint();
+    }
+
+    /// Start saving the campaign to the file it was opened from or last saved to.
+    fn save_to_current_file(&mut self) -> Result<std::path::PathBuf, String> {
+        let path = self.current_file.clone().ok_or("The campaign has no file yet.")?;
+        if self.pending_file_op.is_some() {
+            return Err("Another file operation is in progress; try again in a moment.".into());
+        }
+        self.sync_session();
+        self.sync_party_from_dungeon();
+        self.sync_dungeon_to_campaign();
+        self.pending_file_op = Some(crate::io::save_load::save_campaign_to_path(&self.campaign, path.clone()));
+        Ok(path)
     }
 
     /// The app state Claude's tools work on.
     fn claude_tools(&mut self) -> crate::mcp::tools::ToolCtx<'_> {
         crate::mcp::tools::ToolCtx {
             campaign: &self.campaign,
+            monsters: &self.monster_db,
+            bestiary_loading: self.pending_monster_db.is_some(),
+            activity: &mut self.claude.activity,
             dungeon: &mut self.dungeon,
             notes: &mut self.note_vault,
             current_floor: &mut self.current_floor,
@@ -1008,7 +1040,7 @@ impl DungeonApp {
             encounters: &mut self.encounters_state,
             styled: &mut self.styled_state,
             presentation: &mut self.presentation_view_state,
-            map_change: None,
+            app_action: None,
         }
     }
 
@@ -1030,6 +1062,13 @@ impl DungeonApp {
                     Some(tool) => ui.label(format!("{} calls, last: {}", calls, tool)),
                     None => ui.weak("No calls yet"),
                 };
+            }
+            if !self.claude.activity.is_empty() {
+                ui.separator();
+                ui.label("Recent changes:");
+                for (at, what) in self.claude.activity.iter().rev().take(8) {
+                    ui.weak(format!("{} ({} ago)", what, crate::mcp::ago(at.elapsed())));
+                }
             }
             if !enabled {
                 ui.horizontal(|ui| {
@@ -1363,14 +1402,12 @@ impl DungeonApp {
         }
         // Ctrl+S: save to current file or open Save As dialog
         if save_pressed && self.pending_file_op.is_none() {
-            self.sync_session();
-            self.sync_party_from_dungeon();
-            self.sync_dungeon_to_campaign();
-            if let Some(path) = &self.current_file {
-                self.pending_file_op = Some(
-                    crate::io::save_load::save_campaign_to_path(&self.campaign, path.clone()),
-                );
+            if self.current_file.is_some() {
+                let _ = self.save_to_current_file();
             } else {
+                self.sync_session();
+                self.sync_party_from_dungeon();
+                self.sync_dungeon_to_campaign();
                 self.pending_file_op = Some(
                     crate::io::save_load::save_campaign_async(&self.campaign),
                 );
@@ -1855,6 +1892,14 @@ impl DungeonApp {
                 let update_clicked = crate::ui::status_bar::status_bar(ui, &self.dungeon, zoom, saved, cloud_state, &self.stale_renders, update_state);
                 if update_clicked {
                     self.show_update_dialog = true;
+                }
+                if let Some((at, what)) = self.claude.activity.last() {
+                    const SHOW_FOR: std::time::Duration = std::time::Duration::from_secs(10);
+                    if at.elapsed() < SHOW_FOR {
+                        ui.separator();
+                        ui.colored_label(egui::Color32::from_rgb(217, 119, 87), format!("Claude {}", what));
+                        ui.ctx().request_repaint_after(SHOW_FOR - at.elapsed());
+                    }
                 }
                 if self.presenting {
                     ui.separator();

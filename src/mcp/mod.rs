@@ -6,6 +6,7 @@
 //! thread as a [`McpCall`] and answered from there, so Claude's edits land on screen
 //! the frame they're made and the undo history picks them up like any other edit.
 
+mod encounters;
 mod http;
 pub mod tools;
 
@@ -104,6 +105,17 @@ pub struct ClaudeLink {
     /// Why the server couldn't start (e.g. port taken); cleared when settings change.
     pub error: Option<String>,
     pub stats: Arc<LinkStats>,
+    /// What Claude has changed this session, newest last.
+    pub activity: Vec<(std::time::Instant, String)>,
+}
+
+/// "12s", "3m", "2h": how long ago, for the activity list.
+pub fn ago(d: std::time::Duration) -> String {
+    match d.as_secs() {
+        s if s < 60 => format!("{}s", s),
+        s if s < 3600 => format!("{}m", s / 60),
+        s => format!("{}h", s / 3600),
+    }
 }
 
 impl ClaudeLink {
@@ -112,7 +124,7 @@ impl ClaudeLink {
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
-        Self { config, running: None, error: None, stats: Arc::default() }
+        Self { config, running: None, error: None, stats: Arc::default(), activity: Vec::new() }
     }
 
     fn save(&self) {

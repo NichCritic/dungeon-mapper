@@ -26,6 +26,11 @@ impl MonsterDatabase {
         Self::from_monsters(Vec::new(), None)
     }
 
+    #[cfg(test)]
+    pub fn from_list(monsters: Vec<Monster>) -> Self {
+        Self::from_monsters(monsters, None)
+    }
+
     fn from_monsters(monsters: Vec<Monster>, img_dir: Option<PathBuf>) -> Self {
         let mut index: HashMap<String, HashMap<String, usize>> = HashMap::new();
         for (i, m) in monsters.iter().enumerate() {
