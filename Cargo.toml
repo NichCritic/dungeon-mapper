@@ -1,6 +1,6 @@
 [package]
 name = "dungeon-mapper"
-version = "0.4.15"
+version = "0.4.16"
 edition = "2024"
 default-run = "dungeon-mapper"
 
@@ -22,6 +22,7 @@ reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"], def
 open = "5"
 self-replace = "1"
 semver = "1"
+base64 = "0.22"
 
 [[bin]]
 name = "dungeon-mapper"

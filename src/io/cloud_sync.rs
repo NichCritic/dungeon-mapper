@@ -92,13 +92,13 @@ impl CloudSyncState {
 
 /// Get the path to the token storage file.
 fn token_path() -> PathBuf {
-    let mut path = dirs_config_path();
+    let mut path = config_dir();
     path.push("cloud_tokens.json");
     path
 }
 
-/// Get the app config directory.
-fn dirs_config_path() -> PathBuf {
+/// The app's config directory (created if missing).
+pub fn config_dir() -> PathBuf {
     if let Some(config) = dirs_fallback() {
         let p = config.join("dungeon-mapper");
         let _ = std::fs::create_dir_all(&p);

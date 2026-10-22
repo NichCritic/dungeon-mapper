@@ -5,6 +5,7 @@ mod app;
 mod data;
 mod history;
 mod io;
+mod mcp;
 mod model;
 mod notes;
 mod presentation;

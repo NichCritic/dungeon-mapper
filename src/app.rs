@@ -158,6 +158,9 @@ pub struct DungeonApp {
     pub notes_state: crate::ui::notes_panel::NotesPanelState,
     /// Debounce: write dirty notes to disk once typing pauses.
     notes_dirty_since: Option<std::time::Instant>,
+
+    /// The MCP server Claude Code connects to, and its settings.
+    pub claude: crate::mcp::ClaudeLink,
 }
 
 impl Default for DungeonApp {
@@ -242,6 +245,7 @@ impl Default for DungeonApp {
             notes_state: crate::ui::notes_panel::NotesPanelState::default(),
             notes_dirty_since: None,
             last_autosave_hash: initial_hash,
+            claude: crate::mcp::ClaudeLink::load(),
         }
     }
 }
@@ -941,6 +945,8 @@ impl eframe::App for DungeonApp {
 
         // Sync campaign party into working dungeon at frame start
         self.sync_party_to_dungeon();
+        // Before the views take the shared floor, so a floor Claude picks reaches them
+        self.serve_claude(ctx);
         self.sync_floor_to_views();
 
         self.poll_background_tasks();
@@ -965,6 +971,88 @@ impl eframe::App for DungeonApp {
 }
 
 impl DungeonApp {
+    /// Run the tool calls Claude Code made since the last frame, against the live map.
+    /// Their edits are picked up by the undo history at the end of the frame.
+    fn serve_claude(&mut self, ctx: &egui::Context) {
+        self.claude.ensure_running(ctx);
+        let calls = self.claude.take_calls();
+        if calls.is_empty() {
+            return;
+        }
+        for call in calls {
+            // One at a time: a map change must land before the next call runs.
+            if let Some(pending) = crate::mcp::tools::handle(&mut self.claude_tools(), call) {
+                match pending.change {
+                    crate::mcp::tools::MapChange::Open(idx) => self.change_map(idx),
+                    crate::mcp::tools::MapChange::Create(name) => self.create_map(name),
+                }
+                let _ = pending.reply.send(crate::mcp::tools::map_opened(&self.claude_tools()));
+            }
+        }
+        ctx.request_repaint();
+    }
+
+    /// The app state Claude's tools work on.
+    fn claude_tools(&mut self) -> crate::mcp::tools::ToolCtx<'_> {
+        crate::mcp::tools::ToolCtx {
+            campaign: &self.campaign,
+            dungeon: &mut self.dungeon,
+            notes: &mut self.note_vault,
+            current_floor: &mut self.current_floor,
+            active_tab: &mut self.active_tab,
+            presenting: self.presenting,
+            current_file: self.current_file.as_deref(),
+            graph: &mut self.graph_state,
+            spatial: &mut self.spatial_state,
+            decor: &mut self.decor_state,
+            encounters: &mut self.encounters_state,
+            styled: &mut self.styled_state,
+            presentation: &mut self.presentation_view_state,
+            map_change: None,
+        }
+    }
+
+    /// The Claude menu: switch the Claude Code connection on or off and set it up.
+    fn claude_menu(&mut self, ui: &mut egui::Ui) {
+        ui.menu_button("Claude", |ui| {
+            let mut enabled = self.claude.enabled();
+            if ui.checkbox(&mut enabled, "Let Claude Code connect").changed() {
+                self.claude.set_enabled(enabled);
+            }
+            ui.weak("Claude can then read and edit the open map.\nIts edits show up live and undo with Ctrl+Z.");
+            ui.separator();
+            if let Some(e) = &self.claude.error {
+                ui.colored_label(egui::Color32::from_rgb(230, 120, 90), e);
+            } else if self.claude.is_running() {
+                ui.label(format!("Listening on 127.0.0.1:{}", self.claude.port()));
+                let calls = self.claude.stats.calls.load(std::sync::atomic::Ordering::Relaxed);
+                match self.claude.stats.last_tool.lock().ok().and_then(|l| l.clone()) {
+                    Some(tool) => ui.label(format!("{} calls, last: {}", calls, tool)),
+                    None => ui.weak("No calls yet"),
+                };
+            }
+            if !enabled {
+                ui.horizontal(|ui| {
+                    ui.label("Port:");
+                    let mut port = self.claude.port();
+                    if crate::ui::canvas_common::num_input_u16(ui, &mut port, 60.0) {
+                        self.claude.set_port(port);
+                    }
+                });
+            }
+            ui.separator();
+            if ui
+                .button("Copy setup command")
+                .on_hover_text("Registers Dungeon Mapper with Claude Code. Run it once in a terminal.")
+                .clicked()
+            {
+                ui.ctx().copy_text(self.claude.setup_command());
+                ui.close_menu();
+            }
+            ui.weak("Run it once in a terminal, then start `claude`\nand ask about your map.");
+        });
+    }
+
     /// Poll the background jobs: bestiary load, file operations, cloud sync and updates.
     fn poll_background_tasks(&mut self) {
         // Poll background monster database load
@@ -1464,21 +1552,7 @@ impl DungeonApp {
                     });
                     ui.separator();
                     if ui.button("New Map").clicked() {
-                        self.sync_party_from_dungeon();
-                        self.sync_dungeon_to_campaign();
-                        let map_name = format!("Map {}", self.campaign.maps.len() + 1);
-                        self.campaign.add_map(map_name);
-                        let new_idx = self.campaign.maps.len() - 1;
-                        self.campaign.switch_map(new_idx);
-                        self.load_dungeon_from_campaign();
-                        self.graph_state = GraphEditorState::default();
-                        self.spatial_state = SpatialViewState::default();
-                        self.decor_state = DecorViewState::default();
-                        self.styled_state = StyledViewState::default();
-                        self.presenting = false;
-                        self.presentation = None;
-                        self.last_graph_snapshot = self.graph_hash();
-                        self.history.reset(&self.dungeon);
+                        self.create_map(format!("Map {}", self.campaign.maps.len() + 1));
                         ui.close_menu();
                     }
                     if ui.button("Import Map...").clicked() {
@@ -1524,6 +1598,7 @@ impl DungeonApp {
                         self.switch_to_map(idx);
                     }
                 });
+                self.claude_menu(ui);
 
                 ui.separator();
 
@@ -1625,25 +1700,49 @@ impl DungeonApp {
                 self.player_presentation = self.presentation.clone();
             }
             if let Some(idx) = switch_to {
-                if self.presenting {
-                    // During presentation, switching DM map doesn't affect player view
-                    // If player was following DM, freeze it on the old map first
-                    if self.player_map_index.is_none() {
-                        self.player_map_index = Some(self.campaign.active_map);
-                        self.player_dungeon = Some(self.dungeon.clone());
-                        self.player_presentation = self.presentation.clone();
-                    }
-                    self.switch_to_map(idx);
-                    // Re-enter presentation on new map
-                    self.presenting = true;
-                    self.presentation = Some(PresentationState::new_from_dungeon(&self.dungeon));
-                    if self.dungeon.layout.is_none() && !self.dungeon.graph.rooms.is_empty() {
-                        self.solve_layout_full();
-                    }
-                } else {
-                    self.switch_to_map(idx);
-                }
+                self.change_map(idx);
             }
+        }
+    }
+
+    /// Add an empty map to the campaign and open it (ending any presentation).
+    fn create_map(&mut self, name: String) {
+        self.sync_party_from_dungeon();
+        self.sync_dungeon_to_campaign();
+        self.campaign.add_map(name);
+        let new_idx = self.campaign.maps.len() - 1;
+        self.campaign.switch_map(new_idx);
+        self.load_dungeon_from_campaign();
+        self.graph_state = GraphEditorState::default();
+        self.spatial_state = SpatialViewState::default();
+        self.decor_state = DecorViewState::default();
+        self.styled_state = StyledViewState::default();
+        self.presenting = false;
+        self.presentation = None;
+        self.last_graph_snapshot = self.graph_hash();
+        self.history.reset(&self.dungeon);
+    }
+
+    /// Open another map, carrying on presenting if the DM is: the players keep seeing
+    /// the map they were on until it's pushed to them.
+    fn change_map(&mut self, idx: usize) {
+        if self.presenting {
+            // During presentation, switching DM map doesn't affect player view
+            // If player was following DM, freeze it on the old map first
+            if self.player_map_index.is_none() {
+                self.player_map_index = Some(self.campaign.active_map);
+                self.player_dungeon = Some(self.dungeon.clone());
+                self.player_presentation = self.presentation.clone();
+            }
+            self.switch_to_map(idx);
+            // Re-enter presentation on new map
+            self.presenting = true;
+            self.presentation = Some(PresentationState::new_from_dungeon(&self.dungeon));
+            if self.dungeon.layout.is_none() && !self.dungeon.graph.rooms.is_empty() {
+                self.solve_layout_full();
+            }
+        } else {
+            self.switch_to_map(idx);
         }
     }
 
