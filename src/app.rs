@@ -867,11 +867,9 @@ impl DungeonApp {
     }
 
     /// Which entity the notes drawer should show notes for right now.
-    fn note_context(&self) -> crate::ui::notes_panel::NoteContext {
-        use crate::notes::NoteBind;
-        use crate::ui::notes_panel::NoteContext;
-
-        let selected = if self.presenting {
+    /// The one room selected in the view on screen, if any.
+    fn selected_room_id(&self) -> Option<String> {
+        if self.presenting {
             self.presentation_view_state.selected_room.clone()
         } else {
             match self.active_tab {
@@ -884,10 +882,15 @@ impl DungeonApp {
                 }
                 Tab::Styled => None,
             }
-        };
+        }
+    }
+
+    fn note_context(&self) -> crate::ui::notes_panel::NoteContext {
+        use crate::notes::NoteBind;
+        use crate::ui::notes_panel::NoteContext;
 
         let map_folder = Some(self.dungeon.name.clone());
-        match selected.and_then(|id| self.dungeon.graph.room_by_id(&id).map(|r| (id, r.label.clone()))) {
+        match self.selected_room_id().and_then(|id| self.dungeon.graph.room_by_id(&id).map(|r| (id, r.label.clone()))) {
             Some((id, label)) => NoteContext {
                 bind: Some(NoteBind::Room(id)),
                 title: label,
@@ -2119,10 +2122,27 @@ impl DungeonApp {
         self.draw_dock_windows(ctx);
 
         // Right sidebar
+        // The selected area's detail map, if it links to one: (index, name)
+        let detail_map = self.selected_room_id()
+            .and_then(|id| self.dungeon.graph.room_by_id(&id)?.links_to_map.clone())
+            .and_then(|map_id| self.campaign.maps.iter().position(|m| m.id == map_id))
+            .filter(|&i| i != self.campaign.active_map)
+            .map(|i| (i, self.campaign.maps[i].name.clone()));
+        let other_maps: Vec<(String, String)> = self.campaign.maps.iter().enumerate()
+            .filter(|&(i, _)| i != self.campaign.active_map)
+            .map(|(_, m)| (m.id.clone(), m.name.clone()))
+            .collect();
+        let mut open_map = None;
         let sidebar_response = egui::SidePanel::right("properties")
             .default_width(320.0)
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
+                    if let Some((idx, name)) = &detail_map {
+                        if ui.button(format!("Open the {} map", name)).on_hover_text("This area is shown in detail on another map").clicked() {
+                            open_map = Some(*idx);
+                        }
+                        ui.separator();
+                    }
                     if self.presenting {
                         if let Some(presentation) = &mut self.presentation {
                             presentation_view::presentation_sidebar(
@@ -2175,6 +2195,7 @@ impl DungeonApp {
                                     &mut self.dungeon,
                                     &self.graph_state.selection,
                                     &mut self.graph_state.focus_label,
+                                    &other_maps,
                                 );
                             }
                             Tab::Spatial => {
@@ -2219,6 +2240,9 @@ impl DungeonApp {
                 });
             });
         self.annotation_state.panel_rects.push(sidebar_response.response.rect);
+        if let Some(idx) = open_map {
+            self.change_map(idx);
+        }
 
         // Session notes drawer — under the map, inside the sidebar's remaining width.
         // Declared after the sidebar so the sidebar keeps full height.

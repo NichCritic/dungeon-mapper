@@ -381,7 +381,7 @@ mod tests {
             custom_monsters: Vec::new(),
             party: Vec::new(),
             annotations: Vec::new(),
-            light_sources: Vec::new(), decor_lighting: None, campaign_decor_lighting: Default::default(),
+            light_sources: Vec::new(), decor_lighting: None, campaign_decor_lighting: Default::default(), feet_per_square: 5,
             ambient_light: 0.0,
             aoe_markers: Vec::new(),
             tokens: Vec::new(),

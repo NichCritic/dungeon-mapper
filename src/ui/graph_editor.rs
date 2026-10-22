@@ -245,7 +245,7 @@ fn handle_interactions(
 
                 let label = format!("Room {}", state.next_room_number);
                 state.next_room_number += 1;
-                let room = Room::new(label);
+                let room = dungeon.new_room(label);
                 let new_id = room.id.clone();
                 state.room_positions.insert(new_id.clone(), world_pos);
                 dungeon.graph.add_room(room);
@@ -831,6 +831,7 @@ fn draw_connections(
                     ConnectionType::OneWay => (egui::Color32::from_rgb(220, 190, 110), 2.0_f32),
                     ConnectionType::Flush => (egui::Color32::from_rgb(100, 200, 100), 2.0_f32),
                     ConnectionType::Merge => (egui::Color32::from_rgb(100, 180, 220), 2.0_f32),
+                    ConnectionType::Path => (egui::Color32::from_rgb(200, 170, 120), 2.0_f32),
                 }
             } else {
                 match edge.connection.connection_type {
@@ -841,6 +842,7 @@ fn draw_connections(
                     ConnectionType::OneWay => (egui::Color32::from_rgb(200, 200, 200), 2.0_f32),
                     ConnectionType::Flush => (egui::Color32::from_rgb(80, 180, 80), 2.0_f32),
                     ConnectionType::Merge => (egui::Color32::from_rgb(80, 160, 200), 2.0_f32),
+                    ConnectionType::Path => (egui::Color32::from_rgb(170, 140, 90), 2.0_f32),
                 }
             };
 

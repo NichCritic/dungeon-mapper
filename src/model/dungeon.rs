@@ -143,6 +143,9 @@ pub struct Dungeon {
     /// maps stored on the campaign, so they're saved once, on the campaign.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub campaign_decor_lighting: Option<super::DecorLighting>,
+    /// Feet per grid square: 5 for a battle map, more for an overview map.
+    #[serde(default = "default_feet_per_square")]
+    pub feet_per_square: u32,
     /// Ambient light level (0.0 = dark, 1.0 = fully lit).
     #[serde(default)]
     pub ambient_light: f32,
@@ -155,6 +158,10 @@ pub struct Dungeon {
     /// Persisted session state (fog of war, encounter positions, HP, etc.).
     #[serde(default)]
     pub session: SessionState,
+}
+
+fn default_feet_per_square() -> u32 {
+    5
 }
 
 fn new_map_id() -> String {
@@ -176,6 +183,7 @@ impl Dungeon {
             light_sources: Vec::new(),
             decor_lighting: None,
             campaign_decor_lighting: None,
+            feet_per_square: default_feet_per_square(),
             ambient_light: 0.0,
             aoe_markers: Vec::new(),
             tokens: Vec::new(),
@@ -190,6 +198,17 @@ impl Dungeon {
             Some(l) => std::borrow::Cow::Borrowed(l),
             None => std::borrow::Cow::Owned(super::DecorLighting::default()),
         }
+    }
+
+    /// A new room for this map: on an outdoor map, an open outdoor area (its sides can
+    /// be fenced afterwards); in a dungeon, a walled room.
+    pub fn new_room(&self, label: String) -> super::Room {
+        let mut room = super::Room::new(label);
+        if self.theme.ground.is_outdoor() {
+            room.environment = super::RoomEnvironment::Outdoor;
+            room.walls = super::Walls::all(super::WallKind::Open);
+        }
+        room
     }
 
     /// Every light on the map: the placed light sources, then lit decor.

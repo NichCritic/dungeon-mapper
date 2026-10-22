@@ -19,7 +19,7 @@ use crate::model::{
 };
 use crate::presentation::tokens::TokenInfo;
 use crate::presentation::VisibilityProvider;
-use crate::render::themed::{build_floor_set, flush_walls_with_layout};
+use crate::render::themed::flush_walls_with_layout;
 use crate::util::{DECOR_HALF_SIZE, GRID_PX};
 
 pub type Pt = (f32, f32);
@@ -143,6 +143,7 @@ impl Occluders {
 pub fn geometry_key(dungeon: &Dungeon, layout: &SpatialLayout, presentation: &dyn VisibilityProvider) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
+    dungeon.theme.ground.hash(&mut h);
     for rl in &layout.rooms {
         rl.room_id.hash(&mut h);
         (rl.x, rl.y, rl.width, rl.height).hash(&mut h);
@@ -150,7 +151,13 @@ pub fn geometry_key(dungeon: &Dungeon, layout: &SpatialLayout, presentation: &dy
         for wp in &rl.wall_openings { (wp.x, wp.y).hash(&mut h); }
         if let Some(room) = dungeon.graph.room_by_id(&rl.room_id) {
             (room.shape as u8).hash(&mut h);
-            (room.open_walls.north, room.open_walls.south, room.open_walls.east, room.open_walls.west).hash(&mut h);
+            room.walls.hash(&mut h);
+            // Thickets block sight
+            for sec in room.sections.iter().filter(|s| s.elevation.blocks_sight()) {
+                sec.id.hash(&mut h);
+                for v in [sec.x, sec.y, sec.width, sec.length] { v.to_bits().hash(&mut h); }
+                sec.organic.hash(&mut h);
+            }
             if let Some(cave) = &room.cave_data { cave.cells.hash(&mut h); }
             for d in &room.decor {
                 (d.decor_type as u8).hash(&mut h);
@@ -222,7 +229,8 @@ pub fn build_static_occluders(
     presentation: &dyn VisibilityProvider,
 ) -> Occluders {
     let graph = &dungeon.graph;
-    let floor = build_floor_set(layout, graph);
+    let outdoor = dungeon.theme.ground.is_outdoor();
+    let floor = crate::render::themed::open_cells(layout, graph, &dungeon.theme);
     let shapes: Vec<Option<crate::model::geometry::CorridorShape>> = layout.corridors.iter()
         .map(|c| crate::model::geometry::corridor_shape(c, layout, graph))
         .collect();
@@ -237,12 +245,13 @@ pub fn build_static_occluders(
         &floor
     };
 
-    // Solid cells: everything inside the layout extents (plus a 1-cell rim) that is not floor.
+    // Solid cells: everything inside the layout extents (plus a 1-cell rim) that is not
+    // floor. Outdoors there's no rock: the open ground between the rooms is passable.
     let (min_x, min_y, max_x, max_y) = layout.extents();
     let mut solid = CellSet::default();
     for y in (min_y - 1)..=(max_y + 1) {
         for x in (min_x - 1)..=(max_x + 1) {
-            if !open.contains(&(x, y)) {
+            if !outdoor && !open.contains(&(x, y)) {
                 solid.insert((x, y));
             }
         }
@@ -269,6 +278,8 @@ pub fn build_static_occluders(
     }
 
     let mut walls_all = Vec::new();
+    // Fences and drystone walls: seen over, but half cover (as thin objects, below)
+    let mut low_boundaries: Vec<Segment> = Vec::new();
     for rl in &layout.rooms {
         let room = graph.room_by_id(&rl.room_id);
         let shape = room.map(|r| r.shape).unwrap_or_default();
@@ -288,18 +299,22 @@ pub fn build_static_occluders(
                     walls.push(Segment { a: (ax / g, ay / g), b: (bx / g, by / g) });
                 }
             } else {
-                let open = room.map(|r| r.open_walls).unwrap_or_default();
+                // Fences and drystone walls are seen over; walls and hedges block sight
+                let sides = room.map(|r| r.walls).unwrap_or_default();
                 let c = rl.corners();
-                for (i, is_open) in [open.north, open.east, open.south, open.west].into_iter().enumerate() {
-                    if !is_open {
-                        walls.push(Segment { a: c[i], b: c[(i + 1) % 4] });
+                for (i, kind) in [sides.north, sides.east, sides.south, sides.west].into_iter().enumerate() {
+                    let side = Segment { a: c[i], b: c[(i + 1) % 4] };
+                    if kind.blocks_sight() {
+                        walls.push(side);
+                    } else if kind.is_low() {
+                        low_boundaries.push(side);
                     }
                 }
             }
         } else {
             match shape {
                 RoomShape::Rectangle => {
-                    let open = room.map(|r| r.open_walls).unwrap_or_default();
+                    let sides = room.map(|r| r.walls).unwrap_or_default();
                     let flush = flush_walls_with_layout(&rl.room_id, rl, graph, layout);
                     // Gaps along each wall: wall openings (corridor crossings) and open doors.
                     let mut gaps_h_top = Vec::new();
@@ -325,10 +340,23 @@ pub fn build_static_occluders(
                         else if (mx - x0).abs() < 0.5 { gaps_v_left.push((*dy0, *dy1)); }
                         else if (mx - x1).abs() < 0.5 { gaps_v_right.push((*dy0, *dy1)); }
                     }
-                    if !open.north && !flush.north { push_wall_with_gaps(walls, (x0, y0), (x1, y0), &gaps_h_top); }
-                    if !open.south && !flush.south { push_wall_with_gaps(walls, (x0, y1), (x1, y1), &gaps_h_bot); }
-                    if !open.west && !flush.west { push_wall_with_gaps(walls, (x0, y0), (x0, y1), &gaps_v_left); }
-                    if !open.east && !flush.east { push_wall_with_gaps(walls, (x1, y0), (x1, y1), &gaps_v_right); }
+                    // Fences and drystone walls are seen over; walls and hedges block sight
+                    let sided = [
+                        (sides.north, flush.north, (x0, y0), (x1, y0), &gaps_h_top),
+                        (sides.south, flush.south, (x0, y1), (x1, y1), &gaps_h_bot),
+                        (sides.west, flush.west, (x0, y0), (x0, y1), &gaps_v_left),
+                        (sides.east, flush.east, (x1, y0), (x1, y1), &gaps_v_right),
+                    ];
+                    for (kind, flushed, a, b, gaps) in sided {
+                        if flushed {
+                            continue;
+                        }
+                        if kind.blocks_sight() {
+                            push_wall_with_gaps(walls, a, b, gaps);
+                        } else if kind.is_low() {
+                            push_wall_with_gaps(&mut low_boundaries, a, b, gaps);
+                        }
+                    }
                 }
                 RoomShape::Circle => {
                     // Rim as a polygon; door gaps are handled by the corridor floor cells touching it.
@@ -377,8 +405,29 @@ pub fn build_static_occluders(
         }
     }
 
+    // Thickets: too dense to see into, so their outline blocks sight like a wall
+    for rl in &layout.rooms {
+        let Some(room) = graph.room_by_id(&rl.room_id) else { continue };
+        for sec in room.sections.iter().filter(|s| s.elevation.blocks_sight()) {
+            let pts: Vec<Pt> = sec.outline().iter().map(|&(x, y)| rl.to_world(x, y)).collect();
+            for i in 0..pts.len() {
+                walls_all.push(Segment { a: pts[i], b: pts[(i + 1) % pts.len()] });
+            }
+        }
+    }
+
     // Objects
     let mut objects = Vec::new();
+    for seg in &low_boundaries {
+        // A thin strip along the boundary (a tenth of a square thick)
+        let (dx, dy) = (seg.b.0 - seg.a.0, seg.b.1 - seg.a.1);
+        let len = dx.hypot(dy).max(f32::EPSILON);
+        let (nx, ny) = (-dy / len * 0.05, dx / len * 0.05);
+        objects.push(Obstacle {
+            poly: vec![(seg.a.0 + nx, seg.a.1 + ny), (seg.b.0 + nx, seg.b.1 + ny), (seg.b.0 - nx, seg.b.1 - ny), (seg.a.0 - nx, seg.a.1 - ny)],
+            cover: CoverKind::Half,
+        });
+    }
     for rl in &layout.rooms {
         let Some(room) = graph.room_by_id(&rl.room_id) else { continue };
         for d in &room.decor {
@@ -1405,6 +1454,65 @@ mod tests {
         assert!(seen.contains(&(4, 5)));
         assert!(!seen.contains(&(5, 5)), "neighbour across the wall must stay dark");
         assert!(!seen.contains(&(5, 4)));
+    }
+
+    /// Occluders for a 6x6 field at (0, 0) on an outdoor map, every side `kind`, with
+    /// a thicket across columns 2-3 if asked.
+    fn field(kind: crate::model::WallKind, thicket: bool) -> Occluders {
+        use crate::model::{ElevationSection, ElevationType, Ground, Room, RoomLayout, Walls};
+        let mut d = Dungeon::new("Farm".into());
+        d.theme.ground = Ground::Grass;
+        let mut room = Room::new("Field".into());
+        room.walls = Walls::all(kind);
+        if thicket {
+            room.sections.push(ElevationSection::new(ElevationType::Thicket, 2.0, 0.0, 2.0, 6.0));
+        }
+        let id = room.id.clone();
+        d.graph.add_room(room);
+        let layout = SpatialLayout {
+            rooms: vec![RoomLayout { room_id: id, x: 0, y: 0, width: 6, height: 6, violations: vec![], wall_openings: vec![], rotation: 0.0 }],
+            corridors: vec![],
+            bounds: vec![],
+        };
+        let vis = crate::presentation::PresentationSnapshot { room_visibility: Default::default(), doors_open: Default::default() };
+        build_static_occluders(&d, &layout, &vis)
+    }
+
+    #[test]
+    fn outdoors_the_open_ground_is_not_rock() {
+        use crate::model::WallKind;
+        let o = field(WallKind::Open, false);
+        assert!(o.solid.is_empty());
+        // From outside the field, sight crosses the open ground and into it
+        let seen = visible_cells((-1.5, 3.5), 8.0, &o, &o.floor);
+        assert!(seen.contains(&(-2, 3)) && seen.contains(&(3, 3)));
+    }
+
+    #[test]
+    fn fences_and_drystone_walls_are_seen_over_but_give_half_cover() {
+        use crate::model::WallKind;
+        for kind in [WallKind::Fence, WallKind::StoneWall] {
+            let o = field(kind, false);
+            let seen = visible_cells((3.5, 3.5), 8.0, &o, &o.floor);
+            assert!(seen.contains(&(7, 3)), "{:?} doesn't block sight", kind);
+            // Just outside the east side, from inside the field
+            assert_eq!(level(&o, (3, 3), (6, 3)), CoverLevel::Half, "{:?}", kind);
+        }
+        // A plain wall still blocks completely
+        let o = field(WallKind::Wall, false);
+        assert_eq!(level(&o, (3, 3), (6, 3)), CoverLevel::Total);
+    }
+
+    #[test]
+    fn hedges_and_thickets_block_sight() {
+        use crate::model::WallKind;
+        let o = field(WallKind::Hedge, false);
+        let seen = visible_cells((3.5, 3.5), 8.0, &o, &o.floor);
+        assert!(!seen.contains(&(7, 3)), "hedges block sight");
+        let o = field(WallKind::Open, true);
+        let seen = visible_cells((0.5, 3.5), 8.0, &o, &o.floor);
+        assert!(seen.contains(&(1, 3)));
+        assert!(!seen.contains(&(5, 3)), "nothing is seen through the thicket");
     }
 
     #[test]

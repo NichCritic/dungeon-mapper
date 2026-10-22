@@ -23,6 +23,9 @@ pub struct Theme {
     /// Corridor corner style
     #[serde(default)]
     pub corridor_chamfer: ChamferStyle,
+    /// What lies between the rooms: rock for a dungeon, or open ground outdoors.
+    #[serde(default)]
+    pub ground: Ground,
 }
 
 fn default_true() -> bool { true }
@@ -85,6 +88,12 @@ impl ShadingStyle {
 }
 
 impl Theme {
+    /// What's drawn between the rooms: plain paper (the floor colour) for an outdoor
+    /// map's open ground, else the background around a dungeon's rock.
+    pub fn background(&self) -> [u8; 4] {
+        if self.ground.is_outdoor() { self.floor_color } else { self.bg_color }
+    }
+
     pub fn classic_dungeon() -> Self {
         Self {
             name: "Classic Dungeon".to_string(),
@@ -98,6 +107,7 @@ impl Theme {
             shading_style: ShadingStyle::Hatched,
             hatching_density: 1.0,
             corridor_chamfer: ChamferStyle::Sharp,
+            ground: Ground::Rock,
         }
     }
 }
@@ -107,3 +117,35 @@ impl Default for Theme {
         Self::classic_dungeon()
     }
 }
+
+/// What lies between a map's rooms.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Ground {
+    /// Solid rock: a dungeon. Rooms are carved out of it and its edge is shaded.
+    #[default]
+    Rock,
+    Grass,
+    Earth,
+    Sand,
+    Snow,
+}
+
+impl Ground {
+    pub const ALL: [Ground; 5] = [Ground::Rock, Ground::Grass, Ground::Earth, Ground::Sand, Ground::Snow];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Ground::Rock => "Rock (dungeon)",
+            Ground::Grass => "Grass",
+            Ground::Earth => "Earth",
+            Ground::Sand => "Sand",
+            Ground::Snow => "Snow",
+        }
+    }
+
+    /// Open ground rather than a dungeon's rock.
+    pub fn is_outdoor(self) -> bool {
+        self != Ground::Rock
+    }
+}
+

@@ -83,12 +83,16 @@ pub fn render_map(
         .collect();
     let freeform = shapes.iter().any(Option::is_some) || layout.rooms.iter().any(|rl| rl.is_rotated());
     // Explored but not in sight: drawn faded toward the background
-    let dimmed_floor = blend_toward(theme.floor_color, theme.bg_color, 0.4);
-    let dimmed_theme = Theme { wall_color: blend_toward(theme.wall_color, theme.bg_color, 0.4), ..theme.clone() };
+    let dimmed_floor = blend_toward(theme.floor_color, theme.background(), 0.4);
+    let dimmed_theme = Theme { wall_color: blend_toward(theme.wall_color, theme.background(), 0.4), ..theme.clone() };
 
     // With ghosts the background reaches under the lower floors too
     let ghosts = match *audience { Audience::Players { ghosts, .. } => ghosts, Audience::Dm => None };
     render_background(renderer, ghosts.map_or(layout, |(full, _)| full), theme);
+    // Outdoors the ground is part of the battlefield: grid it (rooms draw their own over it)
+    if theme.ground.is_outdoor() && options.show_grid {
+        render_ground_grid(renderer, ghosts.map_or(layout, |(full, _)| full));
+    }
     if let Some((full_layout, floor)) = ghosts {
         render_floor_ghosts(renderer, graph, full_layout, floor, |room_id| audience.room(room_id) != Visibility::Hidden);
     }
@@ -140,10 +144,16 @@ pub fn render_map(
         }
     }
     for &ci in &corridor_order {
+        let path = is_path(&layout.corridors[ci], graph);
+        // Outdoors a corridor is just open ground: only tracks are drawn
+        if theme.ground.is_outdoor() && !path {
+            continue;
+        }
+        let surface = if path { PATH_COLOR } else { theme.floor_color };
         let color = match audience.corridor(&layout.corridors[ci].connection_id, graph) {
             Visibility::Hidden => continue,
-            Visibility::Explored => dimmed_floor,
-            Visibility::Visible => theme.floor_color,
+            Visibility::Explored => blend_toward(surface, theme.background(), 0.4),
+            Visibility::Visible => surface,
         };
         match &shapes[ci] {
             Some(shape) => render_freeform_corridor_floor(renderer, shape, color),
@@ -157,7 +167,16 @@ pub fn render_map(
             }
         }
     }
-    if options.show_grid {
+    if options.show_grid && theme.ground.is_outdoor() {
+        // The ground grid shows through open-ground areas; grid what covered it:
+        // buildings' floors and tracks
+        let covered = rasterize_floor_filtered(
+            layout, graph, Coverage::Center,
+            |rl| room_shown(rl) && !is_open_ground(rl, graph, theme),
+            |c| corridor_shown(c) && is_path(c, graph),
+        );
+        render_map_grid(renderer, layout, graph, &covered, |rl| room_shown(rl) && !is_open_ground(rl, graph, theme), |c| corridor_shown(c) && is_path(c, graph));
+    } else if options.show_grid {
         render_map_grid(renderer, layout, graph, &floor, room_shown, corridor_shown);
     }
     // Render room decor and elevation sections (after floors/grid, before walls)
@@ -212,6 +231,10 @@ pub fn render_map(
             Visibility::Explored => &dimmed_theme,
             Visibility::Visible => theme,
         };
+        // A path is a track across open ground, and outdoors nothing has corridor walls
+        if theme.ground.is_outdoor() || is_path(&layout.corridors[ci], graph) {
+            continue;
+        }
         if shapes[ci].is_some() {
             for ((ax, ay), (bx, by)) in overlap::freeform_corridor_walls(ci, &shapes, graph, layout) {
                 renderer.draw_line(ax * GRID_PX, ay * GRID_PX, bx * GRID_PX, by * GRID_PX, 2.0, wall_theme.wall_color);
@@ -227,9 +250,27 @@ pub fn render_map(
     // Players see the light the party has (the DM views overlay it live instead)
     if let Audience::Players { lights, ambient, .. } = *audience {
         if options.show_lighting && (!lights.is_empty() || ambient < 1.0) {
-            crate::render::presentation::render_lighting_overlay(renderer, layout, lights, ambient, &floor);
+            // Outdoors the darkness lies over the open ground too
+            let mut lit_area = floor.clone();
+            add_open_ground(&mut lit_area, layout, theme);
+            crate::render::presentation::render_lighting_overlay(renderer, layout, lights, ambient, &lit_area);
         }
     }
+}
+
+/// An outdoor area on an outdoor map: drawn as the ground itself, not as a floor.
+fn is_open_ground(rl: &RoomLayout, graph: &DungeonGraph, theme: &Theme) -> bool {
+    theme.ground.is_outdoor()
+        && graph.room_by_id(&rl.room_id).is_some_and(|r| r.environment == RoomEnvironment::Outdoor)
+}
+
+/// A track's colour, for Path connections: a light grey against the white ground.
+const PATH_COLOR: [u8; 4] = [228, 226, 220, 255];
+
+/// Whether a corridor belongs to a Path connection (drawn as a track, without walls).
+fn is_path(corridor: &CorridorSegment, graph: &DungeonGraph) -> bool {
+    graph.connection_by_id(&corridor.connection_id)
+        .is_some_and(|e| e.connection.connection_type == ConnectionType::Path)
 }
 
 /// Faint silhouettes of the rooms on floors below `floor` that `show_room` accepts, and
@@ -288,7 +329,63 @@ pub fn render_background(
     let w = (ext_max_x - ext_min_x + margin * 2) as f32 * GRID_PX;
     let h = (ext_max_y - ext_min_y + margin * 2) as f32 * GRID_PX;
 
-    renderer.fill_rect(x0, y0, w, h, theme.bg_color);
+    renderer.fill_rect(x0, y0, w, h, theme.background());
+    render_ground_texture(renderer, theme.ground, (ext_min_x - margin, ext_min_y - margin, ext_max_x + margin, ext_max_y + margin), theme.wall_color);
+}
+
+/// Sparse ink marks over an outdoor map's open ground, so it reads as grass, earth
+/// or sand while staying black and white. Rooms drawn on top cover it.
+fn render_ground_texture(renderer: &mut dyn MapRenderer, ground: Ground, (gx0, gy0, gx1, gy1): (i32, i32, i32, i32), ink: [u8; 4]) {
+    if matches!(ground, Ground::Rock | Ground::Snow) {
+        return;
+    }
+    let ink = [ink[0], ink[1], ink[2], 95];
+    for gy in gy0..gy1 {
+        for gx in gx0..gx1 {
+            // A stable scatter: one mark in roughly one cell of four
+            let h = (gx.wrapping_mul(73_856_093) ^ gy.wrapping_mul(19_349_663)) as u32;
+            if h % 4 != 0 {
+                continue;
+            }
+            let fx = (h >> 4) % 100;
+            let fy = (h >> 12) % 100;
+            let px = (gx as f32 + 0.15 + fx as f32 / 140.0) * GRID_PX;
+            let py = (gy as f32 + 0.15 + fy as f32 / 140.0) * GRID_PX;
+            match ground {
+                Ground::Rock | Ground::Snow => {}
+                Ground::Grass => {
+                    renderer.draw_line(px, py, px - 1.8, py - 3.2, 0.6, ink);
+                    renderer.draw_line(px, py, px + 0.3, py - 3.8, 0.6, ink);
+                    renderer.draw_line(px, py, px + 2.0, py - 3.0, 0.6, ink);
+                }
+                Ground::Earth => {
+                    renderer.fill_circle(px, py, 0.7, ink);
+                    renderer.fill_circle(px + 3.0, py + 1.5, 0.5, ink);
+                }
+                Ground::Sand => {
+                    renderer.fill_circle(px, py, 0.4, ink);
+                    renderer.fill_circle(px + 2.5, py - 1.0, 0.4, ink);
+                    renderer.fill_circle(px + 1.0, py + 2.2, 0.4, ink);
+                }
+            }
+        }
+    }
+}
+
+/// A grid over the open ground of an outdoor map, across the same area as the background.
+fn render_ground_grid(renderer: &mut dyn MapRenderer, layout: &SpatialLayout) {
+    let (ext_min_x, ext_min_y, ext_max_x, ext_max_y) = layout.extents();
+    let margin = 2;
+    let (gx0, gy0, gx1, gy1) = (ext_min_x - margin, ext_min_y - margin, ext_max_x + margin, ext_max_y + margin);
+    let color = [60, 70, 50, 70];
+    for gx in gx0..=gx1 {
+        let x = gx as f32 * GRID_PX;
+        renderer.draw_line(x, gy0 as f32 * GRID_PX, x, gy1 as f32 * GRID_PX, 0.5, color);
+    }
+    for gy in gy0..=gy1 {
+        let y = gy as f32 * GRID_PX;
+        renderer.draw_line(gx0 as f32 * GRID_PX, y, gx1 as f32 * GRID_PX, y, 0.5, color);
+    }
 }
 
 pub fn render_exterior_shading(
@@ -298,7 +395,8 @@ pub fn render_exterior_shading(
     theme: &Theme,
     contour_segments: &[(f32, f32, f32, f32)],
 ) {
-    if theme.exterior_shading {
+    // Open ground has no rock to shade
+    if theme.exterior_shading && !theme.ground.is_outdoor() {
         let params = ShadingParams {
             radius: theme.shading_radius,
             style: theme.shading_style,
@@ -313,6 +411,8 @@ pub fn render_exterior_shading(
 pub fn room_floor_color(room: Option<&Room>, theme: &Theme) -> [u8; 4] {
     match room.map(|r| r.environment).unwrap_or_default() {
         RoomEnvironment::Indoor => theme.floor_color,
+        // On open ground an outdoor area is that ground (its edges show as fences etc.)
+        RoomEnvironment::Outdoor if theme.ground.is_outdoor() => theme.floor_color,
         RoomEnvironment::Outdoor => {
             // Tint toward a warm sandy/earthy tone
             let [r, g, b, a] = theme.floor_color;
@@ -346,7 +446,12 @@ pub fn render_room_floor(
     let room = graph.room_by_id(&rl.room_id);
     let mut color = room_floor_color(room, theme);
 
-    // Container rooms: tint floor with the containment group's color
+    // Container rooms: tint floor with the containment group's color (not an area of
+    // open ground, which stays the plain paper of the ground around it)
+    if is_open_ground(rl, graph, theme) {
+        // The ground (and its texture) is already drawn beneath: an area of it adds nothing
+        return;
+    }
     if let Some(group) = graph.containment_group(&rl.room_id) {
         let [gr, gg, gb, _ga] = group.color;
         let [fr, fg, fb, fa] = color;
@@ -473,7 +578,7 @@ pub fn render_corridor_chamfers(
                 // Draw a filled circle of background color at the outside corner,
                 // then redraw a quarter-circle of floor color for the inner curve.
                 // Simpler: fill bg circle to "bite" the corner, the inner edge creates the round.
-                renderer.fill_circle(ocx, ocy, chamfer_r, theme.bg_color);
+                renderer.fill_circle(ocx, ocy, chamfer_r, theme.background());
             }
             ChamferStyle::Angled => {
                 // Draw a triangle of background color to cut the corner at 45°.
@@ -508,7 +613,7 @@ pub fn render_corridor_chamfers(
                     let y1 = ocy + (edge1_y - ocy) * t;
                     let x2 = ocx + (edge2_x - ocx) * t;
                     let y2 = ocy + (edge2_y - ocy) * t;
-                    renderer.draw_line(x1, y1, x2, y2, 1.0, theme.bg_color);
+                    renderer.draw_line(x1, y1, x2, y2, 1.0, theme.background());
                 }
             }
         }
@@ -607,6 +712,100 @@ fn draw_wall_clipped(
     }
 }
 
+/// Draw one side of a room in its boundary's style (in pixels), minus the parts hidden
+/// by overlapping rooms. Full walls are the plain wall line.
+fn draw_boundary_clipped(
+    renderer: &mut dyn MapRenderer,
+    hidden_by: &[overlap::Interior<'_>],
+    (x1, y1, x2, y2): (f32, f32, f32, f32),
+    kind: WallKind,
+    theme: &Theme,
+) {
+    // Outdoors an open side still marks where the area ends, faintly
+    if kind == WallKind::Open && !theme.ground.is_outdoor() {
+        return;
+    }
+    if hidden_by.is_empty() {
+        draw_boundary(renderer, (x1, y1, x2, y2), kind, theme);
+        return;
+    }
+    let g = GRID_PX;
+    for ((ax, ay), (bx, by)) in overlap::visible_parts((x1 / g, y1 / g), (x2 / g, y2 / g), hidden_by) {
+        draw_boundary(renderer, (ax * g, ay * g, bx * g, by * g), kind, theme);
+    }
+}
+
+/// Points every `step` pixels along a segment, starting half a step in.
+fn points_along((x1, y1, x2, y2): (f32, f32, f32, f32), step: f32) -> impl Iterator<Item = (f32, f32)> {
+    let len = (x2 - x1).hypot(y2 - y1);
+    let n = (len / step).floor().max(1.0) as usize;
+    let spacing = len / n as f32;
+    (0..n).map(move |i| {
+        let t = (i as f32 + 0.5) * spacing / len.max(f32::EPSILON);
+        (x1 + (x2 - x1) * t, y1 + (y2 - y1) * t)
+    })
+}
+
+/// One stretch of boundary in its kind's style (pixels).
+pub fn draw_boundary(renderer: &mut dyn MapRenderer, seg: (f32, f32, f32, f32), kind: WallKind, theme: &Theme) {
+    let (x1, y1, x2, y2) = seg;
+    match kind {
+        WallKind::Open => {
+            // Dotted: the edge of an open area outdoors
+            let ink = [theme.wall_color[0], theme.wall_color[1], theme.wall_color[2], 110];
+            for (px, py) in points_along(seg, GRID_PX / 4.0) {
+                renderer.fill_circle(px, py, 0.8, ink);
+            }
+        }
+        WallKind::Wall => renderer.draw_line(x1, y1, x2, y2, 2.0, theme.wall_color),
+        WallKind::Fence => {
+            // A rail with a post every square
+            renderer.draw_line(x1, y1, x2, y2, 1.0, theme.wall_color);
+            for (px, py) in points_along(seg, GRID_PX) {
+                renderer.fill_rect(px - 1.8, py - 1.8, 3.6, 3.6, theme.wall_color);
+            }
+        }
+        WallKind::StoneWall => {
+            // Two faces with stones laid between them
+            let len = (x2 - x1).hypot(y2 - y1).max(f32::EPSILON);
+            let (nx, ny) = (-(y2 - y1) / len * 2.4, (x2 - x1) / len * 2.4);
+            renderer.draw_line(x1 + nx, y1 + ny, x2 + nx, y2 + ny, 0.9, theme.wall_color);
+            renderer.draw_line(x1 - nx, y1 - ny, x2 - nx, y2 - ny, 0.9, theme.wall_color);
+            for (i, (px, py)) in points_along(seg, GRID_PX / 3.0).enumerate() {
+                let r = if i % 2 == 0 { 1.6 } else { 1.2 };
+                renderer.stroke_circle(px, py, r, 0.6, theme.wall_color);
+            }
+        }
+        WallKind::Hedge => {
+            // Scalloped foliage: a pale green band, its two edges inked as rows of
+            // little arcs so it reads as one bushy mass
+            let len = (x2 - x1).hypot(y2 - y1).max(f32::EPSILON);
+            let (tx, ty) = ((x2 - x1) / len, (y2 - y1) / len);
+            let (nx, ny) = (-ty, tx);
+            let r = 4.5;
+            renderer.draw_line(x1, y1, x2, y2, r * 2.4, FOLIAGE_WASH);
+            for (px, py) in points_along(seg, r * 1.7) {
+                for side in [1.0f32, -1.0] {
+                    // A half circle bulging outward from the band's edge
+                    let (cx, cy) = (px + nx * side * r * 0.5, py + ny * side * r * 0.5);
+                    let pts: Vec<(f32, f32)> = (0..=6).map(|k| {
+                        let a = std::f32::consts::PI * k as f32 / 6.0;
+                        let (along, out) = (-a.cos() * r * 0.8, a.sin() * r * 0.8 * side);
+                        (cx + tx * along + nx * out, cy + ty * along + ny * out)
+                    }).collect();
+                    for w in pts.windows(2) {
+                        renderer.draw_line(w[0].0, w[0].1, w[1].0, w[1].1, 0.8, theme.wall_color);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The one colour boundaries and ground cover use: a pale wash for foliage, matching
+/// the green of the tree and bush decor.
+const FOLIAGE_WASH: [u8; 4] = [120, 175, 110, 120];
+
 /// Draw a cave's baked contour segments, minus the parts hidden by overlapping rooms.
 pub fn render_cave_contours(
     renderer: &mut dyn MapRenderer,
@@ -684,13 +883,12 @@ fn render_rotated_room_walls(
         // Generated caves draw their (already turned) contours; this is the outline
         // before generation
         RoomShape::Cave | RoomShape::Rectangle => {
-            let open = room.map(|r| r.open_walls).unwrap_or_default();
+            let sides = room.map(|r| r.walls).unwrap_or_default();
             let c = rl.corners();
             // Edges in local order: north (top), east, south, west
-            for (i, is_open) in [open.north, open.east, open.south, open.west].into_iter().enumerate() {
-                if !is_open {
-                    wall(renderer, c[i], c[(i + 1) % 4]);
-                }
+            for (i, kind) in [sides.north, sides.east, sides.south, sides.west].into_iter().enumerate() {
+                let (a, b) = (c[i], c[(i + 1) % 4]);
+                draw_boundary_clipped(renderer, &hidden_by, (a.0 * g, a.1 * g, b.0 * g, b.1 * g), kind, theme);
             }
         }
     }
@@ -714,7 +912,7 @@ pub fn render_room_walls(
     let rh = rl.height as f32 * GRID_PX;
     let room = graph.room_by_id(&rl.room_id);
     let shape = room.map(|r| r.shape).unwrap_or_default();
-    let open = room.map(|r| r.open_walls).unwrap_or_default();
+    let sides = room.map(|r| r.walls).unwrap_or_default();
 
     // Compute which walls are suppressed by flush connections
     let flush = flush_walls_with_layout(&rl.room_id, rl, graph, layout);
@@ -788,8 +986,11 @@ pub fn render_room_walls(
             // Compute wall opening gaps (corridor widths at boundary crossings)
             let openings = &rl.wall_openings;
 
-            // Helper: draw a wall line with gaps cut for wall openings
-            let draw_wall_with_gaps = |renderer: &mut dyn MapRenderer, x1: f32, y1: f32, x2: f32, y2: f32, is_horizontal: bool| {
+            // Helper: draw one side in its boundary style, with gaps cut for wall openings
+            let draw_wall_with_gaps = |renderer: &mut dyn MapRenderer, x1: f32, y1: f32, x2: f32, y2: f32, is_horizontal: bool, kind: WallKind| {
+                let wall = |renderer: &mut dyn MapRenderer, x1: f32, y1: f32, x2: f32, y2: f32| {
+                    draw_boundary_clipped(renderer, &hidden_by, (x1, y1, x2, y2), kind, theme);
+                };
                 if openings.is_empty() {
                     wall(renderer, x1, y1, x2, y2);
                     return;
@@ -854,24 +1055,29 @@ pub fn render_room_walls(
                 }
             };
 
-            // North wall
-            if !open.north && !flush.north {
-                draw_wall_with_gaps(renderer, rx, ry, rx + rw, ry, true);
+            if !flush.north {
+                draw_wall_with_gaps(renderer, rx, ry, rx + rw, ry, true, sides.north);
             }
-            // South wall
-            if !open.south && !flush.south {
-                draw_wall_with_gaps(renderer, rx, ry + rh, rx + rw, ry + rh, true);
+            if !flush.south {
+                draw_wall_with_gaps(renderer, rx, ry + rh, rx + rw, ry + rh, true, sides.south);
             }
-            // West wall
-            if !open.west && !flush.west {
-                draw_wall_with_gaps(renderer, rx, ry, rx, ry + rh, false);
+            if !flush.west {
+                draw_wall_with_gaps(renderer, rx, ry, rx, ry + rh, false, sides.west);
             }
-            // East wall
-            if !open.east && !flush.east {
-                draw_wall_with_gaps(renderer, rx + rw, ry, rx + rw, ry + rh, false);
+            if !flush.east {
+                draw_wall_with_gaps(renderer, rx + rw, ry, rx + rw, ry + rh, false, sides.east);
             }
         }
     }
+}
+
+/// Sides of a room left without a wall because a flush or merge neighbour shares them.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FlushSides {
+    pub north: bool,
+    pub south: bool,
+    pub east: bool,
+    pub west: bool,
 }
 
 /// Determine which walls of a room are suppressed by flush or merge connections.
@@ -881,8 +1087,8 @@ pub fn flush_walls_with_layout(
     rl: &RoomLayout,
     graph: &DungeonGraph,
     layout: &SpatialLayout,
-) -> OpenWalls {
-    let mut walls = OpenWalls::default();
+) -> FlushSides {
+    let mut walls = FlushSides::default();
     for edge in &graph.connections {
         let is_flush = edge.connection.connection_type == ConnectionType::Flush;
         let is_merge = edge.connection.connection_type == ConnectionType::Merge;
@@ -1096,6 +1302,15 @@ pub fn render_elevation_sections(
         let sw = section.width * GRID_PX;
         let sh = section.length * GRID_PX;
 
+        // Ground cover and natural outlines are drawn as areas, not boxes with ticks
+        if section.organic || section.elevation.is_terrain() {
+            let pts: Vec<(f32, f32)> = section.outline().iter()
+                .map(|&(x, y)| (room_px_x + x * GRID_PX, room_px_y + y * GRID_PX))
+                .collect();
+            draw_section_area(renderer, &pts, section, theme);
+            continue;
+        }
+
         if section.opaque {
             renderer.fill_rect(sx, sy, sw, sh, theme.floor_color);
         }
@@ -1256,6 +1471,69 @@ pub fn render_elevation_sections(
                     }
                 }
             }
+            // Drawn as areas above
+            ElevationType::Rough | ElevationType::TallGrass | ElevationType::Thicket => {}
+        }
+    }
+}
+
+/// A section drawn as an area within its outline (pixels): organic shapes of any kind,
+/// and the ground-cover kinds, which get a scattered texture.
+fn draw_section_area(renderer: &mut dyn MapRenderer, pts: &[(f32, f32)], section: &ElevationSection, theme: &Theme) {
+    let wall = theme.wall_color;
+    let tint = |a: u8| [wall[0], wall[1], wall[2], a];
+    // Plain paper first, so the ground's texture doesn't show through a translucent fill
+    renderer.fill_polygon(pts, theme.floor_color);
+    let (fill, edge) = match section.elevation {
+        ElevationType::Raised => (tint(25), wall),
+        ElevationType::Lowered => (tint(40), wall),
+        ElevationType::Steps | ElevationType::Slope => (tint(20), wall),
+        ElevationType::BottomlessPit => ([20, 20, 20, 210], wall),
+        ElevationType::Hole => (tint(90), wall),
+        ElevationType::Water => ([80, 140, 210, 110], [50, 100, 170, 220]),
+        ElevationType::Rough => ([0, 0, 0, 0], tint(110)),
+        ElevationType::TallGrass => ([0, 0, 0, 0], tint(110)),
+        ElevationType::Thicket => (FOLIAGE_WASH, tint(200)),
+    };
+    renderer.fill_polygon(pts, fill);
+    for i in 0..pts.len() {
+        let (a, b) = (pts[i], pts[(i + 1) % pts.len()]);
+        renderer.draw_line(a.0, a.1, b.0, b.1, 1.2, edge);
+    }
+    if !section.elevation.is_terrain() {
+        return;
+    }
+    // Scatter marks on a jittered grid, kept inside the outline
+    let (min_x, max_x) = pts.iter().fold((f32::MAX, f32::MIN), |(lo, hi), p| (lo.min(p.0), hi.max(p.0)));
+    let (min_y, max_y) = pts.iter().fold((f32::MAX, f32::MIN), |(lo, hi), p| (lo.min(p.1), hi.max(p.1)));
+    let step = GRID_PX * if section.elevation == ElevationType::TallGrass { 0.6 } else { 0.45 };
+    let jitter = |i: i32, j: i32, salt: i32| {
+        let h = (i.wrapping_mul(73_856_093) ^ j.wrapping_mul(19_349_663) ^ salt.wrapping_mul(83_492_791)) as u32;
+        ((h % 1000) as f32 / 1000.0 - 0.5) * step * 0.8
+    };
+    let (cols, rows) = (((max_x - min_x) / step).ceil() as i32, ((max_y - min_y) / step).ceil() as i32);
+    for j in 0..rows {
+        for i in 0..cols {
+            let px = min_x + (i as f32 + 0.5) * step + jitter(i, j, 1);
+            let py = min_y + (j as f32 + 0.5) * step + jitter(i, j, 2);
+            if !geometry::point_in_polygon((px, py), pts) {
+                continue;
+            }
+            match section.elevation {
+                ElevationType::Rough => {
+                    if (i + j) % 3 == 0 {
+                        renderer.draw_line(px - 2.0, py, px + 2.0, py - 0.6, 0.8, tint(180));
+                    } else {
+                        renderer.fill_circle(px, py, 1.1, tint(180));
+                    }
+                }
+                ElevationType::TallGrass => {
+                    renderer.draw_line(px, py, px - 2.5, py - 4.0, 0.7, tint(150));
+                    renderer.draw_line(px, py, px, py - 5.0, 0.7, tint(150));
+                    renderer.draw_line(px, py, px + 2.5, py - 4.0, 0.7, tint(150));
+                }
+                _ => renderer.stroke_circle(px, py, 3.2, 0.8, tint(200)),
+            }
         }
     }
 }
@@ -1270,7 +1548,7 @@ fn draw_door(renderer: &mut dyn MapRenderer, shape: &geometry::DoorShape, kind: 
         geometry::DoorShape::Rect(x0, y0, x1, y1) => {
             let (px, py, pw, ph) = (x0 * g, y0 * g, (x1 - x0) * g, (y1 - y0) * g);
             match kind {
-                ConnectionType::Open | ConnectionType::Flush | ConnectionType::Merge => {}
+                ConnectionType::Open | ConnectionType::Flush | ConnectionType::Merge | ConnectionType::Path => {}
                 ConnectionType::Door | ConnectionType::OneWay | ConnectionType::Locked => {
                     renderer.fill_rect(px, py, pw, ph, white);
                     renderer.stroke_rect(px, py, pw, ph, 1.0, theme.wall_color);
@@ -1285,7 +1563,7 @@ fn draw_door(renderer: &mut dyn MapRenderer, shape: &geometry::DoorShape, kind: 
         geometry::DoorShape::Quad(quad, _) => {
             let px: Vec<(f32, f32)> = quad.iter().map(|&(x, y)| (x * g, y * g)).collect();
             match kind {
-                ConnectionType::Open | ConnectionType::Flush | ConnectionType::Merge => {}
+                ConnectionType::Open | ConnectionType::Flush | ConnectionType::Merge | ConnectionType::Path => {}
                 ConnectionType::Door | ConnectionType::OneWay | ConnectionType::Locked => {
                     renderer.fill_polygon(&px, white);
                     for i in 0..4 {
@@ -1372,6 +1650,27 @@ pub enum Coverage {
 
 pub fn build_floor_set(layout: &SpatialLayout, graph: &DungeonGraph) -> CellSet {
     rasterize_floor(layout, graph, Coverage::Center)
+}
+
+/// Cells creatures stand on and light and sight cross: the floor, and on an outdoor
+/// map the open ground around it too (out to the background's margin).
+pub fn open_cells(layout: &SpatialLayout, graph: &DungeonGraph, theme: &Theme) -> CellSet {
+    let mut cells = build_floor_set(layout, graph);
+    add_open_ground(&mut cells, layout, theme);
+    cells
+}
+
+/// On an outdoor map, add the open ground around the rooms to `cells`.
+fn add_open_ground(cells: &mut CellSet, layout: &SpatialLayout, theme: &Theme) {
+    if !theme.ground.is_outdoor() || layout.rooms.is_empty() {
+        return;
+    }
+    let (x0, y0, x1, y1) = layout.extents();
+    for y in (y0 - 2)..(y1 + 2) {
+        for x in (x0 - 2)..(x1 + 2) {
+            cells.insert((x, y));
+        }
+    }
 }
 
 pub fn rasterize_floor(layout: &SpatialLayout, graph: &DungeonGraph, coverage: Coverage) -> CellSet {

@@ -11,7 +11,7 @@ use super::{encounters, layout, lighting, McpCall, ToolOutput};
 use crate::app::Tab;
 use crate::model::{
     CaveAlgorithm, Campaign, Connection, ConnectionType, CorridorAngle, CoverKind, OverlapWalls, DecorLight, DecorLightSetting, DecorType, Dungeon,
-    FloorAssignment, Room, RoomDecor, RoomEnvironment, RoomShape, RoomTag, SizeHint,
+    FloorAssignment, Room, RoomDecor, RoomEnvironment, RoomShape, RoomTag, SizeHint, WallKind, Walls,
 };
 use crate::notes::{NoteBind, NoteVault};
 use crate::ui::decor_view::DecorViewState;
@@ -94,16 +94,18 @@ pub fn definitions() -> Vec<Value> {
         "description": "Floor number, or [lowest, highest] for a room spanning floors",
         "oneOf": [{ "type": "integer" }, { "type": "array", "items": { "type": "integer" }, "minItems": 2, "maxItems": 2 }],
     });
+    let wall_kind = json!({ "type": "string", "enum": names(&WallKind::ALL) });
     let room_fields = json!({
         "size_hint": { "type": "string", "enum": names(&SizeHint::ALL), "description": "Small 3x3, Medium 4x4, Large 6x6, Huge 8x8 squares. Clears width/height unless they're given too." },
-        "width": { "type": "integer", "minimum": 1, "description": "Width in grid squares (5 ft each)" },
-        "height": { "type": "integer", "minimum": 1, "description": "Height in grid squares (5 ft each)" },
+        "width": { "type": "integer", "minimum": 1, "description": "Width in grid squares" },
+        "height": { "type": "integer", "minimum": 1, "description": "Height in grid squares" },
+        "detail_map": { "type": ["string", "null"], "description": "Another map that shows this area in detail (its name); null to unlink" },
         "shape": { "type": "string", "enum": names(&RoomShape::ALL) },
         "floor": floor,
         "tags": { "type": "array", "items": { "type": "string" }, "description": format!("Replaces the room's tags. Known: {}; anything else is a custom tag.", names(&TAGS).join(", ")) },
         "environment": { "type": "string", "enum": names(&RoomEnvironment::ALL) },
-        "open_walls": { "type": "object", "description": "Rectangular rooms: walls left open (no wall drawn)", "properties": {
-            "north": { "type": "boolean" }, "south": { "type": "boolean" }, "east": { "type": "boolean" }, "west": { "type": "boolean" } } },
+"walls": { "type": "object", "description": "Rectangular rooms: what bounds each side. Wall and Hedge block sight; Fence and StoneWall (drystone) are seen over and give half cover; Open is nothing", "properties": {
+            "north": wall_kind.clone(), "south": wall_kind.clone(), "east": wall_kind.clone(), "west": wall_kind.clone(), "all": wall_kind.clone() } },
         "allow_rotation": { "type": "boolean", "description": "Let the layout turn a non-square room 90° to fit" },
         "cave": { "type": "object", "description": "Cave rooms: how the cave is generated. Any change regenerates it.", "properties": {
             "algorithm": { "type": "string", "enum": names(&CaveAlgorithm::ALL) },
@@ -217,6 +219,12 @@ pub fn definitions() -> Vec<Value> {
             "Add a new, empty map to the campaign and open it. Not while the user is presenting.",
             json!({ "name": { "type": "string" } }), &["name"]),
         tool("rename_map", "Rename the open map.", json!({ "name": { "type": "string" } }), &["name"]),
+        tool("set_map",
+            "The open map's ground and scale. Ground other than Rock makes it an outdoor map: open ground between the areas, new areas start Outdoor with open sides. feet_per_square is 5 for a battle map, more (e.g. 30 or 60) for an overview.",
+            json!({
+                "ground": { "type": "string", "enum": names(&crate::model::Ground::ALL) },
+                "feet_per_square": { "type": "integer", "minimum": 1 },
+            }), &[]),
         tool("rename_campaign", "Rename the campaign.", json!({ "name": { "type": "string" } }), &["name"]),
         tool("remove_map",
             "Delete the open map from the campaign (there must be another). Name it to confirm. Only when the user asks.",
@@ -320,6 +328,7 @@ fn describe(ctx: &ToolCtx, tool: &str, args: &Value, result: &Value) -> Option<S
         "delete_encounter" => format!("removed encounter {}", s(&result["deleted"])),
         "focus_room" => format!("selected {}", s(&result["selected"])),
         "rename_map" => format!("renamed the map to {}", s(&result["to"])),
+        "set_map" => "changed the map's ground and scale".into(),
         "rename_campaign" => format!("renamed the campaign to {}", s(&result["to"])),
         "delete_note" => format!("deleted note {}", s(&result["deleted"])),
         "move_room" => format!("moved {}", s(&result["room"])),
@@ -391,6 +400,7 @@ fn run(ctx: &mut ToolCtx, tool: &str, args: &Value) -> Result<Value, String> {
         "create_map" => create_map(ctx, args),
         "save" => save(ctx),
         "rename_map" => rename_map(ctx, args),
+        "set_map" => set_map(ctx, args),
         "rename_campaign" => rename_campaign(ctx, args),
         "remove_map" => remove_map(ctx, args),
         "delete_note" => delete_note(ctx, args),
@@ -600,6 +610,8 @@ fn overview(ctx: &ToolCtx) -> Value {
             "open": i == active,
         })).collect::<Vec<_>>(),
         "map": d.name,
+        "ground": format!("{:?}", d.theme.ground),
+        "feet_per_square": d.feet_per_square,
         "view": view_name(ctx),
         "floors": floors_in_use(d),
         "current_floor": *ctx.current_floor,
@@ -678,8 +690,11 @@ fn room_detail(ctx: &ToolCtx, id: &str) -> Value {
     let Some(room) = d.graph.room_by_id(id) else { return Value::Null };
     let mut v = room_summary(d, room);
     v["size_hint"] = json!(format!("{:?}", room.size_hint));
+    if let Some(map_id) = &room.links_to_map {
+        v["detail_map"] = json!(ctx.campaign.maps.iter().find(|m| m.id == *map_id).map(|m| m.name.clone()));
+    }
     v["environment"] = json!(format!("{:?}", room.environment));
-    v["open_walls"] = serde_json::to_value(room.open_walls).unwrap_or_default();
+    v["walls"] = serde_json::to_value(room.walls).unwrap_or_default();
     v["allow_rotation"] = json!(room.allow_rotation);
     if let Some(cave) = &room.cave_data {
         v["cave"] = json!({
@@ -741,11 +756,14 @@ fn apply_room_fields(room: &mut Room, args: &Value) -> Result<(), String> {
     if let Some(s) = opt_str(args, "environment") {
         room.environment = parse_enum(&RoomEnvironment::ALL, s, "environment")?;
     }
-    if let Some(walls) = args.get("open_walls").filter(|v| !v.is_null()) {
-        let w = &mut room.open_walls;
+    if let Some(walls) = args.get("walls").filter(|v| !v.is_null()) {
+        if let Some(all) = opt_str(walls, "all") {
+            room.walls = Walls::all(parse_enum(&WallKind::ALL, all, "wall kind")?);
+        }
+        let w = &mut room.walls;
         for (key, field) in [("north", &mut w.north), ("south", &mut w.south), ("east", &mut w.east), ("west", &mut w.west)] {
-            if let Some(b) = opt_bool(walls, key)? {
-                *field = b;
+            if let Some(k) = opt_str(walls, key) {
+                *field = parse_enum(&WallKind::ALL, k, "wall kind")?;
             }
         }
     }
@@ -820,7 +838,10 @@ fn add_room(ctx: &mut ToolCtx, args: &Value) -> Result<Value, String> {
         .transpose()?
         .unwrap_or(ConnectionType::Door);
 
-    let mut room = Room::new(label.to_string());
+    let mut room = ctx.dungeon.new_room(label.to_string());
+    if let Some(link) = detail_map_arg(ctx, args)? {
+        room.links_to_map = link;
+    }
     room.floor = match (&neighbour, *ctx.current_floor) {
         (Some(n), _) => FloorAssignment::Single(ctx.dungeon.graph.room_by_id(n).map_or(0, |r| r.floor.range().0)),
         (None, Some(f)) => FloorAssignment::Single(f),
@@ -841,11 +862,31 @@ fn add_room(ctx: &mut ToolCtx, args: &Value) -> Result<Value, String> {
     Ok(json!({ "room": room_summary(ctx.dungeon, ctx.dungeon.graph.room_by_id(&id).unwrap()), "connection": connection }))
 }
 
+/// The `detail_map` argument: `None` if absent, `Some(None)` to unlink, else the
+/// linked map's id (another map of the campaign, by name).
+fn detail_map_arg(ctx: &ToolCtx, args: &Value) -> Result<Option<Option<String>>, String> {
+    match args.get("detail_map") {
+        None => Ok(None),
+        Some(Value::Null) => Ok(Some(None)),
+        Some(v) => {
+            let name = v.as_str().ok_or("'detail_map' must be a map's name")?;
+            let active = ctx.campaign.active_map;
+            ctx.campaign.maps.iter().enumerate()
+                .find(|(i, m)| *i != active && m.name.eq_ignore_ascii_case(name.trim()))
+                .map(|(_, m)| Some(Some(m.id.clone())))
+                .ok_or_else(|| format!("No other map called '{}'. get_overview lists the maps.", name))
+        }
+    }
+}
+
 fn update_room(ctx: &mut ToolCtx, args: &Value) -> Result<Value, String> {
     let id = resolve_room(ctx.dungeon, req_str(args, "room")?)?;
     // Check everything parses before touching the room.
     let mut room = ctx.dungeon.graph.room_by_id(&id).cloned().ok_or("Room vanished")?;
     apply_room_fields(&mut room, args)?;
+    if let Some(link) = detail_map_arg(ctx, args)? {
+        room.links_to_map = link;
+    }
     if let Some(label) = opt_str(args, "label").map(str::trim).filter(|l| !l.is_empty()) {
         room.label = label.to_string();
     }
@@ -1247,6 +1288,16 @@ fn rename_map(ctx: &mut ToolCtx, args: &Value) -> Result<Value, String> {
     Ok(json!({ "renamed": old, "to": name }))
 }
 
+fn set_map(ctx: &mut ToolCtx, args: &Value) -> Result<Value, String> {
+    if let Some(g) = opt_str(args, "ground") {
+        ctx.dungeon.theme.ground = parse_enum(&crate::model::Ground::ALL, g, "ground")?;
+    }
+    if let Some(v) = args.get("feet_per_square").filter(|v| !v.is_null()) {
+        ctx.dungeon.feet_per_square = v.as_u64().filter(|n| (1..=5280).contains(n)).ok_or("'feet_per_square' must be 1 to 5280")? as u32;
+    }
+    Ok(json!({ "ground": format!("{:?}", ctx.dungeon.theme.ground), "feet_per_square": ctx.dungeon.feet_per_square }))
+}
+
 fn rename_campaign(ctx: &mut ToolCtx, args: &Value) -> Result<Value, String> {
     let name = req_str(args, "name")?.trim();
     if name.is_empty() {
@@ -1364,7 +1415,7 @@ fn render_job(ctx: &ToolCtx, args: &Value) -> Result<RenderJob, String> {
         });
     }
     let players = opt_bool(args, "players")?.unwrap_or(false);
-    let (graph, theme) = (d.graph.clone(), d.theme.clone());
+    let (graph, theme, feet_per_square) = (d.graph.clone(), d.theme.clone(), d.feet_per_square);
     Ok(Box::new(move || {
         use crate::util::GRID_PX;
         let (min_x, min_y, max_x, max_y) = layout.extents();
@@ -1387,9 +1438,10 @@ fn render_job(ctx: &ToolCtx, args: &Value) -> Result<RenderJob, String> {
         renderer.image.write_to(&mut png, image::ImageFormat::Png).map_err(|e| e.to_string())?;
         let (ox, oy) = ((min_x - margin) as f32, (min_y - margin) as f32);
         let mut caption = format!(
-            "{}. Each grid square (5 ft) is {} px; the top-left pixel is grid ({}, {}).\n\
+            "{}. Each grid square ({} ft) is {} px; the top-left pixel is grid ({}, {}).\n\
              The image has no text, so here is where each room is (bounding box):",
             floor.map_or("All floors".to_string(), |f| format!("Floor {}", f)),
+            feet_per_square,
             px,
             ox,
             oy,
@@ -1754,11 +1806,11 @@ mod tests {
         f.call("add_room", json!({ "label": "Hall" })).unwrap();
         lay_out(&mut f);
         f.call("update_room", json!({ "room": "Hall", "width": 7, "height": 3, "allow_rotation": true,
-            "open_walls": { "north": true } })).unwrap();
+            "walls": { "all": "Fence", "north": "Open" } })).unwrap();
         let rl = f.dungeon.layout.as_ref().unwrap().room_by_id(&f.dungeon.graph.rooms[0].id).unwrap();
         assert_eq!((rl.width, rl.height), (7, 3));
         let room = &f.dungeon.graph.rooms[0];
-        assert!(room.allow_rotation && room.open_walls.north && !room.open_walls.south);
+        assert!(room.allow_rotation && room.walls.north == WallKind::Open && room.walls.south == WallKind::Fence);
     }
 
     #[test]
@@ -1966,6 +2018,38 @@ mod tests {
         f.call("delete_note", json!({ "about": "room", "name": "Vault" })).unwrap();
         assert_eq!(f.call("read_note", json!({ "about": "room", "name": "Vault" })).unwrap()["exists"], false);
         assert!(f.dungeon.graph.rooms[0].note_excerpt.is_empty());
+    }
+
+    #[test]
+    fn outdoor_maps_through_the_tools() {
+        let mut f = Fixture::new();
+        f.campaign.maps = vec![Dungeon::new("Farm".into()), Dungeon::new("Pens".into())];
+        let m = f.call("set_map", json!({ "ground": "grass", "feet_per_square": 30 })).unwrap();
+        assert_eq!((m["ground"].as_str(), m["feet_per_square"].as_u64()), (Some("Grass"), Some(30)));
+
+        // New areas on open ground start outdoor and unwalled
+        f.call("add_room", json!({ "label": "Pasture", "width": 20, "height": 12 })).unwrap();
+        let pasture = &f.dungeon.graph.rooms[0];
+        assert_eq!((pasture.environment, pasture.walls), (RoomEnvironment::Outdoor, Walls::all(WallKind::Open)));
+        f.call("add_room", json!({ "label": "Fold", "connect_to": "Pasture", "connection_type": "Path",
+            "walls": { "all": "StoneWall" }, "detail_map": "pens" })).unwrap();
+        let fold = &f.dungeon.graph.rooms[1];
+        assert_eq!(fold.walls.east, WallKind::StoneWall);
+        assert_eq!(fold.links_to_map.as_deref(), Some(f.campaign.maps[1].id.as_str()));
+        assert_eq!(f.dungeon.graph.connections[0].connection.connection_type, ConnectionType::Path);
+        assert_eq!(f.call("get_room", json!({ "room": "Fold" })).unwrap()["detail_map"], "Pens");
+        assert!(f.call("update_room", json!({ "room": "Fold", "detail_map": "Nowhere" })).is_err());
+        f.call("update_room", json!({ "room": "Fold", "detail_map": null })).unwrap();
+        assert!(f.dungeon.graph.rooms[1].links_to_map.is_none());
+
+        let sec = f.call("add_section", json!({ "room": "Pasture", "elevation": "Thicket", "organic": true,
+            "x": 2, "y": 2, "width": 5, "length": 4 })).unwrap();
+        assert_eq!(sec["organic"], true);
+
+        lay_out(&mut f);
+        let caption = render(&mut f).ok().unwrap()().unwrap().content[1]["text"].as_str().unwrap().to_string();
+        assert!(caption.contains("(30 ft)"), "{}", caption);
+        assert_eq!(f.call("get_overview", json!({})).unwrap()["feet_per_square"], 30);
     }
 
     #[test]

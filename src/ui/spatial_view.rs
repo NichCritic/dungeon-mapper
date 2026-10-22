@@ -1885,12 +1885,17 @@ fn draw_rooms(
                     ElevationType::BottomlessPit => (160, 0.0),
                     ElevationType::Hole => (90, 0.0),
                     ElevationType::Water => (0, 0.0), // handled separately
+                    ElevationType::Rough | ElevationType::TallGrass | ElevationType::Thicket => (0, 0.0), // tinted below
                 };
                 if section.opaque {
                     painter.rect_filled(sec_rect, 0.0, egui::Color32::from_rgba_unmultiplied(floor_color[0], floor_color[1], floor_color[2], floor_color[3]));
                 }
                 let section_fill = if is_water {
                     egui::Color32::from_rgba_unmultiplied(80, 130, 200, 60)
+                } else if section.elevation == ElevationType::Thicket {
+                    egui::Color32::from_rgba_unmultiplied(120, 175, 110, 120)
+                } else if section.elevation.is_terrain() {
+                    egui::Color32::from_rgba_unmultiplied(60, 60, 60, 25)
                 } else {
                     egui::Color32::from_rgba_unmultiplied(60, 60, 60, fill_alpha)
                 };
@@ -2134,6 +2139,7 @@ fn draw_doors(
 }
 
 pub fn spatial_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut SpatialViewState) {
+    let fps = dungeon.feet_per_square;
     let has_selection = state.selected_room.is_some()
         || state.selected_corridor.is_some()
         || state.selected_group.is_some();
@@ -2277,7 +2283,7 @@ pub fn spatial_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Spa
                         }
                     }
                 }
-                ui.label(format!("{}x{} ft", rl.width * 5, rl.height * 5));
+                ui.label(format!("{}x{} ft", rl.width * fps, rl.height * fps));
                 ui.horizontal(|ui| {
                     ui.label("Rotation:");
                     let before = rl.rotation;
@@ -2521,6 +2527,8 @@ pub fn spatial_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Spa
                             });
                         }
                         ui.checkbox(&mut section.opaque, "Opaque");
+                        ui.checkbox(&mut section.organic, "Natural outline")
+                            .on_hover_text("An irregular shape inside the box: a copse, a bog, a pond");
                     }
                 }
             }

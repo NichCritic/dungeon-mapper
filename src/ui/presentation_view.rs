@@ -89,6 +89,8 @@ fn aoe_sidebar(
     dungeon: &mut Dungeon,
 ) {
     use crate::presentation::aoe::{AoEMarker, AoEShape};
+    // Feet per grid square, at this map's scale
+    let fps = dungeon.feet_per_square as f32;
 
     // Shape type selector
     let shape_idx_id = egui::Id::new("aoe_shape_type");
@@ -152,7 +154,7 @@ fn aoe_sidebar(
             };
             let color_id = egui::Id::new("aoe_color");
             let color: [u8; 4] = ui.ctx().memory(|m| m.data.get_temp(color_id).unwrap_or([255, 60, 60, 100]));
-            let grid = |ft: i32| ft as f32 / 5.0;
+            let grid = |ft: i32| ft as f32 / fps;
             let shape = match shape_idx {
                 0 => AoEShape::Circle { radius: grid(size_ft) },
                 1 => AoEShape::Square { size: grid(size_ft) },
@@ -193,9 +195,9 @@ fn aoe_sidebar(
                     marker.color[0], marker.color[1], marker.color[2], 255,
                 );
                 let label = match &marker.shape {
-                    AoEShape::Circle { radius } => format!("Circle {}ft", (*radius * 5.0) as i32),
-                    AoEShape::Square { size } => format!("Square {}ft", (*size * 5.0) as i32),
-                    AoEShape::Line { length, width } => format!("Line {}x{}ft", (*length * 5.0) as i32, (*width * 5.0) as i32),
+                    AoEShape::Circle { radius } => format!("Circle {}ft", (*radius * fps) as i32),
+                    AoEShape::Square { size } => format!("Square {}ft", (*size * fps) as i32),
+                    AoEShape::Line { length, width } => format!("Line {}x{}ft", (*length * fps) as i32, (*width * fps) as i32),
                 };
                 if is_selected {
                     ui.colored_label(c, format!("> {}", label));
@@ -211,24 +213,24 @@ fn aoe_sidebar(
                     ui.label("  Size:");
                     match &dungeon.aoe_markers[i].shape {
                         AoEShape::Circle { radius } => {
-                            let mut ft = (*radius * 5.0) as i32;
+                            let mut ft = (*radius * fps) as i32;
                             if crate::ui::canvas_common::num_input_i32(ui, &mut ft, 35.0) {
                                 ft = ft.max(5);
-                                dungeon.aoe_markers[i].shape = AoEShape::Circle { radius: ft as f32 / 5.0 };
+                                dungeon.aoe_markers[i].shape = AoEShape::Circle { radius: ft as f32 / fps };
                             }
                             ui.label("ft");
                         }
                         AoEShape::Square { size } => {
-                            let mut ft = (*size * 5.0) as i32;
+                            let mut ft = (*size * fps) as i32;
                             if crate::ui::canvas_common::num_input_i32(ui, &mut ft, 35.0) {
                                 ft = ft.max(5);
-                                dungeon.aoe_markers[i].shape = AoEShape::Square { size: ft as f32 / 5.0 };
+                                dungeon.aoe_markers[i].shape = AoEShape::Square { size: ft as f32 / fps };
                             }
                             ui.label("ft");
                         }
                         AoEShape::Line { length, width } => {
-                            let mut lft = (*length * 5.0) as i32;
-                            let mut wft = (*width * 5.0) as i32;
+                            let mut lft = (*length * fps) as i32;
+                            let mut wft = (*width * fps) as i32;
                             let mut changed = false;
                             if crate::ui::canvas_common::num_input_i32(ui, &mut lft, 30.0) { changed = true; }
                             ui.label("x");
@@ -237,7 +239,7 @@ fn aoe_sidebar(
                             if changed {
                                 lft = lft.max(5);
                                 wft = wft.max(5);
-                                dungeon.aoe_markers[i].shape = AoEShape::Line { length: lft as f32 / 5.0, width: wft as f32 / 5.0 };
+                                dungeon.aoe_markers[i].shape = AoEShape::Line { length: lft as f32 / fps, width: wft as f32 / fps };
                             }
                         }
                     }
@@ -842,7 +844,7 @@ fn distance_checks_window(
                 if enc_room == room_id { return None; }
                 let hops = *distances.get(&enc_room)?;
                 let feet = dungeon.layout.as_ref().and_then(|layout|
-                    crate::presentation::awareness::encounter_distance_feet(&room_id, &enc_room, layout));
+                    crate::presentation::awareness::encounter_distance_feet(&room_id, &enc_room, layout, dungeon.feet_per_square));
                 Some((e, hops, feet))
             })
             .collect();
@@ -1095,7 +1097,7 @@ pub fn presentation_view(
     );
     let rect = response.rect;
 
-    let bg = dungeon.theme.bg_color;
+    let bg = dungeon.theme.background();
     painter.rect_filled(rect, 0.0, egui::Color32::from_rgba_unmultiplied(bg[0], bg[1], bg[2], bg[3]));
 
     handle_pan_zoom(&response, &mut view_state.view);
@@ -2845,7 +2847,7 @@ fn lighting_section(
         let Some(TokenKind::Player(pid)) = &light.carrier else { continue };
         let name = dungeon.party.iter().find(|p| p.id == *pid).map(|p| p.name.as_str()).unwrap_or("?");
         ui.horizontal(|ui| {
-            ui.label(format!("{} carries a light ({} / {} ft)", name, light.radius * 5.0, light.dim_radius() * 5.0));
+            ui.label(format!("{} carries a light ({} / {} ft)", name, light.radius * dungeon.feet_per_square as f32, light.dim_radius() * dungeon.feet_per_square as f32));
             if ui.small_button("\u{00d7}").on_hover_text("Remove this light").clicked() {
                 remove = Some(i);
             }
@@ -3323,7 +3325,7 @@ fn selected_room_section(
     if let Some(layout) = &dungeon.layout {
         if let Some(rl) = layout.room_by_id(&sel_room_id) {
             ui.add_space(4.0);
-            ui.label(format!("Size: {}x{} ({}x{} ft)", rl.width, rl.height, rl.width * 5, rl.height * 5));
+            ui.label(format!("Size: {}x{} ({}x{} ft)", rl.width, rl.height, rl.width * dungeon.feet_per_square, rl.height * dungeon.feet_per_square));
         }
     }
 

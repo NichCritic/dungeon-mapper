@@ -733,7 +733,131 @@ pub fn draw_decor(
                 g.arc(0.0, 0.0, 0.98, a, a + TAU / 16.0, W_HAIR, ink);
             }
         }
+        DecorType::Tree => {
+            // Top-down canopy: a cloud of leafy puffs around the trunk
+            let canopy = fade_to(pal.leaf, 80, pal.ink[3]);
+            const PUFFS: usize = 9;
+            g.circle_fill(0.0, 0.0, 0.66, canopy);
+            for i in 0..PUFFS {
+                let a = i as f32 / PUFFS as f32 * TAU;
+                g.circle_fill(0.66 * a.cos(), 0.66 * a.sin(), 0.3, canopy);
+            }
+            // Only each puff's outer rim is outlined, so the crown reads as one mass
+            for i in 0..PUFFS {
+                let a = i as f32 / PUFFS as f32 * TAU;
+                g.arc(0.66 * a.cos(), 0.66 * a.sin(), 0.3, a - 1.35, a + 1.35, W_THIN, pal.leaf);
+            }
+            for i in 0..5 {
+                let a = i as f32 / 5.0 * TAU + 0.3;
+                g.arc(0.3 * a.cos(), 0.3 * a.sin(), 0.2, a - 1.0, a + 1.0, W_HAIR, pal.leaf);
+            }
+            g.circle_fill(0.0, 0.0, 0.11, ink);
+        }
+        DecorType::Bush => {
+            let canopy = fade_to(pal.leaf, 80, pal.ink[3]);
+            for &(x, y, r, phase) in &[(-0.3, 0.1, 0.42, 0.0), (0.32, 0.12, 0.38, 0.7), (0.0, -0.22, 0.4, 1.3)] {
+                let clump = bumpy(x, y, r, &[1.0, 0.86, 0.97, 0.84, 1.0, 0.9, 0.95, 0.85], phase);
+                g.poly_fill(&clump, canopy);
+                g.poly_stroke(&clump, W_THIN, pal.leaf);
+            }
+        }
+        DecorType::Boulder => {
+            let rock = bumpy(0.0, 0.0, 0.7, &[1.0, 0.82, 0.95, 0.78, 1.0, 0.88, 0.92], 0.3);
+            g.poly_fill(&rock, dark);
+            g.poly_stroke(&rock, W_MAIN, ink);
+            // A crack and a facet
+            g.polyline(&[(-0.35, -0.3), (-0.05, -0.05), (0.1, 0.3)], W_HAIR, ink);
+            g.line(0.2, -0.45, 0.45, -0.15, W_HAIR, ink);
+        }
+        DecorType::HayBale => {
+            g.rect_fill(-0.75, -0.5, 0.75, 0.5, shade);
+            g.rect_stroke(-0.75, -0.5, 0.75, 0.5, W_MAIN, ink);
+            // Binding twine and straw grain
+            g.line(-0.3, -0.5, -0.3, 0.5, W_THIN, ink);
+            g.line(0.3, -0.5, 0.3, 0.5, W_THIN, ink);
+            for y in [-0.25, 0.0, 0.25] {
+                g.line(-0.68, y, -0.38, y + 0.05, W_HAIR, ink);
+                g.line(-0.22, y - 0.04, 0.22, y + 0.02, W_HAIR, ink);
+                g.line(0.38, y + 0.03, 0.68, y - 0.03, W_HAIR, ink);
+            }
+        }
+        DecorType::Trough => {
+            g.rect_fill(-0.95, -0.35, 0.95, 0.35, shade);
+            g.rect_stroke(-0.95, -0.35, 0.95, 0.35, W_MAIN, ink);
+            g.rect_fill(-0.82, -0.22, 0.82, 0.22, pal.water);
+            g.rect_stroke(-0.82, -0.22, 0.82, 0.22, W_HAIR, pal.water_edge);
+        }
+        DecorType::Cart => {
+            // Bed, two wheels at the sides, shafts out front
+            g.rect_fill(-0.6, -0.45, 0.6, 0.6, shade);
+            g.rect_stroke(-0.6, -0.45, 0.6, 0.6, W_MAIN, ink);
+            g.line(-0.6, 0.08, 0.6, 0.08, W_HAIR, ink);
+            for x in [-0.82, 0.82] {
+                g.rect_fill(x - 0.12, -0.05, x + 0.12, 0.45, ink);
+            }
+            g.line(-0.3, -0.45, -0.22, -1.0, W_THIN, ink);
+            g.line(0.3, -0.45, 0.22, -1.0, W_THIN, ink);
+        }
+        DecorType::Tent => {
+            // Canvas seen from above: the ridge down the middle, guy ropes to pegs
+            g.rect_stroke(-0.75, -0.62, 0.75, 0.62, W_MAIN, ink);
+            g.line(0.0, -0.62, 0.0, 0.62, W_MAIN, ink);
+            // One slope in shadow
+            g.rect_fill(-0.75, -0.62, 0.0, 0.62, shade);
+            for &(x0, y0, x1, y1) in &[(-0.75, -0.62, -1.0, -0.9), (0.75, -0.62, 1.0, -0.9), (-0.75, 0.62, -1.0, 0.9), (0.75, 0.62, 1.0, 0.9)] {
+                g.line(x0, y0, x1, y1, W_HAIR, ink);
+                g.circle_fill(x1, y1, 0.05, ink);
+            }
+            // Door flap
+            g.poly_stroke(&[(-0.2, 0.62), (0.0, 0.3), (0.2, 0.62)], W_THIN, ink);
+        }
+        DecorType::Campfire => {
+            // Ring of stones, crossed logs, flames
+            for i in 0..9 {
+                let a = i as f32 / 9.0 * TAU;
+                g.circle_fill(0.78 * a.cos(), 0.78 * a.sin(), 0.17, dark);
+                g.circle_stroke(0.78 * a.cos(), 0.78 * a.sin(), 0.17, W_THIN, ink);
+            }
+            g.line(-0.5, 0.35, 0.5, -0.2, W_BOLD, ink);
+            g.line(0.5, 0.35, -0.5, -0.2, W_BOLD, ink);
+            g.flame(-0.17, 0.28, 0.17, 0.62, pal.fire);
+            g.flame(0.19, 0.28, 0.15, 0.56, pal.fire);
+            g.flame(0.0, 0.3, 0.09, 0.36, pal.ember);
+        }
+        DecorType::Scarecrow => {
+            // Post and crossbar with a sack head and ragged sleeves
+            g.line(0.0, -0.55, 0.0, 0.55, W_MAIN, ink);
+            g.line(-0.7, -0.1, 0.7, -0.1, W_MAIN, ink);
+            g.circle_fill(0.0, -0.6, 0.2, shade);
+            g.circle_stroke(0.0, -0.6, 0.2, W_THIN, ink);
+            for x in [-0.7f32, 0.7] {
+                let d = x.signum() * 0.08;
+                g.line(x, -0.1, x + d, 0.12, W_HAIR, ink);
+                g.line(x - d, -0.1, x - d * 0.5, 0.1, W_HAIR, ink);
+            }
+            g.poly_stroke(&[(-0.25, -0.1), (0.25, -0.1), (0.3, 0.35), (-0.3, 0.35)], W_THIN, ink);
+        }
+        DecorType::Fence => {
+            // Two rails between square posts
+            g.line(-1.0, -0.08, 1.0, -0.08, W_THIN, ink);
+            g.line(-1.0, 0.08, 1.0, 0.08, W_THIN, ink);
+            for x in [-0.92, -0.31, 0.31, 0.92] {
+                g.rect_fill(x - 0.1, -0.2, x + 0.1, 0.2, ink);
+            }
+        }
     }
+}
+
+/// A closed, bumpy outline: `bumps` radius factors spaced around a circle of radius `r`.
+fn bumpy(x: f32, y: f32, r: f32, bumps: &[f32], phase: f32) -> Vec<(f32, f32)> {
+    bumps
+        .iter()
+        .enumerate()
+        .map(|(i, b)| {
+            let a = i as f32 / bumps.len() as f32 * TAU + phase;
+            (x + r * b * a.cos(), y + r * b * a.sin())
+        })
+        .collect()
 }
 
 /// A lighter version of the ink for highlights drawn on top of solid ink.

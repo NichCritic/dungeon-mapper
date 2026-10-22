@@ -30,7 +30,14 @@ user has clicked on; \"this room\" usually means the selection).
 - A campaign has several maps; tools work on the open one. switch_map opens another \
 (the user sees it change).
 - Rooms are referred to by id or by label (case-insensitive, must be unique).
-- One grid square is 5 feet. Room sizes are in grid squares.
+- Sizes and positions are in grid squares. A square is the map's feet_per_square \
+(get_overview): 5 on a battle map, more on an overview map.
+- Outdoor maps (ground other than Rock) have open ground between the areas. An area's \
+sides can be Wall, Open, Fence, StoneWall (drystone; both seen over, half cover) or \
+Hedge (blocks sight); terrain sections (Rough, TallGrass, Thicket, Water) can have \
+natural outlines; Path connections are tracks. Keep maps black and white: colour is \
+for plants, water and fire only, which the app handles.
+- A campaign often has an overview map whose areas link (detail_map) to battle maps.
 - Decor positions are room-local grid units from the room's top-left corner; \
 get_room gives the room's width and height.
 - Floors are integers (0 is the ground floor). A room can span a range of floors.

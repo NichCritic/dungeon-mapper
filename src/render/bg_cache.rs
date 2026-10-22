@@ -31,7 +31,7 @@ pub fn map_render_hash(
         hash_serde(h, &room.shape);
         hash_serde(h, &room.floor);
         hash_serde(h, &room.environment);
-        hash_serde(h, &room.open_walls);
+        hash_serde(h, &room.walls);
         hash_serde(h, &room.sections);
         // Bumped on every cell edit, so the cells themselves needn't be hashed
         room.cave_data.as_ref().map(|c| c.generation).hash(h);

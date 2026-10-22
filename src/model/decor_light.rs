@@ -40,7 +40,7 @@ impl Default for DecorLighting {
     fn default() -> Self {
         Self {
             enabled: true,
-            by_type: [(DecorType::Brazier, DecorLight::TORCH), (DecorType::Fireplace, DecorLight::TORCH)]
+            by_type: [(DecorType::Brazier, DecorLight::TORCH), (DecorType::Fireplace, DecorLight::TORCH), (DecorType::Campfire, DecorLight::TORCH)]
                 .into_iter()
                 .collect(),
         }

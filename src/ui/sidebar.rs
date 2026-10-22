@@ -3,11 +3,13 @@ use std::collections::HashSet;
 use crate::model::*;
 use crate::ui::graph_editor::Selection;
 
+/// `other_maps`: the campaign's other maps, (id, name), that a room can link to.
 pub fn sidebar(
     ui: &mut egui::Ui,
     dungeon: &mut Dungeon,
     selection: &Selection,
     focus_label: &mut bool,
+    other_maps: &[(String, String)],
 ) {
     ui.heading("Properties");
     ui.separator();
@@ -15,8 +17,9 @@ pub fn sidebar(
     if !selection.rooms.is_empty() && selection.connections.is_empty() && selection.groups.is_empty() {
         let ids: Vec<String> = selection.rooms.iter().cloned().collect();
         if ids.len() == 1 {
+            let feet_per_square = dungeon.feet_per_square;
             if let Some(room) = dungeon.graph.room_by_id_mut(&ids[0]) {
-                room_properties(ui, room, focus_label);
+                room_properties(ui, room, focus_label, other_maps, feet_per_square);
             }
         } else {
             ui.label(format!("{} rooms selected", ids.len()));
@@ -365,8 +368,26 @@ fn multi_connection_properties(ui: &mut egui::Ui, dungeon: &mut Dungeon, ids: &[
 }
 
 fn dungeon_properties(ui: &mut egui::Ui, dungeon: &mut Dungeon) {
-    ui.label("Dungeon Name:");
+    ui.label("Map Name:");
     ui.text_edit_singleline(&mut dungeon.name);
+    ui.add_space(8.0);
+    egui::Grid::new("map_settings").num_columns(2).show(ui, |ui| {
+        ui.label("Ground:").on_hover_text("Rock for a dungeon; open ground for an outdoor map");
+        egui::ComboBox::from_id_salt("map_ground")
+            .selected_text(dungeon.theme.ground.label())
+            .show_ui(ui, |ui| {
+                for g in Ground::ALL {
+                    ui.selectable_value(&mut dungeon.theme.ground, g, g.label());
+                }
+            });
+        ui.end_row();
+        ui.label("Feet per square:").on_hover_text("5 for a battle map; more for an overview map");
+        let mut fps = dungeon.feet_per_square;
+        if crate::ui::canvas_common::num_input_u32(ui, &mut fps, 50.0) {
+            dungeon.feet_per_square = fps.clamp(1, 5280);
+        }
+        ui.end_row();
+    });
     ui.add_space(8.0);
     ui.label(format!(
         "{} rooms, {} connections, {} groups",
@@ -555,7 +576,7 @@ fn group_properties(ui: &mut egui::Ui, dungeon: &mut Dungeon, group_id: &str) {
     }
 }
 
-fn room_properties(ui: &mut egui::Ui, room: &mut Room, focus_label: &mut bool) {
+fn room_properties(ui: &mut egui::Ui, room: &mut Room, focus_label: &mut bool, other_maps: &[(String, String)], feet_per_square: u32) {
     ui.label("Label:");
     let label_response = ui.text_edit_singleline(&mut room.label);
     if *focus_label {
@@ -574,7 +595,7 @@ fn room_properties(ui: &mut egui::Ui, room: &mut Room, focus_label: &mut bool) {
 
     ui.add_space(8.0);
     let (w, h) = room.grid_size();
-    ui.label(format!("Size: {}x{} ({}x{} ft)", w, h, w * 5, h * 5));
+    ui.label(format!("Size: {}x{} ({}x{} ft)", w, h, w * feet_per_square, h * feet_per_square));
     ui.weak("Edit size in the Spatial tab.");
 
     ui.add_space(8.0);
@@ -597,16 +618,56 @@ fn room_properties(ui: &mut egui::Ui, room: &mut Room, focus_label: &mut bool) {
             }
         });
 
-    // Open walls (only for rectangles)
+    // A map showing this area in detail (an overview's field linking to its battle map)
+    if !other_maps.is_empty() || room.links_to_map.is_some() {
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.label("Detail map:");
+            let current = room.links_to_map.as_ref()
+                .and_then(|id| other_maps.iter().find(|(m, _)| m == id))
+                .map_or("None", |(_, name)| name.as_str());
+            egui::ComboBox::from_id_salt("room_detail_map")
+                .selected_text(current)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut room.links_to_map, None, "None");
+                    for (id, name) in other_maps {
+                        ui.selectable_value(&mut room.links_to_map, Some(id.clone()), name);
+                    }
+                });
+        });
+    }
+
+    // What bounds each side (only for rectangles)
     if room.shape == RoomShape::Rectangle {
         ui.add_space(8.0);
-        ui.label("Open Walls:");
-        ui.horizontal(|ui| {
-            ui.checkbox(&mut room.open_walls.north, "N");
-            ui.checkbox(&mut room.open_walls.south, "S");
-            ui.checkbox(&mut room.open_walls.east, "E");
-            ui.checkbox(&mut room.open_walls.west, "W");
+        ui.label("Sides:");
+        egui::Grid::new("room_sides").num_columns(4).show(ui, |ui| {
+            let w = &mut room.walls;
+            for (i, (name, kind)) in [("N", &mut w.north), ("S", &mut w.south), ("E", &mut w.east), ("W", &mut w.west)].into_iter().enumerate() {
+                ui.label(name);
+                egui::ComboBox::from_id_salt(("room_side", name))
+                    .selected_text(kind.label())
+                    .width(95.0)
+                    .show_ui(ui, |ui| {
+                        for k in WallKind::ALL {
+                            ui.selectable_value(kind, k, k.label());
+                        }
+                    });
+                if i % 2 == 1 {
+                    ui.end_row();
+                }
+            }
         });
+        egui::ComboBox::from_id_salt("room_sides_all")
+            .selected_text("Set all sides…")
+            .width(120.0)
+            .show_ui(ui, |ui| {
+                for k in WallKind::ALL {
+                    if ui.selectable_label(false, k.label()).clicked() {
+                        room.walls = Walls::all(k);
+                    }
+                }
+            });
     }
 
     // Shape-specific controls

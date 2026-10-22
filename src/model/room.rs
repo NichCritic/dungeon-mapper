@@ -121,9 +121,15 @@ pub struct Room {
     /// Indoor/outdoor/covered environment type
     #[serde(default)]
     pub environment: RoomEnvironment,
-    /// Which walls are open (not drawn). Only applies to Rectangle rooms.
-    #[serde(default)]
-    pub open_walls: OpenWalls,
+    /// What bounds each side: wall, nothing, a fence, a drystone wall or a hedge.
+    /// Only applies to Rectangle rooms. (Saved as `open_walls` before v11, when each
+    /// side was just open or not.)
+    #[serde(default, alias = "open_walls")]
+    pub walls: Walls,
+    /// Another map of the campaign this area is shown in detail on (by map id), e.g.
+    /// a pen on a farm overview linking to the pen's battle map.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub links_to_map: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -227,10 +233,22 @@ pub enum DecorType {
     Pool,
     Clouds,
     Darkness,
+    // Outdoors
+    Tree,
+    Bush,
+    Boulder,
+    HayBale,
+    Trough,
+    Cart,
+    Tent,
+    Campfire,
+    Scarecrow,
+    /// A free-standing run of fence (scale it to length); room sides use wall kinds.
+    Fence,
 }
 
 impl DecorType {
-    pub const ALL: [DecorType; 33] = [
+    pub const ALL: [DecorType; 43] = [
         DecorType::Table, DecorType::Chair, DecorType::Bench,
         DecorType::Chest, DecorType::Barrel, DecorType::Crate,
         DecorType::Pillar, DecorType::StairsUp, DecorType::StairsDown,
@@ -242,6 +260,9 @@ impl DecorType {
         DecorType::OfferingMouth, DecorType::Vines, DecorType::Scales,
         DecorType::Crack, DecorType::Stream, DecorType::Pool,
         DecorType::Clouds, DecorType::Darkness,
+        DecorType::Tree, DecorType::Bush, DecorType::Boulder, DecorType::HayBale,
+        DecorType::Trough, DecorType::Cart, DecorType::Tent, DecorType::Campfire,
+        DecorType::Scarecrow, DecorType::Fence,
     ];
 
     /// Cover an object of this type grants by default (DM can override per item).
@@ -250,10 +271,13 @@ impl DecorType {
         match self {
             DecorType::Pillar | DecorType::Statue | DecorType::Bookshelf | DecorType::Fireplace => C::Full,
             DecorType::Gate | DecorType::Altar | DecorType::Fountain | DecorType::Well
-            | DecorType::Brazier | DecorType::Scales => C::ThreeQuarters,
+            | DecorType::Brazier | DecorType::Scales
+            | DecorType::Tree | DecorType::Cart | DecorType::Tent => C::ThreeQuarters,
             DecorType::Table | DecorType::Chair | DecorType::Bench | DecorType::Chest
             | DecorType::Barrel | DecorType::Crate | DecorType::Throne | DecorType::Bed
-            | DecorType::Rubble => C::Half,
+            | DecorType::Rubble
+            | DecorType::Bush | DecorType::Boulder | DecorType::HayBale | DecorType::Trough
+            | DecorType::Fence => C::Half,
             _ => C::None,
         }
     }
@@ -283,6 +307,16 @@ impl DecorType {
             DecorType::Scales => (0.85, 0.95),
             DecorType::Clouds => (0.9, 0.8),
             DecorType::Darkness => (0.8, 0.8),
+            DecorType::Tree => (1.0, 1.0),
+            DecorType::Bush => (0.7, 0.6),
+            DecorType::Boulder => (0.75, 0.65),
+            DecorType::HayBale => (0.75, 0.5),
+            DecorType::Trough => (0.95, 0.35),
+            DecorType::Cart => (0.95, 0.6),
+            DecorType::Tent => (1.0, 0.9),
+            DecorType::Campfire => (0.95, 0.95),
+            DecorType::Scarecrow => (0.55, 0.55),
+            DecorType::Fence => (1.0, 0.2),
             _ => (0.6, 0.6),
         }
     }
@@ -322,6 +356,16 @@ impl DecorType {
             DecorType::Pool => "Pool",
             DecorType::Clouds => "Clouds",
             DecorType::Darkness => "Darkness",
+            DecorType::Tree => "Tree",
+            DecorType::Bush => "Bush",
+            DecorType::Boulder => "Boulder",
+            DecorType::HayBale => "Hay Bale",
+            DecorType::Trough => "Trough",
+            DecorType::Cart => "Cart",
+            DecorType::Tent => "Tent",
+            DecorType::Campfire => "Campfire",
+            DecorType::Scarecrow => "Scarecrow",
+            DecorType::Fence => "Fence",
         }
     }
 }
@@ -426,11 +470,38 @@ pub struct ElevationSection {
     /// When true, the section fill is fully opaque (hides floor beneath).
     #[serde(default)]
     pub opaque: bool,
+    /// Drawn with an irregular natural outline inside its box (a copse, a bog),
+    /// instead of a rectangle. The outline is derived from the id, so it's stable.
+    #[serde(default)]
+    pub organic: bool,
 }
 
 fn default_section_height() -> f32 { 5.0 }
 
 impl ElevationSection {
+    /// The section's outline in room-local grid units: its box, or for an organic
+    /// section an irregular blob filling most of the box. The blob's wobble comes
+    /// from the section's id, so it's the same every time it's drawn.
+    pub fn outline(&self) -> Vec<(f32, f32)> {
+        let (x0, y0, x1, y1) = (self.x, self.y, self.x + self.width, self.y + self.length);
+        if !self.organic {
+            return vec![(x0, y0), (x1, y0), (x1, y1), (x0, y1)];
+        }
+        // FNV-1a: stable across runs and Rust versions, unlike the std hasher
+        let seed = self.id.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100_0000_01b3));
+        let phase = |shift: u32| ((seed >> shift) & 0xffff) as f32 / 65535.0 * std::f32::consts::TAU;
+        let (p1, p2, p3) = (phase(0), phase(16), phase(32));
+        let (cx, cy, rx, ry) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0, self.width / 2.0, self.length / 2.0);
+        const POINTS: usize = 32;
+        (0..POINTS)
+            .map(|i| {
+                let t = i as f32 / POINTS as f32 * std::f32::consts::TAU;
+                let r = 0.84 + 0.08 * (2.0 * t + p1).sin() + 0.05 * (3.0 * t + p2).sin() + 0.03 * (5.0 * t + p3).sin();
+                (cx + rx * r * t.cos(), cy + ry * r * t.sin())
+            })
+            .collect()
+    }
+
     pub fn new(elevation: ElevationType, x: f32, y: f32, width: f32, length: f32) -> Self {
         Self {
             id: uuid::Uuid::new_v4().to_string(),
@@ -438,6 +509,7 @@ impl ElevationSection {
             elevation,
             height: 5.0,
             opaque: false,
+            organic: false,
         }
     }
 }
@@ -458,10 +530,16 @@ pub enum ElevationType {
     Hole,
     /// Water (pool, stream, flooded area)
     Water,
+    /// Rough ground: mud, scree, ploughed field. Difficult terrain.
+    Rough,
+    /// Tall grass or crops: lightly obscures.
+    TallGrass,
+    /// Thicket, bracken or dense woods: heavily obscures, difficult terrain.
+    Thicket,
 }
 
 impl ElevationType {
-    pub const ALL: [ElevationType; 7] = [
+    pub const ALL: [ElevationType; 10] = [
         ElevationType::Raised,
         ElevationType::Lowered,
         ElevationType::Steps,
@@ -469,6 +547,9 @@ impl ElevationType {
         ElevationType::BottomlessPit,
         ElevationType::Hole,
         ElevationType::Water,
+        ElevationType::Rough,
+        ElevationType::TallGrass,
+        ElevationType::Thicket,
     ];
 
     pub fn label(self) -> &'static str {
@@ -480,7 +561,20 @@ impl ElevationType {
             ElevationType::BottomlessPit => "Bottomless Pit",
             ElevationType::Hole => "Hole",
             ElevationType::Water => "Water",
+            ElevationType::Rough => "Rough ground",
+            ElevationType::TallGrass => "Tall grass",
+            ElevationType::Thicket => "Thicket",
         }
+    }
+
+    /// Ground cover rather than a change of height: rough ground, tall grass, thicket.
+    pub fn is_terrain(self) -> bool {
+        matches!(self, ElevationType::Rough | ElevationType::TallGrass | ElevationType::Thicket)
+    }
+
+    /// Too dense to see through (treated as blocking sight at its edge).
+    pub fn blocks_sight(self) -> bool {
+        self == ElevationType::Thicket
     }
 }
 
@@ -508,13 +602,84 @@ impl RoomEnvironment {
     }
 }
 
-/// Which walls of a rectangular room are open (no wall drawn).
-#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq)]
-pub struct OpenWalls {
-    pub north: bool,
-    pub south: bool,
-    pub east: bool,
-    pub west: bool,
+/// What bounds one side of a rectangular room.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize)]
+pub enum WallKind {
+    /// A full wall: blocks movement and sight.
+    #[default]
+    Wall,
+    /// Nothing: the side is open.
+    Open,
+    /// A wooden fence: blocks movement, but you can see (and shoot) over it.
+    Fence,
+    /// A low drystone wall: like a fence, but stone.
+    StoneWall,
+    /// A hedge: blocks movement and sight.
+    Hedge,
+}
+
+impl WallKind {
+    pub const ALL: [WallKind; 5] = [WallKind::Wall, WallKind::Open, WallKind::Fence, WallKind::StoneWall, WallKind::Hedge];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            WallKind::Wall => "Wall",
+            WallKind::Open => "Open",
+            WallKind::Fence => "Fence",
+            WallKind::StoneWall => "Drystone wall",
+            WallKind::Hedge => "Hedge",
+        }
+    }
+
+    /// Sight stops at it: full walls and hedges.
+    pub fn blocks_sight(self) -> bool {
+        matches!(self, WallKind::Wall | WallKind::Hedge)
+    }
+
+    /// A low boundary you can see over, giving half cover to whoever is behind it.
+    pub fn is_low(self) -> bool {
+        matches!(self, WallKind::Fence | WallKind::StoneWall)
+    }
+}
+
+/// Saves before v11 stored each side as open (`true`) or walled (`false`).
+impl<'de> Deserialize<'de> for WallKind {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        enum Kind { Wall, Open, Fence, StoneWall, Hedge }
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw { Open(bool), Kind(Kind) }
+        Ok(match Raw::deserialize(deserializer)? {
+            Raw::Open(true) => WallKind::Open,
+            Raw::Open(false) => WallKind::Wall,
+            Raw::Kind(Kind::Wall) => WallKind::Wall,
+            Raw::Kind(Kind::Open) => WallKind::Open,
+            Raw::Kind(Kind::Fence) => WallKind::Fence,
+            Raw::Kind(Kind::StoneWall) => WallKind::StoneWall,
+            Raw::Kind(Kind::Hedge) => WallKind::Hedge,
+        })
+    }
+}
+
+/// What bounds each side of a rectangular room.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct Walls {
+    #[serde(default)]
+    pub north: WallKind,
+    #[serde(default)]
+    pub south: WallKind,
+    #[serde(default)]
+    pub east: WallKind,
+    #[serde(default)]
+    pub west: WallKind,
+}
+
+impl Walls {
+    /// Every side the same.
+    pub fn all(kind: WallKind) -> Self {
+        Self { north: kind, south: kind, east: kind, west: kind }
+    }
 }
 
 
@@ -598,10 +763,10 @@ impl SizeHint {
 
     pub fn label(self) -> &'static str {
         match self {
-            SizeHint::Small => "Small (15x15 ft)",
-            SizeHint::Medium => "Medium (20x20 ft)",
-            SizeHint::Large => "Large (30x30 ft)",
-            SizeHint::Huge => "Huge (40x40 ft)",
+            SizeHint::Small => "Small (3x3)",
+            SizeHint::Medium => "Medium (4x4)",
+            SizeHint::Large => "Large (6x6)",
+            SizeHint::Huge => "Huge (8x8)",
         }
     }
 
@@ -630,7 +795,8 @@ impl Room {
             floor: FloorAssignment::default(),
             sections: Vec::new(),
             environment: RoomEnvironment::default(),
-            open_walls: OpenWalls::default(),
+            walls: Walls::default(),
+            links_to_map: None,
         }
     }
 
@@ -653,6 +819,19 @@ impl Room {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn organic_outlines_are_stable_and_stay_in_their_box() {
+        let mut sec = ElevationSection::new(ElevationType::Thicket, 2.0, 1.0, 4.0, 3.0);
+        assert_eq!(sec.outline(), vec![(2.0, 1.0), (6.0, 1.0), (6.0, 4.0), (2.0, 4.0)]);
+        sec.organic = true;
+        let a = sec.outline();
+        assert_eq!(a, sec.outline(), "the same every time it's drawn");
+        assert!(a.iter().all(|&(x, y)| (2.0..=6.0).contains(&x) && (1.0..=4.0).contains(&y)));
+        let mut other = sec.clone();
+        other.id = "another".into();
+        assert_ne!(a, other.outline(), "each section has its own shape");
+    }
+
     use super::*;
 
     #[test]

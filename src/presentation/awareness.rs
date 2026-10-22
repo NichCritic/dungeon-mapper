@@ -163,12 +163,13 @@ pub fn encounter_distance_rooms(
     distances.get(encounter_room).copied()
 }
 
-/// Compute Euclidean distance in feet between two room centers using the spatial layout.
-/// Each grid square = 5 feet.
+/// Compute Euclidean distance in feet between two room centers using the spatial layout,
+/// at the map's scale.
 pub fn encounter_distance_feet(
     party_room: &str,
     encounter_room: &str,
     layout: &SpatialLayout,
+    feet_per_square: u32,
 ) -> Option<f32> {
     let rl_a = layout.room_by_id(party_room)?;
     let rl_b = layout.room_by_id(encounter_room)?;
@@ -180,8 +181,7 @@ pub fn encounter_distance_feet(
     let dy = by - ay;
     let grid_dist = (dx * dx + dy * dy).sqrt();
 
-    // 1 grid square = 5 feet
-    Some(grid_dist * 5.0)
+    Some(grid_dist * feet_per_square as f32)
 }
 
 /// Compute the light level for a room based on the lighting system.
@@ -227,7 +227,7 @@ pub fn run_awareness_check(
     let distance_rooms = encounter_distance_rooms(party_room, encounter_room, graph)
         .unwrap_or(u32::MAX);
     let distance_feet = dungeon.layout.as_ref()
-        .and_then(|layout| encounter_distance_feet(party_room, encounter_room, layout));
+        .and_then(|layout| encounter_distance_feet(party_room, encounter_room, layout, dungeon.feet_per_square));
 
     // Light levels
     let encounter_light = dungeon.layout.as_ref()
@@ -412,7 +412,7 @@ mod tests {
             bounds: Vec::new(),
         };
         // Centers: r1 = (2, 2), r2 = (12, 2). Distance = 10 grid squares = 50 feet.
-        let feet = encounter_distance_feet("r1", "r2", &layout).unwrap();
+        let feet = encounter_distance_feet("r1", "r2", &layout, 5).unwrap();
         assert!((feet - 50.0).abs() < 0.1);
     }
 

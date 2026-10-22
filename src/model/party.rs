@@ -96,9 +96,9 @@ impl PcSenses {
     }
 
     /// Darkvision range in grid cells (5 ft per cell).
-    pub fn darkvision_cells(self) -> f32 { self.darkvision_ft as f32 / 5.0 }
+    pub fn darkvision_cells(self, feet_per_square: u32) -> f32 { self.darkvision_ft as f32 / feet_per_square.max(1) as f32 }
     /// Longest non-sight sense range in grid cells.
-    pub fn blind_sense_cells(self) -> f32 { self.blindsight_ft.max(self.tremorsense_ft) as f32 / 5.0 }
+    pub fn blind_sense_cells(self, feet_per_square: u32) -> f32 { self.blindsight_ft.max(self.tremorsense_ft) as f32 / feet_per_square.max(1) as f32 }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

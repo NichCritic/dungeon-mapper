@@ -7,7 +7,6 @@
 
 
 use crate::model::{Dungeon, LightSource, SpatialLayout, TokenKind};
-use crate::render::themed::build_floor_set;
 use crate::util::{CellMap, CellSet, ViewTransform, GRID_PX};
 use super::los::{self, Occluders, Pt};
 use super::{PresentationSnapshot, PresentationState, Visibility, VisibilityProvider};
@@ -264,7 +263,7 @@ pub fn compute_light_map(
     occ: &Occluders,
     key: u64,
 ) -> LightMap {
-    let floor = build_floor_set(layout, &dungeon.graph);
+    let floor = crate::render::themed::open_cells(layout, &dungeon.graph, &dungeon.theme);
 
     // Ambient
     let ambient = if dungeon.ambient_light >= 0.5 {
@@ -313,7 +312,7 @@ pub fn compute_light_map(
     let pc_tokens: Vec<(Pt, f32, f32)> = dungeon.tokens.iter().filter_map(|t| {
         let TokenKind::Player(pid) = &t.kind else { return None };
         let senses = dungeon.party.iter().find(|p| p.id == *pid).map(|p| p.senses).unwrap_or_default();
-        Some(((t.x, t.y), senses.darkvision_cells(), senses.blind_sense_cells()))
+        Some(((t.x, t.y), senses.darkvision_cells(dungeon.feet_per_square), senses.blind_sense_cells(dungeon.feet_per_square)))
     }).collect();
 
     if pc_tokens.is_empty() {

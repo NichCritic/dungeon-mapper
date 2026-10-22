@@ -14,13 +14,14 @@ pub fn definitions() -> Vec<Value> {
     let group = json!({ "type": "string", "description": "Group id, or its label (case-insensitive)" });
     let rooms = json!({ "type": "array", "items": { "type": "string" }, "description": "Rooms, by id or label" });
     let section_fields = json!({
-        "elevation": { "type": "string", "enum": names(&ElevationType::ALL) },
+        "elevation": { "type": "string", "enum": names(&ElevationType::ALL), "description": "Heights (Raised, Lowered, Steps, Slope, pits, Hole), Water, or ground cover: Rough (difficult), TallGrass (lightly obscures), Thicket (blocks sight, difficult)" },
         "x": { "type": "number", "description": "Grid units from the room's left edge" },
         "y": { "type": "number", "description": "Grid units from the room's top edge" },
         "width": { "type": "number" },
         "length": { "type": "number" },
         "height": { "type": "number", "description": "Feet up (Raised), down (Lowered) or deep (Water)" },
-        "opaque": { "type": "boolean", "description": "Blocks sight" },
+        "opaque": { "type": "boolean", "description": "Hides the floor beneath it (drawing only)" },
+        "organic": { "type": "boolean", "description": "A natural, irregular outline inside the box (a copse, bog or pond) instead of a rectangle" },
     });
     let mut section_update = section_fields.clone();
     section_update["room"] = room.clone();
@@ -333,6 +334,9 @@ fn apply_section_fields(s: &mut ElevationSection, args: &Value, room_size: (u32,
     }
     if let Some(o) = opt_bool(args, "opaque")? {
         s.opaque = o;
+    }
+    if let Some(o) = opt_bool(args, "organic")? {
+        s.organic = o;
     }
     let (w, h) = (room_size.0 as f32, room_size.1 as f32);
     if s.width <= 0.0 || s.length <= 0.0 {

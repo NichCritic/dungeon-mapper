@@ -58,7 +58,7 @@ pub fn styled_view(ui: &mut egui::Ui, dungeon: &Dungeon, state: &mut StyledViewS
     );
     let rect = response.rect;
 
-    let bg = dungeon.theme.bg_color;
+    let bg = dungeon.theme.background();
     painter.rect_filled(rect, 0.0, egui::Color32::from_rgba_unmultiplied(bg[0], bg[1], bg[2], bg[3]));
 
     handle_pan_zoom(&response, &mut state.view);
@@ -204,7 +204,7 @@ pub fn styled_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Styl
 
         if let Some(room) = dungeon.graph.room_by_id(sel_room_id) {
             let (w, h) = room.grid_size();
-            ui.label(format!("{}x{} ({}x{} ft)", w, h, w * 5, h * 5));
+            ui.label(format!("{}x{} ({}x{} ft)", w, h, w * dungeon.feet_per_square, h * dungeon.feet_per_square));
             ui.label(format!("Shape: {}", room.shape.label()));
 
             if !room.tags.is_empty() {

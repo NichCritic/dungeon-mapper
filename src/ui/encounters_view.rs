@@ -122,7 +122,7 @@ pub fn encounters_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut Enc
     );
     let rect = response.rect;
 
-    let bg = dungeon.theme.bg_color;
+    let bg = dungeon.theme.background();
     painter.rect_filled(rect, 0.0, egui::Color32::from_rgba_unmultiplied(bg[0], bg[1], bg[2], bg[3]));
 
     handle_pan_zoom(&response, &mut state.view);

@@ -4,7 +4,7 @@ use std::sync::mpsc;
 use crate::model::{Campaign, Dungeon};
 
 /// Current save file format version. Increment when the data model changes.
-const CURRENT_VERSION: u32 = 10;
+const CURRENT_VERSION: u32 = 11;
 
 /// Versioned save file envelope (version 2+: campaign-based).
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -95,7 +95,20 @@ fn load_campaign(version: u32, value: &serde_json::Value) -> Result<Campaign, St
         //           Dungeon.decor_lighting (None) and RoomDecor.light (Default); floors at the
         //           table — MapToken.floor (None: the room's), SessionState.current_floor (None)
         //           and SessionState.ghost_lower_floors (true)
-        2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 => serde_json::from_value(value.clone()).map_err(|e| e.to_string()),
+        // v10 → v11: outdoor maps — Theme.ground (Rock), Dungeon.feet_per_square (5),
+        //           Room.walls replacing open_walls (bools read as Open/Wall),
+        //           Room.links_to_map (None), ElevationSection.organic (false); new decor,
+        //           terrain and Path connection variants; campfires light by default
+        2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 => {
+            let mut campaign: Campaign = serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
+            if version < 11 {
+                // Campfires are new, so no campaign has a setting for them yet
+                campaign.decor_lighting.by_type
+                    .entry(crate::model::DecorType::Campfire)
+                    .or_insert(crate::model::DecorLight::TORCH);
+            }
+            Ok(campaign)
+        }
         v => Err(format!(
             "Save file version {} is newer than this application supports (max: {})",
             v, CURRENT_VERSION
@@ -415,6 +428,47 @@ mod tests {
         let v3 = r#"{"version":3,"campaign":{"name":"Old","maps":[{"name":"M","graph":{"rooms":[],"connections":[],"graph_positions":{}}}]}}"#;
         let old = deserialize_versioned(v3).unwrap();
         assert!(old.maps[0].tokens.is_empty());
+    }
+
+    #[test]
+    fn test_version_11_outdoor_maps_roundtrip_and_v10_loads() {
+        use crate::model::{DecorLight, DecorType, Ground, Room, WallKind};
+        let mut campaign = Campaign::new("Moor".to_string());
+        let map = &mut campaign.maps[0];
+        map.theme.ground = Ground::Grass;
+        map.feet_per_square = 30;
+        let mut pen = Room::new("Pen".to_string());
+        pen.walls.north = WallKind::StoneWall;
+        pen.walls.east = WallKind::Hedge;
+        pen.links_to_map = Some("pens-map".into());
+        map.graph.add_room(pen);
+
+        let json = serialize_versioned(&campaign).unwrap();
+        let loaded = deserialize_versioned(&json).unwrap();
+        let map = &loaded.maps[0];
+        assert_eq!((map.theme.ground, map.feet_per_square), (Ground::Grass, 30));
+        let pen = &map.graph.rooms[0];
+        assert_eq!((pen.walls.north, pen.walls.east, pen.walls.south), (WallKind::StoneWall, WallKind::Hedge, WallKind::Wall));
+        assert_eq!(pen.links_to_map.as_deref(), Some("pens-map"));
+
+        // A v10 file: open walls as bools, no ground or scale, and a campaign whose
+        // decor lighting was saved before campfires existed
+        let mut v10: serde_json::Value = serde_json::from_str(&json).unwrap();
+        v10["version"] = serde_json::json!(10);
+        let m = v10["campaign"]["maps"][0].as_object_mut().unwrap();
+        m.remove("feet_per_square");
+        m.get_mut("theme").unwrap().as_object_mut().unwrap().remove("ground");
+        let room = v10["campaign"]["maps"][0]["graph"]["rooms"][0].as_object_mut().unwrap();
+        room.remove("walls");
+        room.remove("links_to_map");
+        room.insert("open_walls".into(), serde_json::json!({ "north": true, "south": false, "east": false, "west": true }));
+        v10["campaign"]["decor_lighting"]["by_type"].as_object_mut().unwrap().remove("Campfire");
+        let old = deserialize_versioned(&v10.to_string()).unwrap();
+        let map = &old.maps[0];
+        assert_eq!((map.theme.ground, map.feet_per_square), (Ground::Rock, 5));
+        let w = map.graph.rooms[0].walls;
+        assert_eq!((w.north, w.south, w.west), (WallKind::Open, WallKind::Wall, WallKind::Open));
+        assert_eq!(old.decor_lighting.by_type.get(&DecorType::Campfire), Some(&DecorLight::TORCH), "campfires light in older campaigns too");
     }
 
     #[test]

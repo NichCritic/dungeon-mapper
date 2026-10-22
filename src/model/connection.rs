@@ -108,12 +108,15 @@ pub enum ConnectionType {
     /// Corridor merges into the room — the room wall is removed at the junction.
     /// For adjacent rooms (no corridor), shared wall removed like Flush.
     Merge,
+    /// An outdoor track or lane: drawn as a path across open ground, with no
+    /// corridor walls, and joins the rooms without a door.
+    Path,
 }
 
 impl ConnectionType {
     /// An opening rather than a door: no door is drawn and sight passes freely.
     pub fn is_passage(self) -> bool {
-        matches!(self, ConnectionType::Open | ConnectionType::Flush | ConnectionType::Merge)
+        matches!(self, ConnectionType::Open | ConnectionType::Flush | ConnectionType::Merge | ConnectionType::Path)
     }
 
     pub fn label(self) -> &'static str {
@@ -125,10 +128,11 @@ impl ConnectionType {
             ConnectionType::OneWay => "One-Way",
             ConnectionType::Flush => "Flush",
             ConnectionType::Merge => "Merge",
+            ConnectionType::Path => "Path",
         }
     }
 
-    pub const ALL: [ConnectionType; 7] = [
+    pub const ALL: [ConnectionType; 8] = [
         ConnectionType::Open,
         ConnectionType::Door,
         ConnectionType::Locked,
@@ -136,6 +140,7 @@ impl ConnectionType {
         ConnectionType::OneWay,
         ConnectionType::Flush,
         ConnectionType::Merge,
+        ConnectionType::Path,
     ];
 }
 
@@ -201,6 +206,6 @@ mod tests {
 
     #[test]
     fn test_connection_type_all() {
-        assert_eq!(ConnectionType::ALL.len(), 7);
+        assert_eq!(ConnectionType::ALL.len(), 8);
     }
 }
