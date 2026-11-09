@@ -8,7 +8,7 @@
 
 use std::f32::consts::{PI, TAU};
 
-use crate::model::DecorType;
+use crate::model::{DecorType, HexFeature};
 use crate::render::traits::MapRenderer;
 
 /// Stroke widths in local units (fractions of the glyph half-size).
@@ -92,6 +92,8 @@ pub struct DecorPalette {
     pub fire: [u8; 4],
     pub ember: [u8; 4],
     pub leaf: [u8; 4],
+    /// Opaque paper, to knock out what's under a glyph.
+    pub paper: [u8; 4],
 }
 
 impl DecorPalette {
@@ -109,6 +111,7 @@ impl DecorPalette {
             fire: fade([235, 120, 30, 230]),
             ember: fade([250, 200, 60, 230]),
             leaf: fade([60, 130, 60, 230]),
+            paper: [255, 255, 255, (255.0 * a) as u8],
         }
     }
 }
@@ -858,6 +861,198 @@ fn bumpy(x: f32, y: f32, r: f32, bumps: &[f32], phase: f32) -> Vec<(f32, f32)> {
             (x + r * b * a.cos(), y + r * b * a.sin())
         })
         .collect()
+}
+
+/// Symbols for hex maps: the marks scattered over a hex to show its terrain, and the
+/// landmark at its centre.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum HexGlyph {
+    Hill,
+    Mountain,
+    GrassTuft,
+    DryTuft,
+    Reeds,
+    Waves,
+    Dune,
+    Furrows,
+    Drift,
+    Feature(HexFeature),
+}
+
+/// Draw one hex-map symbol centred on (`cx`, `cy`) with half-size `s`.
+pub fn draw_hex_glyph(sink: &mut dyn GlyphSink, glyph: HexGlyph, cx: f32, cy: f32, s: f32, pal: &DecorPalette) {
+    // Landmarks that are decor too are drawn the same way
+    let as_decor = match glyph {
+        HexGlyph::Feature(HexFeature::Camp) => Some(DecorType::Tent),
+        HexGlyph::Feature(HexFeature::Well) => Some(DecorType::Well),
+        HexGlyph::Feature(HexFeature::Tree) => Some(DecorType::Tree),
+        _ => None,
+    };
+    if let Some(kind) = as_decor {
+        draw_decor(sink, kind, cx, cy, s, 1.0, 1.0, 0.0, pal);
+        return;
+    }
+    let mut g = Glyph { sink, cx, cy, s, sclx: 1.0, scly: 1.0, cos: 1.0, sin: 0.0 };
+    let (ink, dark) = (pal.ink, pal.dark);
+    match glyph {
+        HexGlyph::Hill => {
+            g.bezier((-1.0, 0.35), (0.0, -0.85), (1.0, 0.35), W_MAIN, ink);
+            // Hatching on the shaded slope
+            for &(x, y) in &[(0.28, -0.08), (0.48, 0.04), (0.68, 0.16)] {
+                g.line(x, y, x + 0.08, y + 0.3, W_HAIR, ink);
+            }
+        }
+        HexGlyph::Mountain => {
+            let (l, peak, r) = ((-1.0, 0.65), (-0.1, -0.95), (0.95, 0.65));
+            g.poly_fill(&[peak, r, (0.2, 0.65)], dark);
+            g.polyline(&[l, peak, r], W_MAIN, ink);
+            g.polyline(&[peak, (0.0, -0.4), (0.2, 0.65)], W_HAIR, ink);
+        }
+        HexGlyph::GrassTuft => {
+            // Three blades from a short root, the middle one tallest
+            g.line(-0.55, 0.4, 0.55, 0.4, W_HAIR, ink);
+            for &(x0, x1, y1) in &[(-0.2, -0.55, -0.1), (0.0, 0.0, -0.6), (0.2, 0.55, -0.1)] {
+                g.line(x0, 0.4, x1, y1, W_THIN, ink);
+            }
+        }
+        HexGlyph::DryTuft => {
+            g.line(-0.15, 0.4, -0.45, -0.1, W_THIN, ink);
+            g.line(0.0, 0.4, 0.15, -0.3, W_THIN, ink);
+            g.circle_fill(0.5, 0.3, 0.08, ink);
+            g.circle_fill(-0.55, 0.45, 0.06, ink);
+        }
+        HexGlyph::Reeds => {
+            g.line(-0.85, 0.5, 0.85, 0.5, W_THIN, pal.water_edge);
+            g.line(-0.4, 0.78, 0.5, 0.78, W_THIN, pal.water_edge);
+            for &(x, dx) in &[(-0.35, -0.12), (0.0, 0.0), (0.32, 0.14)] {
+                g.line(x, 0.4, x + dx, -0.45, W_THIN, pal.leaf);
+                g.ellipse_fill(x + dx, -0.55, 0.08, 0.17, ink);
+            }
+        }
+        HexGlyph::Waves => {
+            g.arc(-0.35, 0.15, 0.35, PI, TAU, W_THIN, pal.water_edge);
+            g.arc(0.35, 0.15, 0.35, PI, TAU, W_THIN, pal.water_edge);
+        }
+        HexGlyph::Dune => {
+            g.bezier((-0.9, 0.25), (0.0, -0.55), (0.9, 0.25), W_THIN, ink);
+            for &(x, y) in &[(-0.25, 0.42), (0.15, 0.5), (0.45, 0.4)] {
+                g.circle_fill(x, y, 0.05, ink);
+            }
+        }
+        HexGlyph::Furrows => {
+            for i in -1..=1 {
+                let y = i as f32 * 0.35;
+                g.line(-0.85, y - 0.1, 0.85, y + 0.1, W_HAIR, ink);
+            }
+        }
+        HexGlyph::Drift => {
+            g.bezier((-0.7, 0.2), (0.0, -0.2), (0.7, 0.2), W_HAIR, ink);
+        }
+        HexGlyph::Feature(feature) => draw_hex_feature(&mut g, feature, pal),
+    }
+}
+
+fn draw_hex_feature(g: &mut Glyph, feature: HexFeature, pal: &DecorPalette) {
+    let (ink, shade, dark) = (pal.ink, pal.shade, pal.dark);
+    match feature {
+        HexFeature::Village => {
+            // A huddle of gabled houses
+            for &(x, y, w) in &[(-0.45, 0.2, 0.32), (0.3, -0.15, 0.4), (0.4, 0.62, 0.26)] {
+                let house = [(x - w, y + w), (x - w, y - w * 0.2), (x, y - w), (x + w, y - w * 0.2), (x + w, y + w)];
+                g.poly_fill(&house, pal.paper);
+                g.poly_fill(&house, shade);
+                g.poly_stroke(&house, W_MAIN, ink);
+                g.rect_fill(x - w * 0.22, y + w * 0.3, x + w * 0.22, y + w, ink);
+            }
+        }
+        HexFeature::Castle => {
+            g.rect_fill(-0.6, -0.6, 0.6, 0.6, shade);
+            g.rect_stroke(-0.6, -0.6, 0.6, 0.6, W_MAIN, ink);
+            g.rect_fill(-0.22, -0.22, 0.22, 0.22, dark);
+            g.rect_stroke(-0.22, -0.22, 0.22, 0.22, W_THIN, ink);
+            for &(x, y) in &[(-0.6, -0.6), (0.6, -0.6), (-0.6, 0.6), (0.6, 0.6)] {
+                g.circle_fill(x, y, 0.24, pal.paper);
+                g.circle_fill(x, y, 0.24, shade);
+                g.circle_stroke(x, y, 0.24, W_MAIN, ink);
+            }
+        }
+        HexFeature::Tower => {
+            g.circle_fill(0.0, 0.0, 0.55, shade);
+            g.circle_stroke(0.0, 0.0, 0.55, W_MAIN, ink);
+            g.circle_stroke(0.0, 0.0, 0.32, W_HAIR, ink);
+            for i in 0..8 {
+                let a = i as f32 / 8.0 * TAU;
+                g.circle_fill(0.55 * a.cos(), 0.55 * a.sin(), 0.1, ink);
+            }
+        }
+        HexFeature::Ruin => {
+            g.polyline(&[(-0.7, 0.15), (-0.7, -0.65), (0.15, -0.65)], W_BOLD, ink);
+            g.polyline(&[(0.7, -0.25), (0.7, 0.65), (-0.05, 0.65)], W_BOLD, ink);
+            for &(x, y, r) in &[(0.38, -0.55, 0.09), (0.55, -0.42, 0.07), (-0.45, 0.5, 0.09), (-0.25, 0.62, 0.06), (0.1, 0.0, 0.07)] {
+                g.circle_fill(x, y, r, ink);
+            }
+        }
+        HexFeature::Cave => {
+            g.bezier((-1.0, 0.55), (0.0, -1.15), (1.0, 0.55), W_MAIN, ink);
+            let mouth: Vec<(f32, f32)> = (0..=12)
+                .map(|i| {
+                    let a = PI + PI * i as f32 / 12.0;
+                    (0.4 * a.cos(), 0.55 + 0.6 * a.sin())
+                })
+                .collect();
+            g.poly_fill(&mouth, ink);
+        }
+        HexFeature::Shrine => {
+            g.poly_fill(&[(-0.65, -0.2), (0.0, -0.75), (0.65, -0.2)], shade);
+            g.poly_stroke(&[(-0.65, -0.2), (0.0, -0.75), (0.65, -0.2)], W_MAIN, ink);
+            for x in [-0.42, 0.0, 0.42] {
+                g.line(x, -0.2, x, 0.5, W_THIN, ink);
+            }
+            g.line(-0.75, 0.55, 0.75, 0.55, W_BOLD, ink);
+        }
+        HexFeature::Fold => {
+            // A pen with its gate open to the south, and the flock inside
+            g.polyline(&[(-0.25, 0.7), (-0.75, 0.7), (-0.75, -0.7), (0.75, -0.7), (0.75, 0.7), (0.25, 0.7)], W_BOLD, ink);
+            for &(x, y) in &[(-0.35, -0.3), (0.05, -0.38), (0.38, -0.12), (-0.2, 0.12), (0.18, 0.25)] {
+                g.circle_fill(x, y, 0.12, ink);
+            }
+        }
+        HexFeature::Stones => {
+            for i in 0..7 {
+                let a = i as f32 / 7.0 * TAU - PI / 2.0;
+                g.circle_fill(0.65 * a.cos(), 0.65 * a.sin(), 0.15, dark);
+                g.circle_stroke(0.65 * a.cos(), 0.65 * a.sin(), 0.15, W_THIN, ink);
+            }
+            g.circle_fill(0.0, 0.0, 0.12, ink);
+        }
+        HexFeature::Gate => {
+            // Two posts under a lintel
+            g.rect_fill(-0.62, -0.35, -0.38, 0.65, ink);
+            g.rect_fill(0.38, -0.35, 0.62, 0.65, ink);
+            g.rect_fill(-0.85, -0.68, 0.85, -0.42, ink);
+            g.line(-0.38, 0.1, 0.38, 0.1, W_THIN, ink);
+        }
+        HexFeature::Lair => {
+            g.circle_fill(0.0, -0.15, 0.5, shade);
+            g.circle_stroke(0.0, -0.15, 0.5, W_MAIN, ink);
+            g.circle_fill(-0.19, -0.18, 0.12, ink);
+            g.circle_fill(0.19, -0.18, 0.12, ink);
+            g.rect_stroke(-0.25, 0.32, 0.25, 0.6, W_THIN, ink);
+            for x in [-0.08, 0.08] {
+                g.line(x, 0.32, x, 0.6, W_HAIR, ink);
+            }
+        }
+        HexFeature::Pass => {
+            // Two slopes facing each other across the way through
+            g.arc(-1.15, 0.0, 0.8, -0.85, 0.85, W_MAIN, ink);
+            g.arc(1.15, 0.0, 0.8, PI - 0.85, PI + 0.85, W_MAIN, ink);
+            for &y in &[-0.45, 0.0, 0.45] {
+                g.line(-0.55, y, -0.8, y, W_HAIR, ink);
+                g.line(0.55, y, 0.8, y, W_HAIR, ink);
+            }
+        }
+        HexFeature::Camp | HexFeature::Well | HexFeature::Tree => {}
+    }
 }
 
 /// A lighter version of the ink for highlights drawn on top of solid ink.

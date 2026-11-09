@@ -64,14 +64,18 @@ pub fn help_overlay(
         HoverRegion::MenuBar => help_menu_bar(),
         HoverRegion::StatusBar => help_status_bar(),
         HoverRegion::Canvas => {
-            if presenting {
+            if current_view == "Hex" {
+                help_canvas_hex(presenting)
+            } else if presenting {
                 help_canvas_presentation()
             } else {
                 help_canvas(current_view)
             }
         }
         HoverRegion::Sidebar => {
-            if presenting {
+            if current_view == "Hex" {
+                help_sidebar_hex(presenting)
+            } else if presenting {
                 help_sidebar_presentation()
             } else {
                 help_sidebar(current_view)
@@ -350,6 +354,52 @@ fn help_sidebar(view: &str) -> HelpContent {
             ],
         },
         _ => help_general(),
+    }
+}
+
+fn help_canvas_hex(presenting: bool) -> HelpContent {
+    let lines = if presenting {
+        vec![
+            HelpLine::Key("Click hex", "Select it: its battle map and note"),
+            HelpLine::Key("Double-click hex", "Move the party there (reveals round it)"),
+            HelpLine::Key("Drag banner", "Move the party"),
+            HelpLine::Key("Right-click hex", "Reveal or hide it from the players"),
+            HelpLine::Blank,
+            HelpLine::Key("Scroll", "Zoom"),
+            HelpLine::Key("Drag", "Pan"),
+        ]
+    } else {
+        vec![
+            HelpLine::Key("Click", "Select a hex, or a river or road"),
+            HelpLine::Key("Shift+click", "Add hexes to the selection"),
+            HelpLine::Key("Drag (Terrain)", "Paint terrain; next to the map adds hexes"),
+            HelpLine::Key("Click (River / road)", "Add hexes in order; Enter finishes"),
+            HelpLine::Key("Delete", "Delete the selected hexes or path"),
+            HelpLine::Blank,
+            HelpLine::Key("Scroll", "Zoom"),
+            HelpLine::Key("Drag / middle-drag", "Pan"),
+        ]
+    };
+    HelpContent { title: "Hex Map", lines }
+}
+
+fn help_sidebar_hex(presenting: bool) -> HelpContent {
+    HelpContent {
+        title: "Hex Map Sidebar",
+        lines: if presenting {
+            vec![
+                HelpLine::Text("Where the party is, and how far round it the players see."),
+                HelpLine::Text("Open a hex's battle map to fight there: the players"),
+                HelpLine::Text("stay on the hex map until you show them the battle map."),
+            ]
+        } else {
+            vec![
+                HelpLine::Text("Pick a tool, terrain, landmark or path kind."),
+                HelpLine::Text("Selected hexes: label, terrain, landmark, battle map."),
+                HelpLine::Text("'New battle map' makes an outdoor map linked to them."),
+                HelpLine::Text("'Grow' adds a ring of hexes round the edge."),
+            ]
+        },
     }
 }
 

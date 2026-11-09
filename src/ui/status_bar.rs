@@ -42,11 +42,10 @@ pub fn status_bar(ui: &mut egui::Ui, dungeon: &Dungeon, zoom: f32, saved: bool, 
             CloudState::Disabled => {}
         }
         ui.separator();
-        ui.label(format!(
-            "{} rooms, {} connections",
-            dungeon.graph.rooms.len(),
-            dungeon.graph.connections.len()
-        ));
+        ui.label(match &dungeon.hex_map {
+            Some(map) => format!("{} hexes, {} rivers and roads", map.hexes.len(), map.paths.len()),
+            None => format!("{} rooms, {} connections", dungeon.graph.rooms.len(), dungeon.graph.connections.len()),
+        });
         if !rendering.is_empty() {
             ui.separator();
             ui.colored_label(

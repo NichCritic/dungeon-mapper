@@ -386,6 +386,7 @@ mod tests {
             aoe_markers: Vec::new(),
             tokens: Vec::new(),
             session: SessionState::default(),
+            hex_map: None,
         }
     }
 

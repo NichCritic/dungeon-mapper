@@ -7,6 +7,7 @@
 //! the frame they're made and the undo history picks them up like any other edit.
 
 mod encounters;
+mod hex;
 mod http;
 mod layout;
 mod lighting;

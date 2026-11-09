@@ -7,7 +7,7 @@ use std::path::Path;
 
 use serde_json::{json, Value};
 
-use super::{encounters, layout, lighting, McpCall, ToolOutput};
+use super::{encounters, hex, layout, lighting, McpCall, ToolOutput};
 use crate::app::Tab;
 use crate::model::{
     CaveAlgorithm, Campaign, Connection, ConnectionType, CorridorAngle, CoverKind, OverlapWalls, DecorLight, DecorLightSetting, DecorType, Dungeon,
@@ -42,6 +42,7 @@ pub struct ToolCtx<'a> {
     pub encounters: &'a mut EncountersViewState,
     pub styled: &'a mut StyledViewState,
     pub presentation: &'a mut PresentationViewState,
+    pub hex: &'a mut crate::ui::hex_view::HexViewState,
     /// Set by tools only the app can carry out; it does so, then answers the call.
     pub app_action: Option<AppAction>,
 }
@@ -49,7 +50,8 @@ pub struct ToolCtx<'a> {
 #[derive(Debug, PartialEq)]
 pub enum AppAction {
     OpenMap(usize),
-    CreateMap(String),
+    /// A new map with this name; a hex map of this radius and terrain if given.
+    CreateMap(String, Option<(u32, crate::model::HexTerrain)>),
     RemoveOpenMap,
     Save,
     Undo,
@@ -141,8 +143,8 @@ pub fn definitions() -> Vec<Value> {
         "light": light,
     });
     let decor_type = json!({ "type": "string", "enum": names(&DecorType::ALL) });
-    let note_about = json!({ "type": "string", "enum": ["room", "map", "campaign", "page"], "description": "room: a room's note; map: the open map's note (prep, session log); campaign: the campaign note; page: a free page by title" });
-    let note_name = json!({ "type": "string", "description": "The room (id or label) for about=room, the page title for about=page" });
+    let note_about = json!({ "type": "string", "enum": ["room", "hex", "map", "campaign", "page"], "description": "room: a room's note; hex: a hex's note on a hex map (its key entry); map: the open map's note (prep, session log); campaign: the campaign note; page: a free page by title" });
+    let note_name = json!({ "type": "string", "description": "The room (id or label) for about=room, the hex (its label, or q,r) for about=hex, the page title for about=page" });
 
     vec![
         tool("get_overview",
@@ -216,8 +218,13 @@ pub fn definitions() -> Vec<Value> {
         tool("set_floor", "Show one floor in every view, or all floors with null.",
             json!({ "floor": { "type": ["integer", "null"] } }), &["floor"]),
         tool("create_map",
-            "Add a new, empty map to the campaign and open it. Not while the user is presenting.",
-            json!({ "name": { "type": "string" } }), &["name"]),
+            "Add a new, empty map to the campaign and open it. With hex, a hex map for overland travel instead (see get_hex_map). Not while the user is presenting.",
+            json!({
+                "name": { "type": "string" },
+                "hex": { "type": "object", "description": "Make a hex map: a round patch of hexes", "properties": {
+                    "radius": { "type": "integer", "minimum": 0, "maximum": 20, "description": "Hexes out from the centre; 3 gives 37 hexes" },
+                    "terrain": { "type": "string", "enum": names(&crate::model::HexTerrain::ALL) } } },
+            }), &["name"]),
         tool("rename_map", "Rename the open map.", json!({ "name": { "type": "string" } }), &["name"]),
         tool("set_map",
             "The open map's ground and scale. Ground other than Rock makes it an outdoor map: open ground between the areas, new areas start Outdoor with open sides. feet_per_square is 5 for a battle map, more (e.g. 30 or 60) for an overview.",
@@ -254,6 +261,7 @@ pub fn definitions() -> Vec<Value> {
     .chain(encounters::definitions())
     .chain(layout::definitions())
     .chain(lighting::definitions())
+    .chain(hex::definitions())
     .collect()
 }
 
@@ -329,6 +337,15 @@ fn describe(ctx: &ToolCtx, tool: &str, args: &Value, result: &Value) -> Option<S
         "focus_room" => format!("selected {}", s(&result["selected"])),
         "rename_map" => format!("renamed the map to {}", s(&result["to"])),
         "set_map" => "changed the map's ground and scale".into(),
+        "set_hexes" => format!("painted {} hexes", result["changed"]),
+        "remove_hexes" => format!("removed {} hexes", result["removed"]),
+        "add_hex_path" => format!("drew a {}", s(&result["kind"]).to_lowercase()),
+        "update_hex_path" => format!("changed a {}", s(&result["kind"]).to_lowercase()),
+        "remove_hex_path" => "removed a river or road".into(),
+        "set_hex_map" => "changed the hex map's settings".into(),
+        "create_battle_map" => format!("made battle map {}", s(&result["created"])),
+        "set_hex_party" => "moved the party or changed what the players see".into(),
+        "focus_hex" => format!("selected {}", s(&result["selected"])),
         "rename_campaign" => format!("renamed the campaign to {}", s(&result["to"])),
         "delete_note" => format!("deleted note {}", s(&result["deleted"])),
         "move_room" => format!("moved {}", s(&result["room"])),
@@ -372,6 +389,7 @@ fn run(ctx: &mut ToolCtx, tool: &str, args: &Value) -> Result<Value, String> {
     if let Some(result) = encounters::run(ctx, tool, args)
         .or_else(|| layout::run(ctx, tool, args))
         .or_else(|| lighting::run(ctx, tool, args))
+        .or_else(|| hex::run(ctx, tool, args))
     {
         return result;
     }
@@ -616,6 +634,11 @@ fn overview(ctx: &ToolCtx) -> Value {
         "floors": floors_in_use(d),
         "current_floor": *ctx.current_floor,
         "laid_out": d.layout.is_some(),
+        "hex_map": d.hex_map.as_ref().map(|m| json!({
+            "hexes": m.hexes.len(),
+            "paths": m.paths.len(),
+            "note": "A hex map: it has hexes, not rooms. get_hex_map has the hexes.",
+        })),
         "rooms": d.graph.rooms.iter().map(|r| room_summary(d, r)).collect::<Vec<_>>(),
         "connections": d.graph.connections.iter().map(|e| connection_summary(d, e)).collect::<Vec<_>>(),
         "bounds": d.layout.as_ref().map(|l| l.bounds.iter().map(|b| b.label.clone()).collect::<Vec<_>>()),
@@ -669,7 +692,18 @@ fn selection(ctx: &ToolCtx) -> Value {
             }
             Tab::Encounters => rooms.extend(ctx.encounters.selected_room.clone()),
             Tab::Styled => rooms.extend(ctx.styled.selected_room.clone()),
+            Tab::Hex => {}
         }
+    }
+    if let Some(map) = &d.hex_map {
+        // Hex maps share one selection between editing and the table
+        let hexes: Vec<Value> = ctx.hex.selected.iter().filter_map(|c| map.hex(*c)).map(|h| json!({
+            "hex": [h.coord.q, h.coord.r], "name": h.name(), "terrain": format!("{:?}", h.terrain),
+        })).collect();
+        let path = ctx.hex.selected_path.as_ref().and_then(|id| map.paths.iter().find(|p| &p.id == id)).map(|p| json!({
+            "id": p.id, "kind": format!("{:?}", p.kind), "length": p.hexes.len(),
+        }));
+        return json!({ "view": view_name(ctx), "hexes": hexes, "path": path });
     }
     json!({
         "view": view_name(ctx),
@@ -1120,10 +1154,14 @@ fn note_target(ctx: &ToolCtx, args: &Value) -> Result<(Option<NoteBind>, String,
             let id = resolve_room(d, req_str(args, "name")?)?;
             Ok((Some(NoteBind::Room(id.clone())), label_of(d, &id), Some(d.name.clone())))
         }
+        "hex" => {
+            let hex = hex::resolve_hex(d, req_str(args, "name")?)?;
+            Ok((Some(NoteBind::Hex(hex.id.clone())), hex.name(), Some(d.name.clone())))
+        }
         "map" => Ok((Some(NoteBind::Map(d.id.clone())), d.name.clone(), Some(d.name.clone()))),
         "campaign" => Ok((Some(NoteBind::Campaign), ctx.campaign.name.clone(), None)),
         "page" => Ok((None, req_str(args, "name")?.trim().to_string(), None)),
-        other => Err(format!("Unknown note kind '{}': room, map, campaign or page", other)),
+        other => Err(format!("Unknown note kind '{}': room, hex, map, campaign or page", other)),
     }
 }
 
@@ -1219,6 +1257,7 @@ fn focus_room(ctx: &mut ToolCtx, args: &Value) -> Result<Value, String> {
             }
             Tab::Encounters => ctx.encounters.selected_room = some,
             Tab::Styled => ctx.styled.selected_room = some,
+            Tab::Hex => {}
         }
     }
     Ok(json!({ "selected": label_of(ctx.dungeon, &id), "view": view_name(ctx), "current_floor": *ctx.current_floor }))
@@ -1269,7 +1308,18 @@ fn create_map(ctx: &mut ToolCtx, args: &Value) -> Result<Value, String> {
     if ctx.presenting {
         return Err("The user is presenting; a new map would end the presentation. Ask them to stop presenting first.".into());
     }
-    ctx.app_action = Some(AppAction::CreateMap(name.to_string()));
+    let hex = match args.get("hex").filter(|v| !v.is_null()) {
+        Some(hex) => {
+            let radius = hex.get("radius").map_or(Some(3), Value::as_u64).filter(|r| *r <= 20).ok_or("'radius' must be 0 to 20")?;
+            let terrain = opt_str(hex, "terrain")
+                .map(|t| parse_enum(&crate::model::HexTerrain::ALL, t, "terrain"))
+                .transpose()?
+                .unwrap_or(crate::model::HexTerrain::Grassland);
+            Some((radius as u32, terrain))
+        }
+        None => None,
+    };
+    ctx.app_action = Some(AppAction::CreateMap(name.to_string(), hex));
     Ok(Value::Null)
 }
 
@@ -1389,11 +1439,38 @@ fn save(ctx: &mut ToolCtx) -> Result<Value, String> {
 
 // ------------------------------------------------------------------ rendering
 
+/// A picture of a hex map, with a caption placing each hex in it.
+fn hex_render_job(map: crate::model::HexMap, theme: crate::model::Theme, players: bool) -> Result<RenderJob, String> {
+    let shown: Vec<crate::model::HexCoord> = crate::render::hex::visible_hexes(&map, players).into_iter().collect();
+    let ext = map.extents(&shown).ok_or(if players { "The players haven't seen any hexes yet." } else { "The map has no hexes." })?;
+    Ok(Box::new(move || {
+        let scale = (RENDER_MAX_PX / (ext.2 - ext.0).max(ext.3 - ext.1)).clamp(0.5, 4.0);
+        let (png, (ox, oy)) = crate::ui::hex_view::render_png(&map, &theme, players, ext, scale).ok_or("Couldn't draw the map")?;
+        let mut caption = format!(
+            "{}Hex map, {} hexes shown, each {} miles across ({} px from side to side). The image has no text; hex centres in pixels:",
+            if players { "What the players see. " } else { "" },
+            shown.len(),
+            map.miles_per_hex,
+            (crate::model::HEX_SIZE * 1.732 * scale) as i32,
+        );
+        for c in &shown {
+            let Some(hex) = map.hex(*c) else { continue };
+            let (x, y) = map.orientation.center(*c);
+            caption.push_str(&format!("\n- [{}, {}] {} ({}): ({}, {})", c.q, c.r, hex.name(), hex.terrain.label(),
+                ((x - ox) * scale) as i32, ((y - oy) * scale) as i32));
+        }
+        Ok(ToolOutput::png(&png, caption))
+    }))
+}
+
 type RenderJob = Box<dyn FnOnce() -> Result<ToolOutput, String> + Send>;
 
 /// Snapshot what the render needs; the returned job draws it off the UI thread.
 fn render_job(ctx: &ToolCtx, args: &Value) -> Result<RenderJob, String> {
     let d = &*ctx.dungeon;
+    if let Some(map) = &d.hex_map {
+        return hex_render_job(map.clone(), d.theme.clone(), opt_bool(args, "players")?.unwrap_or(false));
+    }
     let layout = d.layout.as_ref()
         .ok_or("The map hasn't been laid out yet: open the Spatial view in the app first.")?;
     let floor = if opt_bool(args, "all_floors")?.unwrap_or(false) {
@@ -1479,6 +1556,7 @@ mod tests {
         encounters: EncountersViewState,
         styled: StyledViewState,
         presentation: PresentationViewState,
+        hex: crate::ui::hex_view::HexViewState,
         /// What the last call asked the app to do.
         app_action: Option<AppAction>,
         monsters: crate::data::MonsterDatabase,
@@ -1500,6 +1578,7 @@ mod tests {
                 encounters: EncountersViewState::default(),
                 styled: StyledViewState::default(),
                 presentation: PresentationViewState::default(),
+                hex: Default::default(),
                 app_action: None,
                 monsters: crate::data::MonsterDatabase::empty(),
                 activity: Vec::new(),
@@ -1526,6 +1605,7 @@ mod tests {
                 encounters: &mut self.encounters,
                 styled: &mut self.styled,
                 presentation: &mut self.presentation,
+                hex: &mut self.hex,
                 app_action: None,
             };
             let result = execute(&mut ctx, tool, &args);
@@ -1643,7 +1723,21 @@ mod tests {
         assert!(caption.contains("grid square") && caption.contains("\n- B: grid"), "{}", caption);
     }
 
+    #[test]
+    fn renders_a_hex_map_with_where_each_hex_is() {
+        let mut f = Fixture::new();
+        f.dungeon = Dungeon::new_hex("Long Fold".into(), 1, crate::model::HexTerrain::Hills);
+        let out = render(&mut f).unwrap()().unwrap();
+        let caption = out.content[1]["text"].as_str().unwrap();
+        assert!(caption.contains("7 hexes shown") && caption.contains("\n- [0, 0] Hex 0,0 (Hills): ("), "{}", caption);
+        assert!(render_with(&mut f, json!({ "players": true })).err().unwrap().contains("haven't seen"));
+    }
+
     fn render(f: &mut Fixture) -> Result<RenderJob, String> {
+        render_with(f, json!({}))
+    }
+
+    fn render_with(f: &mut Fixture, args: Value) -> Result<RenderJob, String> {
         let ctx = ToolCtx {
             campaign: &mut f.campaign,
             combat_stats: &mut f.combat_stats,
@@ -1662,9 +1756,10 @@ mod tests {
             encounters: &mut f.encounters,
             styled: &mut f.styled,
             presentation: &mut f.presentation,
+            hex: &mut f.hex,
             app_action: None,
         };
-        render_job(&ctx, &json!({}))
+        render_job(&ctx, &args)
     }
 
     #[test]
@@ -1682,7 +1777,7 @@ mod tests {
         f.call("switch_map", json!({ "map": 2 })).unwrap();
         assert_eq!(f.app_action, Some(AppAction::OpenMap(2)));
         f.call("create_map", json!({ "name": " Crypt " })).unwrap();
-        assert_eq!(f.app_action, Some(AppAction::CreateMap("Crypt".into())));
+        assert_eq!(f.app_action, Some(AppAction::CreateMap("Crypt".into(), None)));
 
         let e = f.call("switch_map", json!({ "map": "Crypt" })).unwrap_err();
         assert!(e.contains("Sewers (1)"), "lists the maps: {}", e);
@@ -2061,5 +2156,54 @@ mod tests {
         assert_eq!(f.floor, Some(-1));
         assert_eq!(f.tab, Tab::Decor);
         assert!(f.decor.selected_room.is_some());
+    }
+
+    #[test]
+    fn hex_maps_paint_link_and_play() {
+        use crate::model::{HexCoord, HexTerrain};
+        let mut f = Fixture::new();
+        assert!(f.call("get_hex_map", json!({})).unwrap_err().contains("isn't a hex map"));
+        f.dungeon = Dungeon::new_hex("Long Fold".into(), 3, HexTerrain::Grassland);
+        f.campaign.maps.push(Dungeon::new("Pens".into()));
+        let hex = |f: &Fixture, q, r| f.dungeon.hex_map.as_ref().unwrap().hex(HexCoord::new(q, r)).cloned();
+
+        let r = f.call("set_hexes", json!({ "hexes": [
+            { "q": 0, "r": 0, "landmark": "Fold", "label": "The Fold" },
+            { "q": 3, "r": -3, "terrain": "hills", "battle_map": "pens" },
+            { "q": 4, "r": -3, "terrain": "Mountains" },
+        ] })).unwrap();
+        assert_eq!((r["added"].as_u64(), r["hexes"].as_u64()), (Some(1), Some(38)));
+        // A bad entry changes nothing
+        assert!(f.call("set_hexes", json!({ "hexes": [{ "q": 1, "r": 0, "terrain": "Hills" }, { "q": 2, "r": 0, "terrain": "Lava" }] })).is_err());
+        assert_eq!(hex(&f, 1, 0).unwrap().terrain, HexTerrain::Grassland);
+
+        let p = f.call("add_hex_path", json!({ "kind": "River", "hexes": [[-3, 0], [3, 0]] })).unwrap();
+        assert_eq!(p["hexes"].as_array().unwrap().len(), 7);
+        assert!(f.call("add_hex_path", json!({ "kind": "Road", "hexes": [[0, 0], [6, 0]] })).unwrap_err().contains("isn't on the map"));
+
+        let b = f.call("create_battle_map", json!({ "hexes": [[-1, 0], [-2, 0]] })).unwrap();
+        assert_eq!(b["ground"], "Grass");
+        let made = f.campaign.maps.last().unwrap();
+        assert_eq!(made.name, "Hex -1,0 (battle)");
+        assert_eq!(hex(&f, -2, 0).unwrap().battle_map.as_deref(), Some(made.id.as_str()));
+
+        f.call("set_hex_party", json!({ "party": [0, 0] })).unwrap();
+        let m = f.call("get_hex_map", json!({})).unwrap();
+        assert_eq!(m["party"], json!([0, 0]));
+        assert_eq!(m["revealed"].as_array().unwrap().len(), 7);
+        let hills = m["hexes"].as_array().unwrap().iter().find(|h| h["hex"] == json!([3, -3])).unwrap();
+        assert_eq!(hills["battle_map"], "Pens");
+
+        f.call("write_note", json!({ "about": "hex", "name": "the fold", "body": "Four pens off one chute." })).unwrap();
+        assert_eq!(f.call("read_note", json!({ "about": "hex", "name": "0,0" })).unwrap()["body"], "Four pens off one chute.");
+
+        f.call("focus_hex", json!({ "q": 0, "r": 0 })).unwrap();
+        assert_eq!(f.call("get_selection", json!({})).unwrap()["hexes"][0]["name"], "The Fold");
+
+        f.call("remove_hexes", json!({ "hexes": [[0, 0]] })).unwrap();
+        assert_eq!(f.dungeon.hex_map.as_ref().unwrap().paths.len(), 2, "the river is cut in two");
+
+        f.call("create_map", json!({ "name": "Wilds", "hex": { "radius": 2, "terrain": "Forest" } })).unwrap();
+        assert_eq!(f.app_action, Some(AppAction::CreateMap("Wilds".into(), Some((2, HexTerrain::Forest)))));
     }
 }

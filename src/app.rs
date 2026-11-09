@@ -11,6 +11,7 @@ use crate::ui::encounters_view::{self, EncountersViewState};
 use crate::ui::graph_editor::{self, GraphEditorState};
 use crate::ui::spatial_view::{self, SpatialViewState};
 use crate::ui::styled_view::{self, StyledViewState};
+use crate::ui::hex_view::{self, HexViewState};
 use crate::ui::presentation_view::{self, PresentationViewState};
 use crate::ui::player_view::{self, PlayerViewState};
 
@@ -48,6 +49,8 @@ pub enum Tab {
     Decor,
     Encounters,
     Styled,
+    /// The only view of a hex map.
+    Hex,
 }
 
 pub struct DungeonApp {
@@ -61,6 +64,7 @@ pub struct DungeonApp {
     pub decor_state: DecorViewState,
     pub encounters_state: EncountersViewState,
     pub styled_state: StyledViewState,
+    pub hex_state: HexViewState,
     /// Snapshot of graph state to detect when a re-solve is needed
     last_graph_snapshot: u64,
     /// Monster stats database loaded from 5e-Tools data files.
@@ -194,6 +198,7 @@ impl Default for DungeonApp {
             decor_state: DecorViewState::default(),
             encounters_state: EncountersViewState::default(),
             styled_state: StyledViewState::default(),
+            hex_state: HexViewState::default(),
             last_graph_snapshot: 0,
             monster_db: MonsterDatabase::empty(),
             combat_stats_cache: CombatStatsCache::new(),
@@ -308,6 +313,7 @@ impl DungeonApp {
                 Tab::Decor => self.decor_state.current_floor,
                 Tab::Encounters => self.encounters_state.current_floor,
                 Tab::Styled => self.styled_state.current_floor,
+                Tab::Hex => self.current_floor,
             }
         };
     }
@@ -328,6 +334,7 @@ impl DungeonApp {
         self.spatial_state = SpatialViewState::default();
         self.decor_state = DecorViewState::default();
         self.styled_state = StyledViewState::default();
+        self.hex_state = HexViewState::default();
         self.presenting = false;
         self.presentation = None;
         self.last_graph_snapshot = self.graph_hash();
@@ -627,7 +634,7 @@ impl DungeonApp {
     /// Snapshot what the web server's player PNG needs and return the job that renders
     /// and encodes it. On a large map that takes a second or more, so it runs on a
     /// background thread rather than stalling the session.
-    fn player_png_job(&self) -> Option<impl FnOnce() -> Option<Vec<u8>> + Send + 'static> {
+    fn player_png_job(&self) -> Option<Box<dyn FnOnce() -> Option<Vec<u8>> + Send + 'static>> {
         // Use player-specific map if it differs from DM view
         let (dungeon, pres) = if self.player_map_index.is_some()
             && self.player_map_index != Some(self.campaign.active_map)
@@ -636,6 +643,9 @@ impl DungeonApp {
         } else {
             (&self.dungeon, self.presentation.as_ref()?)
         };
+        if dungeon.hex_map.is_some() {
+            return Some(Box::new(hex_view::player_hex_png(dungeon)?));
+        }
         let full_layout = dungeon.layout.clone()?;
         // Players see the floor being played on (or every floor)
         let floor = pres.current_floor;
@@ -665,7 +675,7 @@ impl DungeonApp {
         let theme = dungeon.theme.clone();
         let ambient_light = dungeon.ambient_light;
 
-        Some(move || {
+        Some(Box::new(move || {
             let (min_x, min_y, max_x, max_y) = layout.extents();
             let margin = 2;
             let grid_w = (max_x - min_x + margin * 2) as u32;
@@ -713,7 +723,7 @@ impl DungeonApp {
             ).ok()?;
 
             Some(png_bytes)
-        })
+        }))
     }
 
     /// Compute a hash of the presentation state to detect changes for server pushes.
@@ -742,12 +752,17 @@ impl DungeonApp {
             rid.hash(&mut h);
         }
         presentation.party_room.hash(&mut h);
+        if let Some(map) = &self.dungeon.hex_map {
+            crate::util::hash_serde(&mut h, map);
+        }
         h.finish()
     }
 
     /// Get the name of the currently active view for annotation metadata.
     fn current_view_name(&self) -> String {
-        if self.presenting {
+        if self.dungeon.hex_map.is_some() {
+            "Hex".to_string()
+        } else if self.presenting {
             "Presentation".to_string()
         } else {
             match self.active_tab {
@@ -756,13 +771,14 @@ impl DungeonApp {
                 Tab::Decor => "Decor".to_string(),
                 Tab::Encounters => "Encounters".to_string(),
                 Tab::Styled => "Styled".to_string(),
+                Tab::Hex => "Hex".to_string(),
             }
         }
     }
 
     /// Get the current view's pan/zoom state.
     fn current_view_state(&self) -> &crate::ui::canvas_common::ViewState {
-        if self.presenting {
+        if self.presenting && self.dungeon.hex_map.is_none() {
             &self.presentation_view_state.view
         } else {
             match self.active_tab {
@@ -771,6 +787,7 @@ impl DungeonApp {
                 Tab::Decor => &self.decor_state.view,
                 Tab::Encounters => &self.encounters_state.view,
                 Tab::Styled => &self.styled_state.view,
+                Tab::Hex => &self.hex_state.view,
             }
         }
     }
@@ -789,6 +806,7 @@ impl DungeonApp {
         self.spatial_state.selected_section = None;
         self.decor_state.selected_room = None;
         self.decor_state.selected_decor = None;
+        self.hex_state.clear_selection();
         // Sync graph hash so auto-solve doesn't trigger inappropriately
         self.last_graph_snapshot = self.graph_hash();
         // Recompute cave contours (they're skipped in serialization)
@@ -880,7 +898,7 @@ impl DungeonApp {
                     let rooms = &self.graph_state.selection.rooms;
                     (rooms.len() == 1).then(|| rooms.iter().next().cloned()).flatten()
                 }
-                Tab::Styled => None,
+                Tab::Styled | Tab::Hex => None,
             }
         }
     }
@@ -890,6 +908,16 @@ impl DungeonApp {
         use crate::ui::notes_panel::NoteContext;
 
         let map_folder = Some(self.dungeon.name.clone());
+        let hex = self.dungeon.hex_map.as_ref()
+            .and_then(|m| self.hex_state.selected_hex(m))
+            .filter(|_| self.hex_state.selected.len() == 1);
+        if let Some(hex) = hex {
+            return NoteContext {
+                bind: Some(NoteBind::Hex(hex.id.clone())),
+                title: hex.name(),
+                map_folder,
+            };
+        }
         match self.selected_room_id().and_then(|id| self.dungeon.graph.room_by_id(&id).map(|r| (id, r.label.clone()))) {
             Some((id, label)) => NoteContext {
                 bind: Some(NoteBind::Room(id)),
@@ -950,6 +978,12 @@ impl eframe::App for DungeonApp {
         self.sync_party_to_dungeon();
         // Before the views take the shared floor, so a floor Claude picks reaches them
         self.serve_claude(ctx);
+        // A hex map has only its own view
+        if self.dungeon.hex_map.is_some() {
+            self.active_tab = Tab::Hex;
+        } else if self.active_tab == Tab::Hex {
+            self.active_tab = Tab::Graph;
+        }
         self.sync_floor_to_views();
 
         self.poll_background_tasks();
@@ -968,6 +1002,7 @@ impl eframe::App for DungeonApp {
         self.show_dialogs(ctx);
         self.show_side_panels(ctx);
         let canvas_rect = self.show_canvas(ctx);
+        self.handle_hex_request();
         self.show_overlays(ctx, canvas_rect);
         self.end_frame(ctx);
     }
@@ -997,8 +1032,11 @@ impl DungeonApp {
                         log_activity(&mut self.claude.activity, format!("opened map {}", self.dungeon.name));
                         map_opened(&self.claude_tools())
                     }
-                    AppAction::CreateMap(name) => {
-                        self.create_map(name);
+                    AppAction::CreateMap(name, hex) => {
+                        self.create_map(match hex {
+                            Some((radius, terrain)) => Dungeon::new_hex(name, radius, terrain),
+                            None => Dungeon::new(name),
+                        });
                         log_activity(&mut self.claude.activity, format!("created map {}", self.dungeon.name));
                         map_opened(&self.claude_tools())
                     }
@@ -1089,6 +1127,7 @@ impl DungeonApp {
             encounters: &mut self.encounters_state,
             styled: &mut self.styled_state,
             presentation: &mut self.presentation_view_state,
+            hex: &mut self.hex_state,
             app_action: None,
         }
     }
@@ -1498,6 +1537,7 @@ impl DungeonApp {
                         self.spatial_state = SpatialViewState::default();
                         self.decor_state = DecorViewState::default();
                         self.styled_state = StyledViewState::default();
+                        self.hex_state = HexViewState::default();
                         self.presenting = false;
                         self.presentation = None;
                         self.player_map_index = None;
@@ -1612,6 +1652,7 @@ impl DungeonApp {
                         self.spatial_state.selected_section = None;
                         self.decor_state.selected_room = None;
                         self.decor_state.selected_decor = None;
+                        self.hex_state.clear_selection();
                         self.last_graph_snapshot = self.graph_hash();
                         ui.close_menu();
                     }
@@ -1627,6 +1668,7 @@ impl DungeonApp {
                         self.spatial_state.selected_section = None;
                         self.decor_state.selected_room = None;
                         self.decor_state.selected_decor = None;
+                        self.hex_state.clear_selection();
                         self.last_graph_snapshot = self.graph_hash();
                         ui.close_menu();
                     }
@@ -1638,7 +1680,12 @@ impl DungeonApp {
                     });
                     ui.separator();
                     if ui.button("New Map").clicked() {
-                        self.create_map(format!("Map {}", self.campaign.maps.len() + 1));
+                        self.create_map(Dungeon::new(format!("Map {}", self.campaign.maps.len() + 1)));
+                        ui.close_menu();
+                    }
+                    if ui.button("New Hex Map").on_hover_text("For overland travel: 37 hexes of grassland to paint").clicked() {
+                        let name = format!("Hex Map {}", self.campaign.maps.len() + 1);
+                        self.create_map(Dungeon::new_hex(name, 3, crate::model::HexTerrain::Grassland));
                         ui.close_menu();
                     }
                     if ui.button("Import Map...").clicked() {
@@ -1692,12 +1739,16 @@ impl DungeonApp {
                         self.server = None;
                     }
                 } else {
-                    // Normal tab buttons
-                    ui.selectable_value(&mut self.active_tab, Tab::Graph, "Graph");
-                    ui.selectable_value(&mut self.active_tab, Tab::Spatial, "Spatial");
-                    ui.selectable_value(&mut self.active_tab, Tab::Decor, "Decor");
-                    ui.selectable_value(&mut self.active_tab, Tab::Encounters, "Encounters");
-                    ui.selectable_value(&mut self.active_tab, Tab::Styled, "Styled");
+                    // Normal tab buttons (a hex map has just the one view)
+                    if self.dungeon.hex_map.is_some() {
+                        ui.selectable_value(&mut self.active_tab, Tab::Hex, "Hex Map");
+                    } else {
+                        ui.selectable_value(&mut self.active_tab, Tab::Graph, "Graph");
+                        ui.selectable_value(&mut self.active_tab, Tab::Spatial, "Spatial");
+                        ui.selectable_value(&mut self.active_tab, Tab::Decor, "Decor");
+                        ui.selectable_value(&mut self.active_tab, Tab::Encounters, "Encounters");
+                        ui.selectable_value(&mut self.active_tab, Tab::Styled, "Styled");
+                    }
 
                     ui.separator();
 
@@ -1790,6 +1841,7 @@ impl DungeonApp {
         self.spatial_state = SpatialViewState::default();
         self.decor_state = DecorViewState::default();
         self.styled_state = StyledViewState::default();
+        self.hex_state = HexViewState::default();
         self.presenting = false;
         self.presentation = None;
         self.last_graph_snapshot = self.graph_hash();
@@ -1797,10 +1849,10 @@ impl DungeonApp {
     }
 
     /// Add an empty map to the campaign and open it (ending any presentation).
-    fn create_map(&mut self, name: String) {
+    fn create_map(&mut self, map: Dungeon) {
         self.sync_party_from_dungeon();
         self.sync_dungeon_to_campaign();
-        self.campaign.add_map(name);
+        self.campaign.maps.push(map);
         let new_idx = self.campaign.maps.len() - 1;
         self.campaign.switch_map(new_idx);
         self.load_dungeon_from_campaign();
@@ -1808,10 +1860,42 @@ impl DungeonApp {
         self.spatial_state = SpatialViewState::default();
         self.decor_state = DecorViewState::default();
         self.styled_state = StyledViewState::default();
+        self.hex_state = HexViewState::default();
         self.presenting = false;
         self.presentation = None;
         self.last_graph_snapshot = self.graph_hash();
         self.history.reset(&self.dungeon);
+    }
+
+    /// Act on what the hex view asked for: opening a hex's battle map, or making one.
+    fn handle_hex_request(&mut self) {
+        match self.hex_state.request.take() {
+            Some(hex_view::HexRequest::OpenMap(id)) => {
+                if let Some(idx) = self.campaign.maps.iter().position(|m| m.id == id) {
+                    self.change_map(idx);
+                }
+            }
+            Some(hex_view::HexRequest::CreateBattleMap) => self.create_battle_map(),
+            None => {}
+        }
+    }
+
+    /// Make an outdoor battle map for the selected hexes, link them to it and open it.
+    /// While presenting, the players stay on the hex map until it's shown to them.
+    fn create_battle_map(&mut self) {
+        let coords = self.hex_state.selected.clone();
+        let Some(hex_map) = &mut self.dungeon.hex_map else { return };
+        let Some(first) = coords.first().and_then(|c| hex_map.hex(*c)) else { return };
+        let name = if coords.len() == 1 { first.name() } else { first.terrain.label().to_string() };
+        let mut map = Dungeon::new(format!("{} (battle)", name));
+        map.theme.ground = first.terrain.battle_ground();
+        for c in &coords {
+            if let Some(hex) = hex_map.hex_mut(*c) {
+                hex.battle_map = Some(map.id.clone());
+            }
+        }
+        self.campaign.maps.push(map);
+        self.change_map(self.campaign.maps.len() - 1);
     }
 
     /// Open another map, carrying on presenting if the DM is: the players keep seeing
@@ -1881,7 +1965,7 @@ impl DungeonApp {
     fn show_status_bar(&mut self, ctx: &egui::Context) {
         // Status bar
         let status_response = egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
-            let zoom = if self.presenting {
+            let zoom = if self.presenting && self.dungeon.hex_map.is_none() {
                 self.presentation_view_state.view.zoom
             } else {
                 match self.active_tab {
@@ -1890,6 +1974,7 @@ impl DungeonApp {
                     Tab::Decor => self.decor_state.view.zoom,
                     Tab::Encounters => self.encounters_state.view.zoom,
                     Tab::Styled => self.styled_state.view.zoom,
+                    Tab::Hex => self.hex_state.view.zoom,
                 }
             };
             // Compute loading/rendering status for status bar (throttled: it hashes the map per view)
@@ -2132,6 +2217,13 @@ impl DungeonApp {
             .filter(|&(i, _)| i != self.campaign.active_map)
             .map(|(_, m)| (m.id.clone(), m.name.clone()))
             .collect();
+        // The hex this map is the battle map for, if any: (map index, map name, hex name, hex)
+        let hex_link = self.campaign.maps.iter().enumerate()
+            .filter(|&(i, _)| i != self.campaign.active_map)
+            .find_map(|(i, m)| {
+                let hex = m.hex_map.as_ref()?.hexes.iter().find(|h| h.battle_map.as_deref() == Some(self.dungeon.id.as_str()))?;
+                Some((i, m.name.clone(), hex.name(), hex.coord))
+            });
         let mut open_map = None;
         let sidebar_response = egui::SidePanel::right("properties")
             .default_width(320.0)
@@ -2143,18 +2235,36 @@ impl DungeonApp {
                         }
                         ui.separator();
                     }
+                    if let Some((idx, name, hex_name, _)) = &hex_link {
+                        if ui.button(format!("Back to {} ({})", name, hex_name)).on_hover_text("The hex map this is the battle map for").clicked() {
+                            open_map = Some(*idx);
+                        }
+                        ui.separator();
+                    }
                     if self.presenting {
                         if let Some(presentation) = &mut self.presentation {
-                            presentation_view::presentation_sidebar(
-                                ui,
-                                &mut self.dungeon,
-                                presentation,
-                                &mut self.presentation_view_state,
-                                &mut self.player_view_state,
-                                &mut self.player_viewport_open,
-                                &self.monster_db,
-                                &mut self.combat_stats_cache,
-                            );
+                            if self.dungeon.hex_map.is_some() {
+                                hex_view::hex_presentation_sidebar(
+                                    ui,
+                                    &mut self.dungeon,
+                                    presentation,
+                                    &mut self.hex_state,
+                                    &mut self.player_view_state,
+                                    &mut self.player_viewport_open,
+                                    &other_maps,
+                                );
+                            } else {
+                                presentation_view::presentation_sidebar(
+                                    ui,
+                                    &mut self.dungeon,
+                                    presentation,
+                                    &mut self.presentation_view_state,
+                                    &mut self.player_view_state,
+                                    &mut self.player_viewport_open,
+                                    &self.monster_db,
+                                    &mut self.combat_stats_cache,
+                                );
+                            }
 
                             // Web server controls (drawn here since sidebar fn can't own server)
                             ui.add_space(8.0);
@@ -2220,6 +2330,9 @@ impl DungeonApp {
                                     &mut self.encounters_state,
                                 );
                             }
+                            Tab::Hex => {
+                                hex_view::hex_sidebar(ui, &mut self.dungeon, &mut self.hex_state, &other_maps);
+                            }
                             Tab::Styled => {
                                 styled_view::styled_sidebar(
                                     ui,
@@ -2242,6 +2355,10 @@ impl DungeonApp {
         self.annotation_state.panel_rects.push(sidebar_response.response.rect);
         if let Some(idx) = open_map {
             self.change_map(idx);
+            // Coming back from a battle map, the hex it was for is the one selected
+            if let Some((_, _, _, coord)) = hex_link.filter(|l| l.0 == idx) {
+                self.hex_state.selected = vec![coord];
+            }
         }
 
         // Session notes drawer — under the map, inside the sidebar's remaining width.
@@ -2274,7 +2391,9 @@ impl DungeonApp {
     fn show_canvas(&mut self, ctx: &egui::Context) -> egui::Rect {
         // Main canvas
         let central_response = egui::CentralPanel::default().show(ctx, |ui| {
-            if self.presenting {
+            if self.presenting && self.dungeon.hex_map.is_some() {
+                hex_view::hex_presentation_view(ui, &mut self.dungeon, &mut self.hex_state);
+            } else if self.presenting {
                 if let Some(presentation) = &mut self.presentation {
                     presentation_view::presentation_view(
                         ui,
@@ -2301,6 +2420,9 @@ impl DungeonApp {
                     }
                     Tab::Styled => {
                         styled_view::styled_view(ui, &self.dungeon, &mut self.styled_state);
+                    }
+                    Tab::Hex => {
+                        hex_view::hex_view(ui, &mut self.dungeon, &mut self.hex_state);
                     }
                 }
             }

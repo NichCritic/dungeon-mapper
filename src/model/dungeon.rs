@@ -158,6 +158,9 @@ pub struct Dungeon {
     /// Persisted session state (fog of war, encounter positions, HP, etc.).
     #[serde(default)]
     pub session: SessionState,
+    /// Set on a hex map for overland travel, which has hexes instead of rooms.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hex_map: Option<super::HexMap>,
 }
 
 fn default_feet_per_square() -> u32 {
@@ -188,7 +191,15 @@ impl Dungeon {
             aoe_markers: Vec::new(),
             tokens: Vec::new(),
             session: SessionState::default(),
+            hex_map: None,
         }
+    }
+
+    /// A new hex map: a round patch of hexes out to `radius` from the centre.
+    pub fn new_hex(name: String, radius: u32, terrain: super::HexTerrain) -> Self {
+        let mut map = Self::new(name);
+        map.hex_map = Some(super::HexMap::with_radius(radius, terrain));
+        map
     }
 
     /// The decor-lighting settings in force on this map: its own, else the campaign's,

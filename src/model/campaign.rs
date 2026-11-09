@@ -53,11 +53,6 @@ impl Campaign {
         &self.maps[self.active_map]
     }
 
-    /// Add a new empty map to the campaign.
-    pub fn add_map(&mut self, name: String) {
-        self.maps.push(Dungeon::new(name));
-    }
-
     /// Import a dungeon from another file into this campaign.
     /// Merges the dungeon's party into the campaign party (skipping duplicates by id).
     pub fn import_dungeon(&mut self, mut dungeon: Dungeon) {

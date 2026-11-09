@@ -12,4 +12,5 @@ pub mod status_bar;
 pub mod presentation_view;
 pub mod player_view;
 pub mod notes_panel;
+pub mod hex_view;
 

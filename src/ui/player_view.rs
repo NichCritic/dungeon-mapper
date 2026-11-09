@@ -18,6 +18,9 @@ pub struct PlayerViewState {
     pub locked: bool,
     /// Map rotation in 90° increments (0, 1, 2, 3 = 0°, 90°, 180°, 270°).
     pub map_rotation: u8,
+    /// A hex map's drawing, and whether the view has been fitted to what's been seen.
+    pub hex_cache: crate::ui::hex_view::HexCanvasCache,
+    pub hex_fitted: bool,
 }
 
 impl Default for PlayerViewState {
@@ -28,6 +31,8 @@ impl Default for PlayerViewState {
             canvas_size: egui::Vec2::ZERO,
             locked: false,
             map_rotation: 0,
+            hex_cache: Default::default(),
+            hex_fitted: false,
         }
     }
 }
@@ -86,6 +91,12 @@ pub fn player_viewport(
 
         let bg = dungeon.theme.background();
         painter.rect_filled(rect, 0.0, egui::Color32::from_rgba_unmultiplied(bg[0], bg[1], bg[2], bg[3]));
+
+        if let Some(map) = &dungeon.hex_map {
+            state.canvas_size = rect.size();
+            crate::ui::hex_view::player_hex_view(&response, &painter, dungeon, map, presentation.show_labels_player, state);
+            return;
+        }
 
         if !state.locked {
             handle_pan_zoom(&response, &mut state.view);

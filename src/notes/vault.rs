@@ -22,6 +22,8 @@ pub enum NoteBind {
     Room(String),
     Encounter(String),
     Door(String),
+    /// A hex on a hex map.
+    Hex(String),
 }
 
 impl NoteBind {
@@ -32,6 +34,7 @@ impl NoteBind {
             NoteBind::Room(_) => "room",
             NoteBind::Encounter(_) => "encounter",
             NoteBind::Door(_) => "door",
+            NoteBind::Hex(_) => "hex",
         }
     }
 
@@ -41,7 +44,8 @@ impl NoteBind {
             NoteBind::Map(id)
             | NoteBind::Room(id)
             | NoteBind::Encounter(id)
-            | NoteBind::Door(id) => id,
+            | NoteBind::Door(id)
+            | NoteBind::Hex(id) => id,
         }
     }
 
@@ -53,6 +57,7 @@ impl NoteBind {
             NoteBind::Room(_) => "rooms",
             NoteBind::Encounter(_) => "encounters",
             NoteBind::Door(_) => "doors",
+            NoteBind::Hex(_) => "hexes",
         }
     }
 
@@ -64,6 +69,7 @@ impl NoteBind {
                 "room" => NoteBind::Room(v.clone()),
                 "encounter" => NoteBind::Encounter(v.clone()),
                 "door" => NoteBind::Door(v.clone()),
+                "hex" => NoteBind::Hex(v.clone()),
                 _ => continue,
             };
             return Some(bind);
@@ -389,6 +395,9 @@ impl NoteVault {
                     Some(&map_name),
                 ));
             }
+            for hex in map.hex_map.iter().flat_map(|m| &m.hexes) {
+                renames.extend(self.rename_for(&NoteBind::Hex(hex.id.clone()), &hex.name(), Some(&map_name)));
+            }
             for edge in &map.graph.connections {
                 let src = map.graph.room_by_id(&edge.source_room_id).map(|r| r.label.as_str()).unwrap_or("?");
                 let tgt = map.graph.room_by_id(&edge.target_room_id).map(|r| r.label.as_str()).unwrap_or("?");
@@ -604,6 +613,30 @@ mod tests {
         reopened.flush();
         let again = std::fs::read_to_string(&file).unwrap();
         assert_eq!(again.matches("The dais is cracked.").count(), 1);
+    }
+
+    #[test]
+    fn hex_notes_follow_the_hex_label() {
+        use crate::model::{HexCoord, HexTerrain};
+        let scratch = Scratch::new("hex");
+        let mut campaign = Campaign::new("Floor 7".to_string());
+        campaign.maps = vec![Dungeon::new_hex("Long Fold".to_string(), 1, HexTerrain::Steppe)];
+        let hex_id = campaign.maps[0].hex_map.as_ref().unwrap().hexes[0].id.clone();
+
+        let mut vault = NoteVault::default();
+        vault.attach(&scratch.save_path());
+        let id = vault.ensure(NoteBind::Hex(hex_id.clone()), "Hex 0,0", Some("Long Fold"));
+        vault.set_body(&id, "Hyenas, 2d4 and a giant hyena.".to_string());
+        vault.flush();
+        campaign.maps[0].hex_map.as_mut().unwrap().hex_mut(HexCoord::new(0, 0)).unwrap().label = "Hyena Flats".into();
+        vault.sync(&mut campaign);
+        vault.flush();
+
+        let mut reloaded = NoteVault::default();
+        reloaded.attach(&scratch.save_path());
+        let found = reloaded.note_id_for(&NoteBind::Hex(hex_id)).expect("binding survived");
+        assert!(found.ends_with("Hyena Flats"), "renamed with the hex: {}", found);
+        assert!(reloaded.get(found).unwrap().body.contains("giant hyena"));
     }
 
     #[test]

@@ -4,7 +4,7 @@ use std::sync::mpsc;
 use crate::model::{Campaign, Dungeon};
 
 /// Current save file format version. Increment when the data model changes.
-const CURRENT_VERSION: u32 = 11;
+const CURRENT_VERSION: u32 = 12;
 
 /// Versioned save file envelope (version 2+: campaign-based).
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -99,7 +99,8 @@ fn load_campaign(version: u32, value: &serde_json::Value) -> Result<Campaign, St
         //           Room.walls replacing open_walls (bools read as Open/Wall),
         //           Room.links_to_map (None), ElevationSection.organic (false); new decor,
         //           terrain and Path connection variants; campfires light by default
-        2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 => {
+        // v11 → v12: hex maps — Dungeon.hex_map (absent: not a hex map)
+        2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 => {
             let mut campaign: Campaign = serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
             if version < 11 {
                 // Campfires are new, so no campaign has a setting for them yet
@@ -351,6 +352,28 @@ mod tests {
     }
 
     #[test]
+    fn hex_maps_round_trip() {
+        use crate::model::*;
+        let mut campaign = Campaign::new("Floor 7".into());
+        let mut hex = Dungeon::new_hex("The Long Fold".into(), 3, HexTerrain::Grassland);
+        let map = hex.hex_map.as_mut().unwrap();
+        let fold = map.hex_mut(HexCoord::new(0, 0)).unwrap();
+        fold.feature = Some(HexFeature::Fold);
+        fold.battle_map = Some(campaign.maps[0].id.clone());
+        map.paths.push(HexPath::through(HexPathKind::River, &[HexCoord::new(-3, 1), HexCoord::new(3, -2)]));
+        map.move_party(HexCoord::new(3, 0));
+        campaign.maps.push(hex);
+        let loaded = deserialize_versioned(&serialize_versioned(&campaign).unwrap()).unwrap();
+        assert!(loaded.maps[0].hex_map.is_none(), "ordinary maps stay ordinary");
+        let map = loaded.maps[1].hex_map.as_ref().unwrap();
+        assert_eq!(map.hexes.len(), 37);
+        assert_eq!(map.hex(HexCoord::new(0, 0)).unwrap().battle_map.as_deref(), Some(campaign.maps[0].id.as_str()));
+        assert_eq!(map.paths[0].hexes, campaign.maps[1].hex_map.as_ref().unwrap().paths[0].hexes);
+        assert_eq!(map.party, Some(HexCoord::new(3, 0)));
+        assert_eq!(map.revealed.len(), 4);
+    }
+
+    #[test]
     fn test_save_to_path_writes_loadable_file() {
         let mut campaign = Campaign::new("Saved".into());
         campaign.maps[0].name = "Only Map".into();
@@ -390,7 +413,7 @@ mod tests {
     fn test_roundtrip_campaign() {
         let mut campaign = Campaign::new("Test Campaign".to_string());
         campaign.maps[0].name = "First Map".to_string();
-        campaign.add_map("Second Map".to_string());
+        campaign.maps.push(Dungeon::new("Second Map".to_string()));
         campaign.party.push(crate::model::PlayerCharacter::new("Fighter".to_string()));
 
         let json = serialize_versioned(&campaign).unwrap();
@@ -574,7 +597,7 @@ mod tests {
     #[test]
     fn test_version_6_map_ids_roundtrip_and_v5_loads() {
         let mut campaign = Campaign::new("Six".to_string());
-        campaign.add_map("Second".to_string());
+        campaign.maps.push(Dungeon::new("Second".to_string()));
         let ids: Vec<String> = campaign.maps.iter().map(|m| m.id.clone()).collect();
         assert!(ids.iter().all(|id| !id.is_empty()), "every map gets an id");
         assert_ne!(ids[0], ids[1], "map ids are distinct");
