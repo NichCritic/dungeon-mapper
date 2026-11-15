@@ -16,7 +16,7 @@ use crate::data::monster_db::SOURCES_2024;
 const SEARCH_LIMIT: usize = 50;
 
 pub fn definitions() -> Vec<Value> {
-    let room = json!({ "type": "string", "description": "Room id, or its label (case-insensitive)" });
+    let room = json!({ "type": "string", "description": "Room id, or its label (case-insensitive). On a hex map: a hex (its label, or q,r) for an encounter that's always there, or \"random\" for the map's random encounter table" });
     let encounter = json!({ "type": "string", "description": "Encounter id, or its name (case-insensitive)" });
     let cr = json!({ "description": "Challenge rating, e.g. 2 or \"1/4\"", "oneOf": [{ "type": "number" }, { "type": "string" }] });
     let monsters = json!({
@@ -47,6 +47,7 @@ pub fn definitions() -> Vec<Value> {
         "wandering": { "type": "boolean", "description": "Wanders between rooms instead of staying put" },
         "wander_range": { "type": ["integer", "null"], "description": "How many rooms away it wanders; null = anywhere" },
         "hazard": hazard,
+        "weight": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Hex maps, random table only: how likely against the others (default 1)" },
     });
     let mut update_fields = encounter_fields.clone();
     update_fields["encounter"] = encounter.clone();
@@ -415,6 +416,9 @@ pub fn encounter_summary(ctx: &ToolCtx, e: &Encounter) -> Value {
         "monsters": monsters,
         "total_xp": total_xp(ctx, e),
     });
+    if let Some(w) = super::hex::random_weight_of(ctx.dungeon, &e.id) {
+        v["weight"] = json!(w);
+    }
     match e.encounter_type {
         EncounterType::Static => {}
         EncounterType::Wandering(range) => v["wandering"] = json!({ "range": range }),
@@ -513,16 +517,27 @@ fn create_encounter(ctx: &mut ToolCtx, args: &Value) -> Result<Value, String> {
     }
     let mut e = Encounter::new(name.to_string(), room);
     apply_encounter_fields(ctx, &mut e, args)?;
-    let summary = encounter_summary(ctx, &e);
+    let id = e.id.clone();
     ctx.dungeon.encounters.push(e);
-    Ok(summary)
+    let i = ctx.dungeon.encounters.len() - 1;
+    if let Err(err) = super::hex::sync_encounter_weight(ctx, &id, args) {
+        ctx.dungeon.encounters.pop();
+        super::hex::sync_random(ctx);
+        return Err(err);
+    }
+    Ok(encounter_summary(ctx, &ctx.dungeon.encounters[i]))
 }
 
 fn update_encounter(ctx: &mut ToolCtx, args: &Value) -> Result<Value, String> {
     let i = resolve_encounter(ctx, req_str(args, "encounter")?)?;
     let mut e = ctx.dungeon.encounters[i].clone();
     apply_encounter_fields(ctx, &mut e, args)?;
-    ctx.dungeon.encounters[i] = e;
+    let before = std::mem::replace(&mut ctx.dungeon.encounters[i], e);
+    if let Err(err) = super::hex::sync_encounter_weight(ctx, &before.id, args) {
+        ctx.dungeon.encounters[i] = before;
+        super::hex::sync_random(ctx);
+        return Err(err);
+    }
     prune_tokens(ctx);
     Ok(encounter_summary(ctx, &ctx.dungeon.encounters[i]))
 }
@@ -531,6 +546,7 @@ fn delete_encounter(ctx: &mut ToolCtx, args: &Value) -> Result<Value, String> {
     let i = resolve_encounter(ctx, req_str(args, "encounter")?)?;
     let e = ctx.dungeon.encounters.remove(i);
     crate::presentation::tokens::remove_encounter_tokens(&mut ctx.dungeon.tokens, &e.id);
+    super::hex::sync_random(ctx);
     Ok(json!({ "deleted": e.name, "room": label_of(ctx.dungeon, &e.home_room_id) }))
 }
 

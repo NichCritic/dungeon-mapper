@@ -298,6 +298,9 @@ pub struct Hex {
     /// The map (by id) to fight on when an encounter happens here.
     #[serde(default)]
     pub battle_map: Option<String>,
+    /// How many sheep are in the hex.
+    #[serde(default)]
+    pub sheep: u32,
 }
 
 impl Hex {
@@ -309,6 +312,7 @@ impl Hex {
             feature: None,
             label: String::new(),
             battle_map: None,
+            sheep: 0,
         }
     }
 
@@ -335,12 +339,63 @@ pub struct HexMap {
     /// The hex the party is in, at the table.
     #[serde(default)]
     pub party: Option<HexCoord>,
-    /// Hexes the players have seen.
+    /// Hexes the players have seen, from inside or from afar.
     #[serde(default)]
     pub revealed: BTreeSet<HexCoord>,
+    /// Hexes the party has been in: always also in `revealed`. The rest of
+    /// `revealed` has only been observed (from a watch tower, a hilltop).
+    #[serde(default)]
+    pub explored: BTreeSet<HexCoord>,
     /// How far from the party hexes are revealed as it moves.
     #[serde(default = "default_reveal_radius")]
     pub reveal_radius: u32,
+    /// The encounters that may turn up anywhere on the map, rolled for at the
+    /// table. The encounters themselves are the map's (`Dungeon::encounters`, with
+    /// no home); a hex's own encounters have the hex's id as their home and are
+    /// always there, never rolled.
+    #[serde(default)]
+    pub random_encounters: Vec<RandomEncounter>,
+    /// The last random encounter rolled, until it's fought or cleared.
+    #[serde(default)]
+    pub rolled: Option<RolledEncounter>,
+}
+
+/// An entry on a hex map's random encounter table.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RandomEncounter {
+    /// The encounter's id.
+    pub encounter: String,
+    /// How likely it is against the others: 2 comes up twice as often as 1.
+    pub weight: u32,
+}
+
+/// A random encounter that came up, and the hex it came up in.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RolledEncounter {
+    pub encounter: String,
+    pub hex: HexCoord,
+}
+
+/// How much the players know of a hex.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum HexSight {
+    Hidden,
+    /// Seen from somewhere else.
+    Observed,
+    /// The party has been in it.
+    Explored,
+}
+
+impl HexSight {
+    pub const ALL: [HexSight; 3] = [HexSight::Hidden, HexSight::Observed, HexSight::Explored];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            HexSight::Hidden => "Hidden",
+            HexSight::Observed => "Observed",
+            HexSight::Explored => "Explored",
+        }
+    }
 }
 
 fn default_miles_per_hex() -> f32 {
@@ -361,7 +416,10 @@ impl HexMap {
             paths: Vec::new(),
             party: None,
             revealed: BTreeSet::new(),
+            explored: BTreeSet::new(),
             reveal_radius: default_reveal_radius(),
+            random_encounters: Vec::new(),
+            rolled: None,
         }
     }
 
@@ -385,10 +443,14 @@ impl HexMap {
     }
 
     /// Remove a hex, and take it out of the paths through it (a path cut in two
-    /// becomes two paths).
-    pub fn remove_hex(&mut self, c: HexCoord) {
-        self.hexes.retain(|h| h.coord != c);
+    /// becomes two paths). Returns the hex, so its encounters can go too.
+    pub fn remove_hex(&mut self, c: HexCoord) -> Option<Hex> {
+        let removed = self.hexes.iter().position(|h| h.coord == c).map(|i| self.hexes.remove(i));
+        if self.rolled.as_ref().is_some_and(|r| r.hex == c) {
+            self.rolled = None;
+        }
         self.revealed.remove(&c);
+        self.explored.remove(&c);
         if self.party == Some(c) {
             self.party = None;
         }
@@ -404,6 +466,50 @@ impl HexMap {
             }
         }
         self.paths = paths;
+        removed
+    }
+
+    /// Keep the random table in step with the map's encounters: an encounter with
+    /// no home is on it (at weight 1 if new), any other is not. A roll of an
+    /// encounter that's gone is forgotten.
+    pub fn sync_random(&mut self, encounters: &[super::Encounter]) {
+        self.random_encounters.retain(|r| encounters.iter().any(|e| e.id == r.encounter && e.home_room_id.is_empty()));
+        for e in encounters.iter().filter(|e| e.home_room_id.is_empty()) {
+            if !self.random_encounters.iter().any(|r| r.encounter == e.id) {
+                self.random_encounters.push(RandomEncounter { encounter: e.id.clone(), weight: 1 });
+            }
+        }
+        if self.rolled.as_ref().is_some_and(|r| !encounters.iter().any(|e| e.id == r.encounter)) {
+            self.rolled = None;
+        }
+    }
+
+    /// The table's total weight.
+    pub fn random_weight(&self) -> u32 {
+        self.random_encounters.iter().map(|r| r.weight).sum()
+    }
+
+    /// The random encounter at `n` along the table, for `n` below its total weight.
+    pub fn random_at(&self, mut n: u32) -> Option<&RandomEncounter> {
+        self.random_encounters.iter().find(|r| {
+            if n < r.weight {
+                return true;
+            }
+            n -= r.weight;
+            false
+        })
+    }
+
+    /// Roll on the random table for a hex, remembering what came up.
+    pub fn roll_random(&mut self, hex: HexCoord) -> Option<&RolledEncounter> {
+        use rand::Rng;
+        let total = self.random_weight();
+        if total == 0 {
+            return None;
+        }
+        let pick = self.random_at(rand::thread_rng().gen_range(0..total))?.encounter.clone();
+        self.rolled = Some(RolledEncounter { encounter: pick, hex });
+        self.rolled.as_ref()
     }
 
     /// Hexes next to the map that aren't on it yet: where it can grow.
@@ -413,10 +519,19 @@ impl HexMap {
         rim.into_iter().collect()
     }
 
-    /// Put the party in a hex and reveal what it can see from there.
+    /// Put the party in a hex, exploring it, and observe what it can see from there.
     pub fn move_party(&mut self, c: HexCoord) {
         self.party = Some(c);
-        for seen in c.within(self.reveal_radius as i32) {
+        self.observe_from(c, self.reveal_radius);
+        if self.hex(c).is_some() {
+            self.set_sight(c, HexSight::Explored);
+        }
+    }
+
+    /// Observe the hexes within `radius` of `c` (say from a watch tower). Hexes
+    /// already explored stay explored.
+    pub fn observe_from(&mut self, c: HexCoord, radius: u32) {
+        for seen in c.within(radius as i32) {
             if self.hex(seen).is_some() {
                 self.revealed.insert(seen);
             }
@@ -426,6 +541,44 @@ impl HexMap {
     /// Whether the players can see a hex.
     pub fn is_revealed(&self, c: HexCoord) -> bool {
         self.revealed.contains(&c)
+    }
+
+    pub fn sight(&self, c: HexCoord) -> HexSight {
+        if self.explored.contains(&c) {
+            HexSight::Explored
+        } else if self.revealed.contains(&c) {
+            HexSight::Observed
+        } else {
+            HexSight::Hidden
+        }
+    }
+
+    pub fn set_sight(&mut self, c: HexCoord, sight: HexSight) {
+        match sight {
+            HexSight::Hidden => {
+                self.revealed.remove(&c);
+                self.explored.remove(&c);
+            }
+            HexSight::Observed => {
+                self.revealed.insert(c);
+                self.explored.remove(&c);
+            }
+            HexSight::Explored => {
+                self.revealed.insert(c);
+                self.explored.insert(c);
+            }
+        }
+    }
+
+    /// Hide every hex from the players.
+    pub fn hide_all(&mut self) {
+        self.revealed.clear();
+        self.explored.clear();
+    }
+
+    /// Sheep on the whole map.
+    pub fn total_sheep(&self) -> u32 {
+        self.hexes.iter().map(|h| h.sheep).sum()
     }
 
     /// World-pixel bounds of the given hexes: (min x, min y, max x, max y).
@@ -508,5 +661,50 @@ mod tests {
         map.reveal_radius = 0;
         map.move_party(HexCoord::new(-3, 0));
         assert_eq!(map.revealed.len(), 5);
+    }
+
+    #[test]
+    fn the_random_table_follows_the_encounters_and_picks_by_weight() {
+        use crate::model::Encounter;
+        let mut map = HexMap::with_radius(1, HexTerrain::Plains);
+        let wolves = Encounter::new("Wolves".into(), String::new());
+        let bandits = Encounter::new("Bandits".into(), String::new());
+        let den = Encounter::new("Wolf den".into(), map.hexes[0].id.clone());
+        let mut encounters = vec![wolves.clone(), bandits.clone(), den];
+        map.sync_random(&encounters);
+        // The den belongs to its hex, so only the homeless two are on the table
+        assert_eq!(map.random_encounters.len(), 2);
+        map.random_encounters[0].weight = 3;
+        assert_eq!(map.random_weight(), 4);
+        let picks: Vec<&str> = (0..4).map(|n| map.random_at(n).unwrap().encounter.as_str()).collect();
+        assert_eq!(picks, [wolves.id.as_str(), &wolves.id, &wolves.id, &bandits.id]);
+        assert!(map.random_at(4).is_none());
+
+        map.roll_random(HexCoord::new(0, 0)).unwrap();
+        // Once the rolled one and the bandits are gone, the roll is forgotten too
+        encounters.retain(|e| e.name == "Wolf den");
+        map.sync_random(&encounters);
+        assert!(map.random_encounters.is_empty());
+        assert!(map.rolled.is_none());
+        assert!(map.roll_random(HexCoord::new(0, 0)).is_none());
+    }
+
+    #[test]
+    fn the_party_explores_where_it_goes_and_observes_round_it() {
+        let mut map = HexMap::with_radius(3, HexTerrain::Plains);
+        map.move_party(HexCoord::new(0, 0));
+        map.move_party(HexCoord::new(1, 0));
+        assert_eq!(map.sight(HexCoord::new(0, 0)), HexSight::Explored);
+        assert_eq!(map.sight(HexCoord::new(1, 0)), HexSight::Explored);
+        assert_eq!(map.sight(HexCoord::new(2, 0)), HexSight::Observed);
+        assert_eq!(map.sight(HexCoord::new(-3, 0)), HexSight::Hidden);
+        // A watch tower sees further, without un-exploring anything
+        map.observe_from(HexCoord::new(0, 0), 3);
+        assert_eq!(map.sight(HexCoord::new(-3, 0)), HexSight::Observed);
+        assert_eq!(map.sight(HexCoord::new(0, 0)), HexSight::Explored);
+        assert!(map.explored.is_subset(&map.revealed));
+        map.set_sight(HexCoord::new(0, 0), HexSight::Hidden);
+        assert!(!map.is_revealed(HexCoord::new(0, 0)));
+        assert!(map.explored.is_subset(&map.revealed));
     }
 }

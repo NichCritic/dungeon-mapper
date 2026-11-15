@@ -361,9 +361,9 @@ fn help_canvas_hex(presenting: bool) -> HelpContent {
     let lines = if presenting {
         vec![
             HelpLine::Key("Click hex", "Select it: its battle map and note"),
-            HelpLine::Key("Double-click hex", "Move the party there (reveals round it)"),
+            HelpLine::Key("Double-click hex", "Move the party there (explores it, observes round it)"),
             HelpLine::Key("Drag banner", "Move the party"),
-            HelpLine::Key("Right-click hex", "Reveal or hide it from the players"),
+            HelpLine::Key("Right-click hex", "Menu: party, sight, sheep, roll or fight encounters"),
             HelpLine::Blank,
             HelpLine::Key("Scroll", "Zoom"),
             HelpLine::Key("Drag", "Pan"),
@@ -389,14 +389,22 @@ fn help_sidebar_hex(presenting: bool) -> HelpContent {
         lines: if presenting {
             vec![
                 HelpLine::Text("Where the party is, and how far round it the players see."),
+                HelpLine::Text("Explored hexes are clear; observed ones are shaded lighter."),
+                HelpLine::Text("'Observe from here' shows what a watch tower would see."),
+                HelpLine::Text("Count the sheep in the selected hex with − and +."),
+                HelpLine::Text("Roll for a random encounter in the party's hex; Fight"),
+                HelpLine::Text("copies it (or a hex's own) onto the hex's battle map."),
                 HelpLine::Text("Open a hex's battle map to fight there: the players"),
                 HelpLine::Text("stay on the hex map until you show them the battle map."),
             ]
         } else {
             vec![
                 HelpLine::Text("Pick a tool, terrain, landmark or path kind."),
-                HelpLine::Text("Selected hexes: label, terrain, landmark, battle map."),
-                HelpLine::Text("'New battle map' makes an outdoor map linked to them."),
+                HelpLine::Text("Selected hexes: label, terrain, landmark, sheep, battle map."),
+                HelpLine::Text("A hex's own encounters are always there (crossed swords);"),
+                HelpLine::Text("random encounters are a weighted table for the whole map."),
+                HelpLine::Text("'New battle map' makes an outdoor map linked to them;"),
+                HelpLine::Text("battle maps stay off the top bar and open from their hex."),
                 HelpLine::Text("'Grow' adds a ring of hexes round the edge."),
             ]
         },

@@ -99,7 +99,9 @@ fn load_campaign(version: u32, value: &serde_json::Value) -> Result<Campaign, St
         //           Room.walls replacing open_walls (bools read as Open/Wall),
         //           Room.links_to_map (None), ElevationSection.organic (false); new decor,
         //           terrain and Path connection variants; campfires light by default
-        // v11 → v12: hex maps — Dungeon.hex_map (absent: not a hex map)
+        // v11 → v12: hex maps — Dungeon.hex_map (absent: not a hex map); since then also
+        //           Hex.sheep (0) and HexMap.explored (empty: what was revealed reads as
+        //           observed)
         2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 => {
             let mut campaign: Campaign = serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
             if version < 11 {

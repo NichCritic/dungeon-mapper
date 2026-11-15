@@ -537,6 +537,23 @@ fn encounter_compact_row(
     });
 }
 
+/// Open the encounter editor window on an encounter.
+pub fn open_encounter_editor(ctx: &egui::Context, encounter_id: &str) {
+    ctx.memory_mut(|mem| mem.data.insert_temp(egui::Id::new("encounter_editor_target"), encounter_id.to_string()));
+    WindowDock::open(ctx, DockWindow::EncounterEditor);
+}
+
+/// The monsters in an encounter on one line: "3× Wolf (1/4), 1× Dire Wolf (1)".
+pub fn monster_summary(enc: &Encounter, db: &MonsterDatabase, custom: &[CustomMonster]) -> String {
+    if enc.monsters.is_empty() {
+        return "no monsters yet".into();
+    }
+    enc.monsters.iter()
+        .map(|em| format!("{}× {}", em.count, resolve_monster_name(&em.monster_ref, db, custom)))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Pop-out encounter editor window. Shared between encounters tab and presentation view.
 pub fn encounter_editor_window(
     ctx: &egui::Context,
@@ -561,6 +578,17 @@ pub fn encounter_editor_window(
         .map(|r| (r.id.clone(), r.label.clone()))
         .collect();
 
+    // On a hex map an encounter belongs to a hex or to the random table, not a room,
+    // and it doesn't wander between rooms
+    let hex_place: Option<String> = dungeon.hex_map.as_ref().map(|map| {
+        let home = &dungeon.encounters[enc_idx].home_room_id;
+        if home.is_empty() {
+            "On the map's random encounter table".to_string()
+        } else {
+            map.hexes.iter().find(|h| h.id == *home).map_or_else(|| "In a hex that's gone".to_string(), |h| format!("Always in {}", h.name()))
+        }
+    });
+
     let title = format!("Edit: {}", dungeon.encounters[enc_idx].name);
 
     let mut remove_monster_idx: Option<usize> = None;
@@ -579,8 +607,8 @@ pub fn encounter_editor_window(
                     ui.text_edit_singleline(&mut enc.name);
                 });
 
-                // Type selector
-                ui.horizontal(|ui| {
+                // Type selector (rooms only)
+                if hex_place.is_none() { ui.horizontal(|ui| {
                     let is_static = enc.encounter_type == EncounterType::Static;
                     if ui.selectable_label(is_static, "Static").clicked() {
                         enc.encounter_type = EncounterType::Static;
@@ -610,7 +638,7 @@ pub fn encounter_editor_window(
                             enc.encounter_type = EncounterType::Wandering(wander_range);
                         }
                     }
-                });
+                }); }
 
                 // Hazard toggle
                 let mut is_hazard = enc.hazard.is_some();
@@ -672,19 +700,23 @@ pub fn encounter_editor_window(
                     });
                 }
 
-                // Home room
-                egui::ComboBox::from_id_salt(format!("enc_home_{}", enc_id))
-                    .selected_text(
-                        dungeon.graph.room_by_id(&enc.home_room_id)
-                            .map(|r| r.label.as_str())
-                            .unwrap_or("Select room"),
-                    )
-                    .width(150.0)
-                    .show_ui(ui, |ui| {
-                        for (rid, rlabel) in &rooms_list {
-                            ui.selectable_value(&mut enc.home_room_id, rid.clone(), rlabel);
-                        }
-                    });
+                // Home room, or where it is on a hex map
+                if let Some(place) = &hex_place {
+                    ui.weak(place);
+                } else {
+                    egui::ComboBox::from_id_salt(format!("enc_home_{}", enc_id))
+                        .selected_text(
+                            dungeon.graph.room_by_id(&enc.home_room_id)
+                                .map(|r| r.label.as_str())
+                                .unwrap_or("Select room"),
+                        )
+                        .width(150.0)
+                        .show_ui(ui, |ui| {
+                            for (rid, rlabel) in &rooms_list {
+                                ui.selectable_value(&mut enc.home_room_id, rid.clone(), rlabel);
+                            }
+                        });
+                }
 
                 ui.separator();
 

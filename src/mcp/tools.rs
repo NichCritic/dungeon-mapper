@@ -346,6 +346,7 @@ fn describe(ctx: &ToolCtx, tool: &str, args: &Value, result: &Value) -> Option<S
         "create_battle_map" => format!("made battle map {}", s(&result["created"])),
         "set_hex_party" => "moved the party or changed what the players see".into(),
         "focus_hex" => format!("selected {}", s(&result["selected"])),
+        "roll_hex_encounter" => format!("rolled {} in {}", s(&result["rolled"]["name"]), s(&result["hex"])),
         "rename_campaign" => format!("renamed the campaign to {}", s(&result["to"])),
         "delete_note" => format!("deleted note {}", s(&result["deleted"])),
         "move_room" => format!("moved {}", s(&result["room"])),
@@ -523,6 +524,13 @@ fn parse_light(v: &Value) -> Result<DecorLightSetting, String> {
 
 /// A room by id, or by its label when exactly one room has it.
 pub(super) fn resolve_room(d: &Dungeon, r: &str) -> Result<String, String> {
+    // On a hex map an encounter's home is a hex, or nothing for the random table
+    if d.hex_map.is_some() {
+        if r.trim().eq_ignore_ascii_case("random") {
+            return Ok(String::new());
+        }
+        return hex::resolve_hex(d, r).map(|h| h.id.clone());
+    }
     if let Some(room) = d.graph.room_by_id(r) {
         return Ok(room.id.clone());
     }
@@ -552,6 +560,14 @@ fn floor_json(f: &FloorAssignment) -> Value {
 }
 
 pub(super) fn label_of(d: &Dungeon, id: &str) -> String {
+    if let Some(map) = &d.hex_map {
+        if id.is_empty() {
+            return "the random table".into();
+        }
+        if let Some(hex) = map.hexes.iter().find(|h| h.id == id) {
+            return hex.name();
+        }
+    }
     d.graph.room_by_id(id).map(|r| r.label.clone()).unwrap_or_else(|| id.to_string())
 }
 
@@ -637,6 +653,7 @@ fn overview(ctx: &ToolCtx) -> Value {
         "hex_map": d.hex_map.as_ref().map(|m| json!({
             "hexes": m.hexes.len(),
             "paths": m.paths.len(),
+            "sheep": m.total_sheep(),
             "note": "A hex map: it has hexes, not rooms. get_hex_map has the hexes.",
         })),
         "rooms": d.graph.rooms.iter().map(|r| room_summary(d, r)).collect::<Vec<_>>(),
@@ -2205,5 +2222,47 @@ mod tests {
 
         f.call("create_map", json!({ "name": "Wilds", "hex": { "radius": 2, "terrain": "Forest" } })).unwrap();
         assert_eq!(f.app_action, Some(AppAction::CreateMap("Wilds".into(), Some((2, HexTerrain::Forest)))));
+    }
+
+    #[test]
+    fn hex_maps_have_encounters_in_hexes_and_a_random_table() {
+        use crate::model::HexTerrain;
+        let mut f = Fixture::new();
+        f.dungeon = Dungeon::new_hex("Long Fold".into(), 2, HexTerrain::Grassland);
+        assert!(f.call("roll_hex_encounter", json!({ "hex": [0, 0] })).unwrap_err().contains("no random encounters"));
+
+        let wolves = f.call("create_encounter", json!({ "name": "Wolves", "room": "random", "weight": 3 })).unwrap();
+        assert_eq!((wolves["room"].as_str(), wolves["weight"].as_u64()), (Some("the random table"), Some(3)));
+        f.call("create_encounter", json!({ "name": "Rustlers", "room": "Random" })).unwrap();
+        let den = f.call("create_encounter", json!({ "name": "Wolf den", "room": "1,0" })).unwrap();
+        assert_eq!(den["room"], "Hex 1,0");
+        // Weights are only for the table, and a failed create leaves nothing behind
+        assert!(f.call("create_encounter", json!({ "name": "Bad", "room": "0,0", "weight": 2 })).is_err());
+        assert_eq!(f.dungeon.encounters.len(), 3);
+
+        let m = f.call("get_hex_map", json!({})).unwrap();
+        let table = m["random_encounters"].as_array().unwrap();
+        assert_eq!(table.len(), 2);
+        assert_eq!((table[0]["name"].as_str(), table[0]["chance"].as_str()), (Some("Wolves"), Some("75%")));
+        let east = m["hexes"].as_array().unwrap().iter().find(|h| h["hex"] == json!([1, 0])).unwrap();
+        assert_eq!(east["encounters"], json!(["Wolf den"]));
+
+        // Moving the den onto the table; the party's hex is rolled for by default
+        f.call("update_encounter", json!({ "encounter": "wolf den", "room": "random" })).unwrap();
+        assert_eq!(f.dungeon.hex_map.as_ref().unwrap().random_encounters.len(), 3);
+        f.call("set_hex_party", json!({ "party": [0, 0] })).unwrap();
+        let r = f.call("roll_hex_encounter", json!({})).unwrap();
+        assert_eq!(r["hex"], "Hex 0,0");
+        assert!(f.dungeon.hex_map.as_ref().unwrap().rolled.is_some());
+
+        // Deleting what was rolled forgets the roll; removing a hex takes its encounters
+        let rolled = r["rolled"]["name"].as_str().unwrap().to_string();
+        f.call("delete_encounter", json!({ "encounter": rolled })).unwrap();
+        assert!(f.dungeon.hex_map.as_ref().unwrap().rolled.is_none());
+        assert_eq!(f.dungeon.hex_map.as_ref().unwrap().random_encounters.len(), 2);
+        f.call("create_encounter", json!({ "name": "Watchers", "room": "-1,0" })).unwrap();
+        let gone = f.call("remove_hexes", json!({ "hexes": [[-1, 0]] })).unwrap();
+        assert_eq!(gone["encounters_removed"], 1);
+        assert!(!f.dungeon.encounters.iter().any(|e| e.name == "Watchers"));
     }
 }

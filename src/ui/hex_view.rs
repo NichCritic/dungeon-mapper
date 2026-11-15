@@ -1,8 +1,10 @@
 //! The hex map: editing it (terrain, landmarks, rivers and roads, battle maps), and
 //! playing on it at the table (the party's token and what the players have seen).
 
+use crate::data::MonsterDatabase;
 use crate::model::*;
 use crate::render::decor::PainterSink;
+use crate::ui::encounters_view::{monster_summary, open_encounter_editor};
 use crate::render::recording::{RecordingRenderer, RenderCommand, ReplayCache};
 use crate::ui::canvas_common::{handle_pan_zoom, ViewState, COLOR_SELECTION};
 use crate::util::ViewTransform;
@@ -37,6 +39,9 @@ pub enum HexRequest {
     OpenMap(String),
     /// Make a battle map for the selected hexes, link them to it and open it.
     CreateBattleMap,
+    /// Copy an encounter onto a hex's battle map (making one if it has none) and
+    /// open it there.
+    Fight { encounter: String, hex: HexCoord },
 }
 
 /// The hex map drawn once into commands, replayed each frame until it changes.
@@ -57,6 +62,7 @@ impl HexCanvasCache {
         players.hash(&mut h);
         if players {
             map.revealed.hash(&mut h);
+            map.explored.hash(&mut h);
         }
         let hash = h.finish();
         if self.hash != Some(hash) {
@@ -85,6 +91,10 @@ pub struct HexViewState {
     pub selected_path: Option<String>,
     pub show_labels: bool,
     pub request: Option<HexRequest>,
+    /// How far "Observe from here" sees, at the table.
+    pub lookout_radius: u32,
+    /// The hex the right-click menu is for.
+    menu_hex: Option<HexCoord>,
     cache: HexCanvasCache,
     fitted: bool,
     dragging_party: bool,
@@ -105,6 +115,8 @@ impl Default for HexViewState {
             selected_path: None,
             show_labels: true,
             request: None,
+            lookout_radius: 2,
+            menu_hex: None,
             cache: HexCanvasCache::default(),
             fitted: false,
             dragging_party: false,
@@ -162,6 +174,48 @@ fn draw_labels(painter: &egui::Painter, map: &HexMap, t: &ViewTransform, theme: 
         let pos = t.world_to_screen(egui::pos2(cx, cy + HEX_SIZE * 0.62));
         painter.text(pos, egui::Align2::CENTER_CENTER, &hex.label, font.clone(), color);
     }
+}
+
+/// A sheep badge with the count in the upper left of each hex that has sheep.
+fn draw_sheep(painter: &egui::Painter, map: &HexMap, t: &ViewTransform, theme: &Theme, shown: impl Fn(HexCoord) -> bool) {
+    let [ir, ig, ib, _] = theme.wall_color;
+    let [pr, pg, pb, _] = theme.floor_color;
+    let ink = egui::Color32::from_rgb(ir, ig, ib);
+    let paper = egui::Color32::from_rgba_unmultiplied(pr, pg, pb, 225);
+    let font = egui::FontId::proportional((7.5 * t.zoom).max(6.0));
+    let u = (HEX_SIZE * 0.075 * t.zoom).max(3.0);
+    for hex in map.hexes.iter().filter(|h| h.sheep > 0 && shown(h.coord)) {
+        let (cx, cy) = map.orientation.center(hex.coord);
+        // Off-centre the other way from the party's banner, clear of the landmark
+        let at = t.world_to_screen(egui::pos2(cx - HEX_SIZE * 0.5, cy - HEX_SIZE * 0.36));
+        let galley = painter.layout_no_wrap(hex.sheep.to_string(), font.clone(), ink);
+        let icon_w = u * 3.2;
+        let pad = u * 0.6;
+        let w = pad + icon_w + u * 0.4 + galley.size().x + pad;
+        let h = (u * 2.6).max(galley.size().y + 2.0);
+        let pill = egui::Rect::from_min_size(egui::pos2(at.x - icon_w / 2.0 - pad, at.y - h / 2.0), egui::vec2(w, h));
+        painter.rect(pill, h / 2.0, paper, egui::Stroke::new(1.0_f32, ink.gamma_multiply(0.6)), egui::StrokeKind::Inside);
+        draw_sheep_icon(painter, at, u, ink);
+        painter.galley(egui::pos2(at.x + icon_w / 2.0 + u * 0.4, at.y - galley.size().y / 2.0), galley, ink);
+    }
+}
+
+/// A little sheep facing right, centred on `at`, about 3 × 2 `u` across.
+fn draw_sheep_icon(painter: &egui::Painter, at: egui::Pos2, u: f32, ink: egui::Color32) {
+    let fleece = [(-0.55, 0.1), (0.35, 0.1), (-0.1, -0.3), (-0.1, 0.35)];
+    let leg = egui::Stroke::new((u * 0.22).max(1.0), ink);
+    for dx in [-0.6, 0.35] {
+        painter.line_segment([at + egui::vec2(dx * u, 0.4 * u), at + egui::vec2(dx * u, 1.0 * u)], leg);
+    }
+    // Ink a touch larger first, so the fleece reads as one outlined cloud
+    let edge = (u * 0.18).max(0.8);
+    for (x, y) in fleece {
+        painter.circle_filled(at + egui::vec2(x * u, y * u), u * 0.62 + edge, ink);
+    }
+    for (x, y) in fleece {
+        painter.circle_filled(at + egui::vec2(x * u, y * u), u * 0.62, egui::Color32::WHITE);
+    }
+    painter.circle_filled(at + egui::vec2(1.05 * u, -0.2 * u), u * 0.42, ink);
 }
 
 fn draw_party(painter: &egui::Painter, map: &HexMap, t: &ViewTransform, at: Option<HexCoord>) {
@@ -278,7 +332,9 @@ pub fn hex_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut HexViewSta
         HexTool::Erase => {
             if pointer_down {
                 if let Some(c) = hover.filter(|c| map.hex(*c).is_some()) {
-                    map.remove_hex(c);
+                    if let Some(gone) = map.remove_hex(c) {
+                        dungeon.encounters.retain(|e| e.home_room_id != gone.id);
+                    }
                     state.selected.retain(|s| *s != c);
                 }
             }
@@ -293,7 +349,9 @@ pub fn hex_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut HexViewSta
             map.paths.retain(|p| p.id != id);
         } else {
             for c in std::mem::take(&mut state.selected) {
-                map.remove_hex(c);
+                if let Some(gone) = map.remove_hex(c) {
+                    dungeon.encounters.retain(|e| e.home_room_id != gone.id);
+                }
             }
         }
     }
@@ -303,6 +361,8 @@ pub fn hex_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut HexViewSta
     if state.show_labels {
         draw_labels(&painter, map, &t, &dungeon.theme, |_| true);
     }
+    draw_sheep(&painter, map, &t, &dungeon.theme, |_| true);
+    draw_encounter_marks(&painter, map, &t, &dungeon.theme, &dungeon.encounters);
     if let Some(id) = &state.selected_path {
         if let Some(path) = map.paths.iter().find(|p| &p.id == id) {
             let pts: Vec<egui::Pos2> = path.hexes.iter().map(|&c| {
@@ -341,7 +401,49 @@ pub fn hex_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut HexViewSta
 
     if let Some(c) = hover {
         if let Some(hex) = map.hex(c) {
-            response.on_hover_text_at_pointer(format!("{} — {}", hex.name(), hex.terrain.label()));
+            response.on_hover_text_at_pointer(hover_text(hex, &dungeon.encounters));
+        }
+    }
+}
+
+fn hover_text(hex: &Hex, encounters: &[Encounter]) -> String {
+    let mut text = match hex.sheep {
+        0 => format!("{} — {}", hex.name(), hex.terrain.label()),
+        1 => format!("{} — {}, 1 sheep", hex.name(), hex.terrain.label()),
+        n => format!("{} — {}, {} sheep", hex.name(), hex.terrain.label(), n),
+    };
+    for e in hex_encounters(hex, encounters) {
+        text.push_str(&format!("\nEncounter: {}", e.name));
+    }
+    text
+}
+
+/// A hex's own encounters: always there, never rolled.
+fn hex_encounters<'a>(hex: &'a Hex, encounters: &'a [Encounter]) -> impl Iterator<Item = &'a Encounter> + 'a {
+    encounters.iter().filter(move |e| e.home_room_id == hex.id)
+}
+
+/// Crossed swords in the lower left of each hex with encounters of its own: the DM's
+/// reminder, never shown to the players.
+fn draw_encounter_marks(painter: &egui::Painter, map: &HexMap, t: &ViewTransform, theme: &Theme, encounters: &[Encounter]) {
+    let [ir, ig, ib, _] = theme.wall_color;
+    let ink = egui::Color32::from_rgb(ir, ig, ib);
+    let [pr, pg, pb, _] = theme.floor_color;
+    let paper = egui::Color32::from_rgba_unmultiplied(pr, pg, pb, 225);
+    let u = (HEX_SIZE * 0.1 * t.zoom).max(4.0);
+    let blade = egui::Stroke::new((u * 0.2).max(1.2), ink);
+    for hex in map.hexes.iter().filter(|h| hex_encounters(h, encounters).next().is_some()) {
+        let (cx, cy) = map.orientation.center(hex.coord);
+        let at = t.world_to_screen(egui::pos2(cx - HEX_SIZE * 0.42, cy + HEX_SIZE * 0.3));
+        painter.circle(at, u * 1.25, paper, egui::Stroke::new(1.0_f32, ink.gamma_multiply(0.6)));
+        for dir in [1.0_f32, -1.0] {
+            // Each sword runs corner to corner; a short guard crosses it near the hilt
+            let tip = at + egui::vec2(dir * 0.75 * u, -0.75 * u);
+            let pommel = at + egui::vec2(-dir * 0.75 * u, 0.75 * u);
+            painter.line_segment([tip, pommel], blade);
+            let guard = at + egui::vec2(-dir * 0.4 * u, 0.4 * u);
+            let across = egui::vec2(0.3 * u, dir * 0.3 * u);
+            painter.line_segment([guard - across, guard + across], blade);
         }
     }
 }
@@ -369,7 +471,7 @@ fn finish_path(map: &mut HexMap, state: &mut HexViewState) {
 }
 
 /// The hex map editor's sidebar. `other_maps` are (id, name) of the campaign's other maps.
-pub fn hex_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut HexViewState, other_maps: &[(String, String)]) {
+pub fn hex_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut HexViewState, other_maps: &[(String, String)], monster_db: &MonsterDatabase) {
     let Some(map) = dungeon.hex_map.as_mut() else { return };
     ui.heading("Hex Map");
     egui::ComboBox::from_label("Hexes")
@@ -383,6 +485,7 @@ pub fn hex_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut HexView
         ui.label("Miles per hex:");
         ui.add(egui::DragValue::new(&mut map.miles_per_hex).range(0.1..=100.0).speed(0.1));
     });
+    sheep_total(ui, map);
     ui.horizontal(|ui| {
         ui.label(format!("{} hexes", map.hexes.len()));
         if ui.button("Grow").on_hover_text(format!("Add a ring of {} round the edge", state.brush.label().to_lowercase())).clicked() {
@@ -452,6 +555,12 @@ pub fn hex_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut HexView
     if !state.selected.is_empty() {
         ui.separator();
         hex_details(ui, map, state, other_maps, true);
+        if let [c] = state.selected[..] {
+            if let Some(hex) = map.hex(c).cloned() {
+                ui.add_space(4.0);
+                own_encounters_ui(ui, &mut dungeon.encounters, &dungeon.custom_monsters, monster_db, &hex, state, false);
+            }
+        }
     }
 
     // The selected path
@@ -484,9 +593,158 @@ pub fn hex_sidebar(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &mut HexView
             }
         }
     }
+
+    ui.separator();
+    random_table_ui(ui, map, &mut dungeon.encounters, &dungeon.custom_monsters, monster_db);
 }
 
-/// What's in the selected hexes, and their battle map. Editable fields only when `edit`.
+const FIGHT_TIP: &str = "Copy it onto this hex's battle map (making one if it has none) and open it there; \
+    the players stay on the hex map until you show them";
+
+/// A hex's own encounters: to edit and delete while building, to fight at the table.
+fn own_encounters_ui(
+    ui: &mut egui::Ui,
+    encounters: &mut Vec<Encounter>,
+    custom: &[CustomMonster],
+    db: &MonsterDatabase,
+    hex: &Hex,
+    state: &mut HexViewState,
+    at_table: bool,
+) {
+    let mut remove = None;
+    let mut any = false;
+    for e in encounters.iter().filter(|e| e.home_room_id == hex.id) {
+        if !any {
+            ui.strong(format!("Encounters in {}", hex.name()));
+            any = true;
+        }
+        ui.horizontal(|ui| {
+            ui.label(&e.name);
+            if at_table && ui.small_button("Fight").on_hover_text(FIGHT_TIP).clicked() {
+                state.request = Some(HexRequest::Fight { encounter: e.id.clone(), hex: hex.coord });
+            }
+            if ui.small_button("Edit").clicked() {
+                open_encounter_editor(ui.ctx(), &e.id);
+            }
+            if !at_table && ui.small_button("×").on_hover_text("Delete this encounter").clicked() {
+                remove = Some(e.id.clone());
+            }
+        });
+        ui.weak(monster_summary(e, db, custom));
+    }
+    if let Some(id) = remove {
+        encounters.retain(|e| e.id != id);
+    }
+    if !at_table
+        && ui.button("+ Encounter in this hex")
+            .on_hover_text("Always here, never rolled: a den, a camp, a guard post")
+            .clicked()
+    {
+        let e = Encounter::new(format!("{} encounter", hex.name()), hex.id.clone());
+        open_encounter_editor(ui.ctx(), &e.id);
+        encounters.push(e);
+    }
+}
+
+/// The map's random encounter table, to fill in while building.
+fn random_table_ui(ui: &mut egui::Ui, map: &mut HexMap, encounters: &mut Vec<Encounter>, custom: &[CustomMonster], db: &MonsterDatabase) {
+    map.sync_random(encounters);
+    let total = map.random_weight().max(1);
+    egui::CollapsingHeader::new(format!("Random encounters ({})", map.random_encounters.len()))
+        .id_salt("hex_random_encounters")
+        .default_open(true)
+        .show(ui, |ui| {
+            ui.weak("Could turn up anywhere on the map; roll for one at the table. A higher weight comes up more often.");
+            let mut remove = None;
+            for entry in &mut map.random_encounters {
+                let Some(e) = encounters.iter().find(|e| e.id == entry.encounter) else { continue };
+                ui.horizontal(|ui| {
+                    ui.add(egui::DragValue::new(&mut entry.weight).range(1..=100).speed(0.1)).on_hover_text("Weight");
+                    ui.label(&e.name);
+                    ui.weak(format!("{:.0}%", 100.0 * entry.weight as f32 / total as f32));
+                    if ui.small_button("Edit").clicked() {
+                        open_encounter_editor(ui.ctx(), &e.id);
+                    }
+                    if ui.small_button("×").on_hover_text("Delete this encounter").clicked() {
+                        remove = Some(e.id.clone());
+                    }
+                });
+                ui.weak(monster_summary(e, db, custom));
+            }
+            if let Some(id) = remove {
+                encounters.retain(|e| e.id != id);
+            }
+            if ui.button("+ Random encounter").clicked() {
+                let e = Encounter::new("Random encounter".into(), String::new());
+                open_encounter_editor(ui.ctx(), &e.id);
+                encounters.push(e);
+            }
+        });
+    map.sync_random(encounters);
+}
+
+/// At the table: roll on the random table, and what came up.
+fn random_roll_ui(
+    ui: &mut egui::Ui,
+    map: &mut HexMap,
+    encounters: &[Encounter],
+    custom: &[CustomMonster],
+    db: &MonsterDatabase,
+    state: &mut HexViewState,
+) {
+    map.sync_random(encounters);
+    ui.strong("Random encounters");
+    if map.random_encounters.is_empty() {
+        ui.weak("None on this map yet: add them while editing it.");
+        return;
+    }
+    // Where the party is; failing that, the selected hex
+    let target = map.party.or(state.selected.first().copied()).filter(|c| map.hex(*c).is_some());
+    ui.horizontal(|ui| {
+        let roll = ui.add_enabled(target.is_some(), egui::Button::new(if map.rolled.is_some() { "Roll again" } else { "Roll" }))
+            .on_hover_text("Roll on the map's table for the party's hex")
+            .on_disabled_hover_text("Put the party on the map, or select a hex, first");
+        if roll.clicked() {
+            if let Some(c) = target {
+                map.roll_random(c);
+            }
+        }
+        ui.weak(format!("{} on the table", map.random_encounters.len()));
+    });
+    let Some(rolled) = map.rolled.clone() else { return };
+    let Some(e) = encounters.iter().find(|e| e.id == rolled.encounter) else { return };
+    let place = map.hex(rolled.hex).map_or_else(|| "a hex that's gone".to_string(), |h| h.name());
+    ui.group(|ui| {
+        ui.strong(format!("{} — in {}", e.name, place));
+        ui.weak(monster_summary(e, db, custom));
+        if !e.notes.trim().is_empty() {
+            ui.label(e.notes.trim());
+        }
+        ui.horizontal(|ui| {
+            if ui.button("Fight").on_hover_text(FIGHT_TIP).clicked() {
+                state.request = Some(HexRequest::Fight { encounter: e.id.clone(), hex: rolled.hex });
+            }
+            if ui.button("Edit").clicked() {
+                open_encounter_editor(ui.ctx(), &e.id);
+            }
+            if ui.button("Clear").on_hover_text("Nothing comes of it").clicked() {
+                map.rolled = None;
+            }
+        });
+    });
+}
+
+/// The map's sheep, and how many hexes they're spread over.
+fn sheep_total(ui: &mut egui::Ui, map: &HexMap) {
+    let total = map.total_sheep();
+    if total > 0 {
+        let hexes = map.hexes.iter().filter(|h| h.sheep > 0).count();
+        ui.label(format!("{} sheep in {} {}", total, hexes, if hexes == 1 { "hex" } else { "hexes" }));
+    }
+}
+
+/// What's in the selected hexes, and their battle map. Editable fields only when
+/// `edit`, except the sheep, which are counted at the table too.
 fn hex_details(ui: &mut egui::Ui, map: &mut HexMap, state: &mut HexViewState, other_maps: &[(String, String)], edit: bool) {
     let many = state.selected.len() > 1;
     let first = state.selected[0];
@@ -536,6 +794,23 @@ fn hex_details(ui: &mut egui::Ui, map: &mut HexMap, state: &mut HexViewState, ot
         if feature != hex.feature {
             each(map, &|h| h.feature = feature);
         }
+    }
+
+    // Sheep: counted per hex; a selection of several shows their total
+    if many {
+        let total: u32 = selected.iter().filter_map(|c| map.hex(*c)).map(|h| h.sheep).sum();
+        ui.label(format!("Sheep: {} in these hexes", total));
+    } else if let Some(hex) = map.hex_mut(first) {
+        ui.horizontal(|ui| {
+            ui.label("Sheep:");
+            if ui.small_button("−").clicked() {
+                hex.sheep = hex.sheep.saturating_sub(1);
+            }
+            ui.add(egui::DragValue::new(&mut hex.sheep).range(0..=100_000).speed(0.2));
+            if ui.small_button("+").clicked() {
+                hex.sheep += 1;
+            }
+        });
     }
 
     // Battle map: shared by the selection if they all have the same one
@@ -615,26 +890,35 @@ pub fn hex_presentation_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &m
             map.move_party(c);
         }
     }
+    // Remember which hex was right-clicked, so the menu stays on it as the pointer moves
     if response.secondary_clicked() {
+        state.menu_hex = hover;
         if let Some(c) = hover {
-            if !map.revealed.remove(&c) {
-                map.revealed.insert(c);
-            }
+            state.selected = vec![c];
         }
     }
 
     state.cache.paint(&painter, &t, map, &dungeon.theme, false);
-    // What the players haven't seen
+    // Darkest where the players haven't seen, lighter where they've only looked
     for hex in &map.hexes {
-        if !map.is_revealed(hex.coord) {
-            painter.add(egui::Shape::convex_polygon(
-                hex_screen(map, hex.coord, 1.0, &t),
-                egui::Color32::from_rgba_unmultiplied(0, 0, 0, 110),
-                egui::Stroke::NONE,
-            ));
-        }
+        let alpha = match map.sight(hex.coord) {
+            HexSight::Hidden => 110,
+            HexSight::Observed => 45,
+            HexSight::Explored => continue,
+        };
+        painter.add(egui::Shape::convex_polygon(
+            hex_screen(map, hex.coord, 1.0, &t),
+            egui::Color32::from_rgba_unmultiplied(0, 0, 0, alpha),
+            egui::Stroke::NONE,
+        ));
     }
     draw_labels(&painter, map, &t, &dungeon.theme, |_| true);
+    draw_sheep(&painter, map, &t, &dungeon.theme, |_| true);
+    draw_encounter_marks(&painter, map, &t, &dungeon.theme, &dungeon.encounters);
+    if let Some(hex) = hover.and_then(|c| map.hex(c)) {
+        let sight = map.sight(hex.coord).label().to_lowercase();
+        response.clone().on_hover_text_at_pointer(format!("{} ({})", hover_text(hex, &dungeon.encounters), sight));
+    }
     for &c in &state.selected {
         outline(&painter, map, c, &t, egui::Stroke::new(2.5_f32, COLOR_SELECTION));
     }
@@ -643,6 +927,82 @@ pub fn hex_presentation_view(ui: &mut egui::Ui, dungeon: &mut Dungeon, state: &m
     }
     let party_at = if state.dragging_party { hover.or(map.party) } else { map.party };
     draw_party(&painter, map, &t, party_at);
+
+    response.context_menu(|ui| hex_menu(ui, map, &dungeon.encounters, state));
+}
+
+/// The right-click menu on a hex at the table.
+fn hex_menu(ui: &mut egui::Ui, map: &mut HexMap, encounters: &[Encounter], state: &mut HexViewState) {
+    let Some(c) = state.menu_hex else {
+        ui.close_menu();
+        return;
+    };
+    let Some(hex) = map.hex(c) else {
+        ui.close_menu();
+        return;
+    };
+    let sight = map.sight(c);
+    ui.label(format!("{} — {} ({})", hex.name(), hex.terrain.label(), sight.label().to_lowercase()));
+    let battle_map = hex.battle_map.clone();
+    ui.separator();
+
+    if map.party != Some(c) && ui.button("Move party here").clicked() {
+        map.move_party(c);
+        ui.close_menu();
+    }
+    if ui.button(format!("Observe from here ({} hexes)", state.lookout_radius))
+        .on_hover_text("What can be seen from this hex, say from a watch tower; the sidebar sets how far")
+        .clicked()
+    {
+        map.observe_from(c, state.lookout_radius);
+        ui.close_menu();
+    }
+    ui.separator();
+
+    for (to, text) in [(HexSight::Observed, "Observe"), (HexSight::Explored, "Explore"), (HexSight::Hidden, "Hide")] {
+        if sight != to && ui.button(text).clicked() {
+            map.set_sight(c, to);
+            ui.close_menu();
+        }
+    }
+    ui.separator();
+
+    // Encounters: the hex's own, and a roll on the map's table
+    let own: Vec<(String, String)> = map.hex(c)
+        .map(|hex| hex_encounters(hex, encounters).map(|e| (e.id.clone(), e.name.clone())).collect())
+        .unwrap_or_default();
+    for (id, name) in own {
+        if ui.button(format!("Fight: {}", name)).on_hover_text(FIGHT_TIP).clicked() {
+            state.request = Some(HexRequest::Fight { encounter: id, hex: c });
+            ui.close_menu();
+        }
+    }
+    if !map.random_encounters.is_empty() && ui.button("Roll a random encounter here").clicked() {
+        map.roll_random(c);
+        ui.close_menu();
+    }
+    ui.separator();
+
+    // Stays open, for counting several in or out
+    if let Some(hex) = map.hex_mut(c) {
+        ui.horizontal(|ui| {
+            ui.label("Sheep:");
+            if ui.small_button("−").clicked() {
+                hex.sheep = hex.sheep.saturating_sub(1);
+            }
+            ui.add(egui::DragValue::new(&mut hex.sheep).range(0..=100_000).speed(0.2));
+            if ui.small_button("+").clicked() {
+                hex.sheep += 1;
+            }
+        });
+    }
+    if let Some(id) = battle_map {
+        ui.separator();
+        if ui.button("Open battle map").on_hover_text("The players stay on the hex map until you show them this one").clicked() {
+            state.request = Some(HexRequest::OpenMap(id));
+            ui.close_menu();
+        }
+    }
 }
 
 /// The DM's sidebar while presenting a hex map.
@@ -655,45 +1015,71 @@ pub fn hex_presentation_sidebar(
     player_view_state: &mut crate::ui::player_view::PlayerViewState,
     player_viewport_open: &mut bool,
     other_maps: &[(String, String)],
+    monster_db: &MonsterDatabase,
 ) {
     let Some(map) = dungeon.hex_map.as_mut() else { return };
     ui.heading("Hex Map");
-    match map.party.and_then(|c| map.hex(c)) {
+    let party_hex = map.party.and_then(|c| map.hex(c)).cloned();
+    match &party_hex {
         Some(hex) => ui.label(format!("The party is in {} ({}).", hex.name(), hex.terrain.label().to_lowercase())),
         None => ui.label("The party isn't on the map yet: double-click a hex to put it there."),
     };
-    ui.weak(format!("Double-click a hex or drag the banner to move the party; each hex is {} miles. Right-click a hex to reveal or hide it.", map.miles_per_hex));
+    if let Some(hex) = &party_hex {
+        own_encounters_ui(ui, &mut dungeon.encounters, &dungeon.custom_monsters, monster_db, hex, state, true);
+    }
+    ui.weak(format!(
+        "Double-click a hex or drag the banner to move the party; each hex is {} miles. \
+         Hexes the party enters are explored, those round it observed (shaded lighter). \
+         Right-click a hex for a menu: move the party, observe from it, hide, observe or explore it, count its sheep.",
+        map.miles_per_hex
+    ));
     ui.horizontal(|ui| {
-        ui.label("Reveal around the party:");
+        ui.label("Observe around the party:");
         ui.add(egui::Slider::new(&mut map.reveal_radius, 0..=3).suffix(" hexes"));
     });
     ui.horizontal(|ui| {
-        if ui.button("Reveal all").clicked() {
+        if ui.button("Reveal all").on_hover_text("Observe every hex; explored ones stay explored").clicked() {
             map.revealed = map.hexes.iter().map(|h| h.coord).collect();
         }
         if ui.button("Hide all").clicked() {
-            map.revealed.clear();
+            map.hide_all();
         }
     });
+    sheep_total(ui, map);
+
+    ui.separator();
+    random_roll_ui(ui, map, &dungeon.encounters, &dungeon.custom_monsters, monster_db, state);
 
     state.selected.retain(|c| map.hex(*c).is_some());
     if let Some(&c) = state.selected.first() {
         ui.separator();
         state.selected.truncate(1);
         hex_details(ui, map, state, other_maps, false);
+        if map.party != Some(c) && ui.button("Move party here").clicked() {
+            map.move_party(c);
+        }
         ui.horizontal(|ui| {
-            if map.party != Some(c) && ui.button("Move party here").clicked() {
-                map.move_party(c);
+            ui.label("Players:");
+            let mut sight = map.sight(c);
+            for s in HexSight::ALL {
+                ui.selectable_value(&mut sight, s, s.label());
             }
-            let revealed = map.is_revealed(c);
-            if ui.button(if revealed { "Hide from players" } else { "Reveal to players" }).clicked() {
-                if revealed {
-                    map.revealed.remove(&c);
-                } else {
-                    map.revealed.insert(c);
-                }
+            if sight != map.sight(c) {
+                map.set_sight(c, sight);
             }
         });
+        ui.horizontal(|ui| {
+            if ui.button("Observe from here").on_hover_text("What can be seen from this hex, say from a watch tower or hilltop").clicked() {
+                map.observe_from(c, state.lookout_radius);
+            }
+            ui.add(egui::Slider::new(&mut state.lookout_radius, 1..=6).suffix(" hexes"));
+        });
+        // The party's hex shows its encounters above already
+        if map.party != Some(c) {
+            if let Some(hex) = map.hex(c).cloned() {
+                own_encounters_ui(ui, &mut dungeon.encounters, &dungeon.custom_monsters, monster_db, &hex, state, true);
+            }
+        }
     }
 
     ui.separator();
@@ -702,6 +1088,7 @@ pub fn hex_presentation_sidebar(
         *player_viewport_open = !*player_viewport_open;
     }
     ui.checkbox(&mut presentation.show_labels_player, "Show labels to players");
+    ui.checkbox(&mut presentation.show_sheep_player, "Show sheep to players");
     ui.checkbox(&mut player_view_state.locked, "Lock player view (no scroll/pan)");
     ui.horizontal(|ui| {
         if ui.button("Fit to what they've seen").clicked() {
@@ -724,6 +1111,7 @@ pub fn player_hex_view(
     dungeon: &Dungeon,
     map: &HexMap,
     show_labels: bool,
+    show_sheep: bool,
     state: &mut crate::ui::player_view::PlayerViewState,
 ) {
     let rect = response.rect;
@@ -740,6 +1128,9 @@ pub fn player_hex_view(
     state.hex_cache.paint(painter, &t, map, &dungeon.theme, true);
     if show_labels {
         draw_labels(painter, map, &t, &dungeon.theme, |c| map.is_revealed(c));
+    }
+    if show_sheep {
+        draw_sheep(painter, map, &t, &dungeon.theme, |c| map.is_revealed(c));
     }
     draw_party(painter, map, &t, map.party);
 }

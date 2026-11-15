@@ -54,6 +54,8 @@ pub struct PresentationState {
     pub doors_open: HashSet<String>,
     /// Whether room labels are shown in the player view.
     pub show_labels_player: bool,
+    /// Whether a hex map's sheep counts are shown in the player view.
+    pub show_sheep_player: bool,
     /// Runtime positions of encounters: encounter_id -> current_room_id.
     /// Initialized from encounter home rooms, mutated by tick.
     pub encounter_positions: HashMap<String, String>,
@@ -137,6 +139,7 @@ impl PresentationState {
             room_visibility,
             doors_open: session.doors_open.clone(),
             show_labels_player: false,
+            show_sheep_player: true,
             encounter_positions,
             combat_tracker: None,
             party_room: session.party_room.clone(),

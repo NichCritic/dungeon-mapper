@@ -1,7 +1,7 @@
 use crate::data::MonsterDatabase;
 use crate::history::UndoHistory;
 use crate::model::combat_stats::CombatStatsCache;
-use crate::model::{Campaign, Dungeon};
+use crate::model::{Campaign, CustomMonster, Dungeon, Encounter, EncounterType, HexCoord, MonsterRef};
 use crate::presentation::PresentationState;
 use crate::server::PresentationServer;
 use crate::updater;
@@ -1704,7 +1704,11 @@ impl DungeonApp {
                     ui.label("Maps:");
                     let active = self.campaign.active_map;
                     let mut switch_to = None;
+                    let battle_maps = self.battle_map_ids();
                     for (i, map) in self.campaign.maps.iter().enumerate() {
+                        if !self.listed_in_top_bar(i, &battle_maps) {
+                            continue;
+                        }
                         let label = if i == active {
                             format!("> {}", map.name)
                         } else {
@@ -1783,16 +1787,35 @@ impl DungeonApp {
         self.annotation_state.panel_rects.push(menu_response.response.rect);
     }
 
-    /// The map tab strip, when the campaign has several maps.
+    /// Ids of the maps that are a hex's battle map. They live on their hex map, so
+    /// the top bar leaves them out. The open map's links are read from the open copy.
+    fn battle_map_ids(&self) -> std::collections::HashSet<String> {
+        self.campaign.maps.iter().enumerate()
+            .map(|(i, m)| if i == self.campaign.active_map { &self.dungeon } else { m })
+            .filter_map(|m| m.hex_map.as_ref())
+            .flat_map(|h| h.hexes.iter().filter_map(|hex| hex.battle_map.clone()))
+            .collect()
+    }
+
+    /// Whether the map at `i` belongs in the top bar's lists: not a battle map,
+    /// unless it's the open one or the one the players are looking at.
+    fn listed_in_top_bar(&self, i: usize, battle_maps: &std::collections::HashSet<String>) -> bool {
+        let player = self.presenting && self.player_map_index == Some(i);
+        i == self.campaign.active_map || player || !battle_maps.contains(&self.campaign.maps[i].id)
+    }
+
+    /// The map tab strip, when the campaign has several maps (battle maps aside).
     fn show_map_tabs(&mut self, ctx: &egui::Context) {
-        // Map tab strip (shown when campaign has multiple maps)
-        if self.campaign.maps.len() > 1 {
+        let battle_maps = self.battle_map_ids();
+        let listed: Vec<usize> = (0..self.campaign.maps.len()).filter(|&i| self.listed_in_top_bar(i, &battle_maps)).collect();
+        if listed.len() > 1 {
             let mut switch_to = None;
             let mut push_to_players = false;
             egui::TopBottomPanel::top("map_tabs").show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     let player_idx = self.player_map_index.unwrap_or(self.campaign.active_map);
-                    for (i, map) in self.campaign.maps.iter().enumerate() {
+                    for &i in &listed {
+                        let map = &self.campaign.maps[i];
                         let is_active = i == self.campaign.active_map;
                         let is_player = self.presenting && i == player_idx;
                         let label = if is_player && !is_active {
@@ -1876,6 +1899,7 @@ impl DungeonApp {
                 }
             }
             Some(hex_view::HexRequest::CreateBattleMap) => self.create_battle_map(),
+            Some(hex_view::HexRequest::Fight { encounter, hex }) => self.fight_on_battle_map(&encounter, hex),
             None => {}
         }
     }
@@ -1884,18 +1908,59 @@ impl DungeonApp {
     /// While presenting, the players stay on the hex map until it's shown to them.
     fn create_battle_map(&mut self) {
         let coords = self.hex_state.selected.clone();
-        let Some(hex_map) = &mut self.dungeon.hex_map else { return };
-        let Some(first) = coords.first().and_then(|c| hex_map.hex(*c)) else { return };
+        if let Some(idx) = self.add_battle_map(&coords) {
+            self.change_map(idx);
+        }
+    }
+
+    /// Add an outdoor battle map for these hexes to the campaign and link them to it,
+    /// without opening it. Returns its index.
+    fn add_battle_map(&mut self, coords: &[HexCoord]) -> Option<usize> {
+        let hex_map = self.dungeon.hex_map.as_mut()?;
+        let first = coords.first().and_then(|c| hex_map.hex(*c))?;
         let name = if coords.len() == 1 { first.name() } else { first.terrain.label().to_string() };
         let mut map = Dungeon::new(format!("{} (battle)", name));
         map.theme.ground = first.terrain.battle_ground();
-        for c in &coords {
+        for c in coords {
             if let Some(hex) = hex_map.hex_mut(*c) {
                 hex.battle_map = Some(map.id.clone());
             }
         }
         self.campaign.maps.push(map);
-        self.change_map(self.campaign.maps.len() - 1);
+        Some(self.campaign.maps.len() - 1)
+    }
+
+    /// Copy an encounter of the hex map onto a hex's battle map, making the battle map
+    /// if the hex has none, and open it there. The copy brings the custom monsters it
+    /// uses; it starts in the battle map's first area, if it has any yet.
+    fn fight_on_battle_map(&mut self, encounter_id: &str, at: HexCoord) {
+        let Some(enc) = self.dungeon.encounters.iter().find(|e| e.id == encounter_id).cloned() else { return };
+        let Some(hex_map) = self.dungeon.hex_map.as_mut() else { return };
+        let Some(hex) = hex_map.hex(at) else { return };
+        let linked = hex.battle_map.as_ref().and_then(|id| self.campaign.maps.iter().position(|m| m.id == *id));
+        if hex_map.rolled.as_ref().is_some_and(|r| r.encounter == encounter_id) {
+            hex_map.rolled = None;
+        }
+        let customs: Vec<CustomMonster> = enc.monsters.iter()
+            .filter_map(|em| match &em.monster_ref {
+                MonsterRef::Custom { id } | MonsterRef::Merged { id } => self.dungeon.custom_monsters.iter().find(|c| c.id == *id).cloned(),
+                MonsterRef::Base { .. } => None,
+            })
+            .collect();
+        let Some(idx) = linked.or_else(|| self.add_battle_map(&[at])) else { return };
+        let battle = &mut self.campaign.maps[idx];
+        for c in customs {
+            if !battle.custom_monsters.iter().any(|m| m.id == c.id) {
+                battle.custom_monsters.push(c);
+            }
+        }
+        battle.encounters.push(Encounter {
+            id: uuid::Uuid::new_v4().to_string(),
+            encounter_type: EncounterType::Static,
+            home_room_id: battle.graph.rooms.first().map(|r| r.id.clone()).unwrap_or_default(),
+            ..enc
+        });
+        self.change_map(idx);
     }
 
     /// Open another map, carrying on presenting if the DM is: the players keep seeing
@@ -2252,6 +2317,7 @@ impl DungeonApp {
                                     &mut self.player_view_state,
                                     &mut self.player_viewport_open,
                                     &other_maps,
+                                    &self.monster_db,
                                 );
                             } else {
                                 presentation_view::presentation_sidebar(
@@ -2331,7 +2397,7 @@ impl DungeonApp {
                                 );
                             }
                             Tab::Hex => {
-                                hex_view::hex_sidebar(ui, &mut self.dungeon, &mut self.hex_state, &other_maps);
+                                hex_view::hex_sidebar(ui, &mut self.dungeon, &mut self.hex_state, &other_maps, &self.monster_db);
                             }
                             Tab::Styled => {
                                 styled_view::styled_sidebar(

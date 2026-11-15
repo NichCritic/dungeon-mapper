@@ -4,7 +4,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::model::{HexCoord, HexMap, HexPathKind, HexTerrain, Theme, HEX_SIZE};
+use crate::model::{HexCoord, HexMap, HexPathKind, HexSight, HexTerrain, Theme, HEX_SIZE};
 use crate::render::decor::{draw_decor, draw_hex_glyph, DecorPalette, GlyphSink, HexGlyph, MapRendererSink};
 use crate::render::traits::MapRenderer;
 
@@ -84,8 +84,19 @@ pub fn render_hex_map(r: &mut dyn MapRenderer, map: &HexMap, theme: &Theme, play
         }
     }
 
+    // For the players, hexes only seen from afar are shaded
+    if players {
+        let ink = theme.wall_color;
+        for &c in visible.iter().filter(|c| map.sight(**c) == HexSight::Observed) {
+            r.fill_polygon(&o.corners(c, 1.0), [ink[0], ink[1], ink[2], OBSERVED_SHADE]);
+        }
+    }
+
     render_grid(r, map, &visible, theme.wall_color);
 }
+
+/// Opacity of the ink wash over hexes the players have only observed.
+pub const OBSERVED_SHADE: u8 = 46;
 
 /// The party's token: a white disc with a banner on it.
 pub fn draw_party_token(sink: &mut dyn GlyphSink, cx: f32, cy: f32, radius: f32) {
@@ -324,6 +335,22 @@ mod tests {
         assert!(ink(&players) * 3 < ink(&dm));
     }
 
+    #[test]
+    fn players_see_observed_hexes_shaded() {
+        let mut map = HexMap::with_radius(1, HexTerrain::Plains);
+        map.move_party(HexCoord::new(0, 0));
+        let img = render(&map, true);
+        let at = |c: HexCoord| {
+            // Between the centre and a corner, clear of the marks and the party
+            let (x, y) = map.orientation.center(c);
+            let (px, py) = ((x + HEX_SIZE * 0.3 - img.offset_x) * 2.0, (y + HEX_SIZE * 0.45 - img.offset_y) * 2.0);
+            img.image.get_pixel(px as u32, py as u32).0
+        };
+        let explored = at(HexCoord::new(0, 0));
+        let observed = at(HexCoord::new(1, 0));
+        assert!(observed[0] < explored[0], "observed {observed:?} should be darker than explored {explored:?}");
+    }
+
     /// Renders the sample map to a PNG to look at. Run with
     /// `cargo test hex_contact_sheet -- --ignored`; `HEX_SHEET_OUT` sets the path.
     #[test]
@@ -334,6 +361,13 @@ mod tests {
             .unwrap_or_else(|_| std::env::temp_dir().join("hex_contact_sheet.png"));
         let mut map = sample();
         render(&map, false).image.save(&out).unwrap();
+        // What the players see after a walk: explored hexes clear, observed ones shaded
+        let mut walked = map.clone();
+        for c in [HexCoord::new(-2, 1), HexCoord::new(-1, 1), HexCoord::new(0, 0)] {
+            walked.move_party(c);
+        }
+        walked.observe_from(HexCoord::new(3, -3), 2);
+        render(&walked, true).image.save(out.with_extension("players.png")).unwrap();
         map.orientation = HexOrientation::PointyTop;
         render(&map, false).image.save(out.with_extension("pointy.png")).unwrap();
     }

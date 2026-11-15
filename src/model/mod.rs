@@ -30,4 +30,4 @@ pub use theme::*;
 pub use token::*;
 pub use dungeon::{Dungeon, LightSource, SessionState};
 pub use decor_light::{DecorLight, DecorLightSetting, DecorLighting};
-pub use hex::{Hex, HexCoord, HexFeature, HexMap, HexOrientation, HexPath, HexPathKind, HexTerrain, HEX_SIZE};
+pub use hex::{Hex, HexCoord, HexFeature, HexMap, HexOrientation, HexPath, HexPathKind, HexSight, HexTerrain, HEX_SIZE};

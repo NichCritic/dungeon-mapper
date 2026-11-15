@@ -61,6 +61,7 @@ fn player_input_hash(
     }
     dungeon.ambient_light.to_bits().hash(&mut h);
     presentation.show_labels_player.hash(&mut h);
+    presentation.show_sheep_player.hash(&mut h);
     presentation.los_lighting.hash(&mut h);
     presentation.current_floor.hash(&mut h);
     presentation.ghost_lower_floors.hash(&mut h);
@@ -94,7 +95,7 @@ pub fn player_viewport(
 
         if let Some(map) = &dungeon.hex_map {
             state.canvas_size = rect.size();
-            crate::ui::hex_view::player_hex_view(&response, &painter, dungeon, map, presentation.show_labels_player, state);
+            crate::ui::hex_view::player_hex_view(&response, &painter, dungeon, map, presentation.show_labels_player, presentation.show_sheep_player, state);
             return;
         }
 
